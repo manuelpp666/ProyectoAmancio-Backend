@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text  # Para escribir SQL puro
 from app.db.database import get_db # Ajusta la ruta según tu carpeta
+from app.modules.users.docente.router import router as docente_router
 
 app = FastAPI()
 
@@ -19,6 +20,8 @@ app.add_middleware(
     allow_methods=["*"],              # Permite todos los métodos (GET, POST, etc.)
     allow_headers=["*"],              # Permite todos los encabezados
 )
+
+app.include_router(docente_router)
 
 @app.get("/")
 def check_db_connection(db: Session = Depends(get_db)):
