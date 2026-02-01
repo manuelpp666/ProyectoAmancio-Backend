@@ -51,3 +51,5 @@ Define que la tabla alumnos tiene una columna id, nombre y correo.
 1. pip install fastapi "uvicorn[standard]" sqlalchemy pymysql cryptography alembic python-dotenv pydantic-settings python-multipart
 
 pip install "pydantic[email]"
+
+pip install "passlib[bcrypt]"

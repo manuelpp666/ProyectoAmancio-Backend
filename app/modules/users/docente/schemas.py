@@ -15,10 +15,14 @@ class DocenteCreate(DocenteBase):
     dni: DniStr
     telefono: TelefonoStr
 
+class UsuarioEnDocente(BaseModel):
+    activo: bool
+    model_config = ConfigDict(from_attributes=True)
+
 class DocenteResponse(DocenteBase):
     id_docente: int
     dni: str
     telefono: str
-
+    usuario: UsuarioEnDocente | None = None
     # Pydantic V2 usa model_config en lugar de class Config
     model_config = ConfigDict(from_attributes=True)
