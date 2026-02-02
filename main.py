@@ -3,11 +3,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text  # Para escribir SQL puro
 from app.db.database import get_db # Ajusta la ruta según tu carpeta
-from app.modules.users.docente.router import router as docente_router
+from app.modules.users import router as usuario_router 
 from app.modules.users.alumno import router as alumno_router
+from app.modules.users.familiar import router as familiar_router
 from app.modules.users.docente import router as docente_router
+
+# Resto de módulos
 from app.modules.academic import router as academic_router
+from app.modules.enrollment import router as enrollment_router
 from app.modules.finance import router as finance_router
+from app.modules.management import router as management_router
+from app.modules.virtual import router as virtual_router
+from app.modules.behavior import router as behavior_router
 from app.modules.web import router as web_router
 
 app = FastAPI()
@@ -26,10 +33,17 @@ app.add_middleware(
     allow_headers=["*"],              # Permite todos los encabezados
 )
 
+# Incluir Rutas
+app.include_router(usuario_router.router)
 app.include_router(alumno_router.router)
-app.include_router(docente_router)
+app.include_router(familiar_router.router)
+app.include_router(docente_router.router)
 app.include_router(academic_router.router)
+app.include_router(enrollment_router.router)
 app.include_router(finance_router.router)
+app.include_router(management_router.router)
+app.include_router(virtual_router.router)
+app.include_router(behavior_router.router)
 app.include_router(web_router.router)
 
 @app.get("/")

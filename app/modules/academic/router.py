@@ -1,16 +1,18 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from . import models, schemas # Crea los schemas correspondientes
+from . import models, schemas
 
 router = APIRouter(prefix="/academic", tags=["Académico"])
 
-@router.post("/secciones/", response_model=schemas.SeccionResponse)
-def crear_seccion(seccion: schemas.SeccionCreate, db: Session = Depends(get_db)):
-    nuevo = models.Seccion(**seccion.dict())
+@router.post("/anios/", response_model=schemas.AnioEscolarResponse)
+def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db)):
+    nuevo = models.AnioEscolar(**anio.dict())
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
     return nuevo
 
-# Puedes agregar endpoints para Grados, Cursos, etc. aquí mismo o separar en sub-routers
+@router.get("/secciones/", response_model=list[schemas.SeccionResponse])
+def listar_secciones(db: Session = Depends(get_db)):
+    return db.query(models.Seccion).all()
