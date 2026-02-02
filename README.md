@@ -1,3 +1,4 @@
+-- Idea base
 app/
 ├── core/                # Seguridad (JWT), config de entorno, constantes.
 ├── db/                  # Conexión a DB y base de los modelos.
@@ -15,7 +16,20 @@ app/
 │   └── campus/          # Material de clases, tareas, notas
 └── main.py              # Registro de todos los módulos
 
-
+-- Estructura v1.0
+app/
+└── modules/
+    ├── users/               <-- YA EXISTE (Expandir)
+    │   ├── usuario/         (Manejo de login y usuarios base)
+    │   ├── docente/         (Ya lo tienes)
+    │   ├── alumno/          (Nuevo)
+    │   └── familiar/        (Nuevo)
+    ├── academic/            <-- NUEVO (Todo lo académico: Grados, Cursos, Secciones)
+    ├── enrollment/          <-- NUEVO (Matrícula y Exoneraciones)
+    ├── finance/             <-- NUEVO (Pagos y Trámites)
+    ├── management/          <-- NUEVO (Notas, Asistencia, Carga Académica)
+    ├── behavior/            <-- NUEVO (Conducta y Psicología)
+    └── web/                 <-- NUEVO (Noticias y Eventos)
 
 --- Resumen simple de lo que hace cada parte (Hecho por Gemini)
 1. El Router (router.py) - El Mesero
