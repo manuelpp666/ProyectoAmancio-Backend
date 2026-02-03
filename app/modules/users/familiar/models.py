@@ -14,4 +14,4 @@ class Familiar(Base):
     direccion = Column(String(300))
     tipo_parentesco = Column(String(50))
 
-    usuario = relationship("app.modules.users.usuario.models.Usuario", back_populates="familiar")
+    usuario = relationship("Usuario")

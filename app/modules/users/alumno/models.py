@@ -20,6 +20,6 @@ class Alumno(Base):
     estado_ingreso = Column(String(20), default='POSTULANTE')
 
     # Relaciones
-    usuario = relationship("app.modules.users.usuario.models.Usuario", back_populates="alumno")
+    usuario = relationship("Usuario")
     # matriculas = relationship("app.modules.enrollment.models.Matricula", back_populates="alumno") 
     # pagos = relationship("app.modules.finance.models.Pago", back_populates="alumno")

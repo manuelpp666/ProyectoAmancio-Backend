@@ -1,6 +1,12 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import date
+
+# Esquema auxiliar para la relación (opcional, igual que en Docente)
+class UsuarioEnAlumno(BaseModel):
+    activo: bool
+    # Puedes agregar username u otros campos aquí
+    model_config = ConfigDict(from_attributes=True)
 
 class AlumnoBase(BaseModel):
     dni: str
@@ -16,11 +22,14 @@ class AlumnoBase(BaseModel):
     estado_ingreso: str = 'POSTULANTE'
 
 class AlumnoCreate(AlumnoBase):
-    id_usuario: Optional[int] = None # Se puede crear sin usuario al inicio (postulante)
+    id_usuario: Optional[int] = None
 
 class AlumnoResponse(AlumnoBase):
     id_alumno: int
     id_usuario: Optional[int] = None
     
-    class Config:
-        from_attributes = True
+    # IMPORTANTE: Agregar la relación si quieres ver datos del usuario
+    usuario: Optional[UsuarioEnAlumno] = None 
+
+    # Usar model_config para Pydantic V2
+    model_config = ConfigDict(from_attributes=True)

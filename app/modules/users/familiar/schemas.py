@@ -1,5 +1,9 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
+
+class UsuarioEnFamiliar(BaseModel):
+    activo: bool
+    model_config = ConfigDict(from_attributes=True)
 
 class FamiliarBase(BaseModel):
     dni: str
@@ -15,6 +19,6 @@ class FamiliarCreate(FamiliarBase):
 
 class FamiliarResponse(FamiliarBase):
     id_familiar: int
-    id_usuario: Optional[int]
-    class Config:
-        from_attributes = True
+    usuario: UsuarioEnFamiliar | None = None
+    # Pydantic V2 usa model_config en lugar de class Config
+    model_config = ConfigDict(from_attributes=True)
