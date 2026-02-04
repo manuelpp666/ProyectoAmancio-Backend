@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from app.db.database import Base
 
@@ -14,6 +14,8 @@ class Docente(Base):
     nombres = Column(String(250), nullable=False)
     apellidos = Column(String(250), nullable=False)
     especialidad = Column(String(100), nullable=True)
+    descripcion = Column(Text, nullable=True) 
+    url_perfil = Column(String(255), nullable=True)
     telefono = Column(String(9))
     email = Column(String(100))
 

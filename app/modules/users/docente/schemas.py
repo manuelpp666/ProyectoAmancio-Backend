@@ -1,11 +1,14 @@
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from app.core.util.utils import DniStr, TelefonoStr
+from typing import Optional
 
 
 class DocenteBase(BaseModel):
     nombres: str = Field(..., max_length=250)
     apellidos: str = Field(..., max_length=250)
     especialidad: str | None = Field(default=None, max_length=100)
+    descripcion: Optional[str] = None
+    url_perfil: Optional[str] = Field(default=None, max_length=255)
     email: EmailStr
     id_usuario: int | None = None
 
