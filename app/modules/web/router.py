@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from app.db.database import get_db
 from . import models, schemas
+from sqlalchemy import or_
 
 router = APIRouter(prefix="/web", tags=["Web Institucional"])
 
@@ -23,8 +24,22 @@ def crear_noticia(noticia: schemas.NoticiaCreate, db: Session = Depends(get_db))
         )
 
 @router.get("/noticias/", response_model=List[schemas.NoticiaResponse])
-def listar_noticias(db: Session = Depends(get_db)):
-    return db.query(models.Noticia).filter(models.Noticia.activo == True).all()
+def listar_noticias(search: str = None, db: Session = Depends(get_db)):
+    """
+    Lista noticias activas con filtro opcional por título o contenido.
+    """
+    query = db.query(models.Noticia).filter(models.Noticia.activo == True)
+
+    if search:
+        search_filter = f"%{search}%"
+        query = query.filter(
+            or_(
+                models.Noticia.titulo.ilike(search_filter),
+                models.Noticia.contenido.ilike(search_filter)
+            )
+        )
+    
+    return query.all()
 
 @router.get("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse)
 def obtener_noticia(noticia_id: int, db: Session = Depends(get_db)):

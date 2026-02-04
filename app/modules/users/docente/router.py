@@ -7,6 +7,7 @@ from app.modules.users.models import Usuario
 from typing import List
 from app.core.util.password import get_password_hash
 from sqlalchemy.orm import joinedload
+from sqlalchemy import or_
 
 # Creamos el router. 'prefix' evita repetir "/docentes" en cada ruta.
 router = APIRouter(
@@ -49,12 +50,24 @@ def crear_docente(docente_in: DocenteCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Error al registrar: {str(e)}")
 
 @router.get("/", response_model=List[DocenteResponse])
-def listar_docentes(db: Session = Depends(get_db)):
+def listar_docentes(search: str = None, db: Session = Depends(get_db)):
     """
-    Obtiene la lista de todos los docentes registrados en la base de datos.
+    Lista docentes con opción de búsqueda por nombre, apellido o especialidad.
     """
-    docentes = db.query(Docente).options(joinedload(Docente.usuario)).all()
-    return docentes
+    query = db.query(Docente).options(joinedload(Docente.usuario))
+
+    if search:
+        # ilike es para búsquedas que ignoran mayúsculas/minúsculas
+        search_filter = f"%{search}%"
+        query = query.filter(
+            or_(
+                Docente.nombres.ilike(search_filter),
+                Docente.apellidos.ilike(search_filter),
+                Docente.especialidad.ilike(search_filter)
+            )
+        )
+
+    return query.all()
 
 
 @router.get("/{id}", response_model=DocenteResponse)
