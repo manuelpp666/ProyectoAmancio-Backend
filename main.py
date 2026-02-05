@@ -7,7 +7,7 @@ from app.modules.users import router as usuario_router
 from app.modules.users.alumno import router as alumno_router
 from app.modules.users.familiar import router as familiar_router
 from app.modules.users.docente import router as docente_router
-
+from app.modules.chatbot import router as chatbot_router
 # Resto de módulos
 from app.modules.academic import router as academic_router
 from app.modules.enrollment import router as enrollment_router
@@ -45,7 +45,7 @@ app.include_router(management_router.router)
 app.include_router(virtual_router.router)
 app.include_router(behavior_router.router)
 app.include_router(web_router.router)
-
+app.include_router(chatbot_router.router) 
 @app.get("/")
 def check_db_connection(db: Session = Depends(get_db)):
     try:

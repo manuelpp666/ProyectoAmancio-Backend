@@ -67,3 +67,13 @@ Define que la tabla alumnos tiene una columna id, nombre y correo.
 pip install "pydantic[email]"
 
 pip install "passlib[bcrypt]"
+
+1.
+pip install -U python-multipart google-genai langchain langchain-pinecone pinecone-client pypdf langchain-huggingface sentence-transformers
+
+2. pip install langchain-community
+
+
+3. pip install python-docx
+
+4. pip install docx2txt
