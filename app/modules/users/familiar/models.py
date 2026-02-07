@@ -13,5 +13,6 @@ class Familiar(Base):
     email = Column(String(150))
     direccion = Column(String(300))
     tipo_parentesco = Column(String(50))
-
+     
+    alumnos_rel = relationship("RelacionFamiliar", back_populates="familiar")
     usuario = relationship("Usuario")

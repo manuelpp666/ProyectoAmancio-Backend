@@ -1,5 +1,5 @@
 # app/modules/users/alumno/models.py
-from sqlalchemy import Column, Integer, String, Boolean, Date, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, Date, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from app.db.database import Base
 
@@ -18,8 +18,9 @@ class Alumno(Base):
     colegio_procedencia = Column(String(100))
     relacion_fraternal = Column(Boolean, default=False)
     estado_ingreso = Column(String(20), default='POSTULANTE')
-
+    motivo_rechazo = Column(Text, nullable=True)
     # Relaciones
     usuario = relationship("Usuario")
+    familiares_rel = relationship("RelacionFamiliar", back_populates="alumno")
     # matriculas = relationship("app.modules.enrollment.models.Matricula", back_populates="alumno") 
     # pagos = relationship("app.modules.finance.models.Pago", back_populates="alumno")

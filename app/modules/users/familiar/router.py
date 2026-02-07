@@ -7,7 +7,7 @@ router = APIRouter(prefix="/familiares", tags=["Familiares"])
 
 @router.post("/", response_model=schemas.FamiliarResponse)
 def crear_familiar(familiar: schemas.FamiliarCreate, db: Session = Depends(get_db)):
-    nuevo = models.Familiar(**familiar.dict())
+    nuevo = models.Familiar(**familiar.model_dump())
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)

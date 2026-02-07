@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Enum, Boolean, DateTime
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from app.db.database import Base
 
 class Usuario(Base):
@@ -10,3 +11,5 @@ class Usuario(Base):
     rol = Column(Enum('ADMIN', 'DOCENTE', 'ALUMNO', 'FAMILIAR'), nullable=False)
     activo = Column(Boolean, default=1)
     fecha_creacion = Column(DateTime, server_default=func.now())
+    alumno = relationship("Alumno", back_populates="usuario", uselist=False)
+    familiar = relationship("Familiar", back_populates="usuario", uselist=False)
