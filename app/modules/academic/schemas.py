@@ -7,17 +7,24 @@ class AnioEscolarCreate(BaseModel):
     id_anio_escolar: str
     fecha_inicio: date
     fecha_fin: date
-    activo: bool
+    activo: bool = True
+    tipo: str # "REGULAR" o "VERANO"
 
 class AnioEscolarResponse(AnioEscolarCreate):
-    model_config = ConfigDict(from_attributes=True)
+    class Config: from_attributes = True
+
+# Agrega este schema para la acción de copiar
+class CopiarEstructuraRequest(BaseModel):
+    anio_origen: str
+    anio_destino: str
 
 # --- Seccion ---
 class SeccionBase(BaseModel):
-    nombre: str
-    aula: str
-    vacantes: int
     id_grado: int
+    id_anio_escolar: str # <--- NUEVO: Obligatorio
+    nombre: str
+    vacantes: int = 30
+    # BORRADO: aula
 
 class SeccionCreate(SeccionBase): pass
 

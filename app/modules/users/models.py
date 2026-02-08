@@ -1,6 +1,14 @@
 from sqlalchemy import Column, Integer, String, Enum, Boolean, DateTime
 from sqlalchemy.sql import func
 from app.db.database import Base
+import enum
+
+# --- 1. DEFINICIÓN DEL ENUM (Esto es lo que te falta) ---
+class RolEnum(str, enum.Enum):
+    ADMIN = "ADMIN"
+    DOCENTE = "DOCENTE"
+    ALUMNO = "ALUMNO"
+    FAMILIAR = "FAMILIAR"
 
 class Usuario(Base):
     __tablename__ = "usuario"
