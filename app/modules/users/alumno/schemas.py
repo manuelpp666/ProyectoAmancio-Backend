@@ -1,35 +1,33 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 from datetime import date
+from app.core.util.utils import DniStr # Importante
 
-# Esquema auxiliar para la relación (opcional, igual que en Docente)
 class UsuarioEnAlumno(BaseModel):
     activo: bool
-    # Puedes agregar username u otros campos aquí
+    username: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 class AlumnoBase(BaseModel):
-    dni: str
-    nombres: str
-    apellidos: str
+    nombres: str = Field(..., max_length=250)
+    apellidos: str = Field(..., max_length=250)
     fecha_nacimiento: Optional[date] = None
-    genero: Optional[str] = None
-    direccion: Optional[str] = None
-    enfermedad: Optional[str] = None
-    talla_polo: Optional[str] = None
-    colegio_procedencia: Optional[str] = None
+    genero: Optional[str] = Field(None, max_length=1)
+    direccion: Optional[str] = Field(None, max_length=300)
+    enfermedad: Optional[str] = Field(None, max_length=150)
+    talla_polo: Optional[str] = Field(None, max_length=5)
+    colegio_procedencia: Optional[str] = Field(None, max_length=100)
     relacion_fraternal: bool = False
     estado_ingreso: str = 'POSTULANTE'
 
 class AlumnoCreate(AlumnoBase):
+    dni: DniStr  # Validación automática aquí
     id_usuario: Optional[int] = None
 
 class AlumnoResponse(AlumnoBase):
     id_alumno: int
     id_usuario: Optional[int] = None
-    
-    # IMPORTANTE: Agregar la relación si quieres ver datos del usuario
+    dni: str # En la respuesta se entrega como string normal
     usuario: Optional[UsuarioEnAlumno] = None 
-
-    # Usar model_config para Pydantic V2
+    motivo_rechazo: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)

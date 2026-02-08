@@ -16,7 +16,7 @@ from app.modules.management import router as management_router
 from app.modules.virtual import router as virtual_router
 from app.modules.behavior import router as behavior_router
 from app.modules.web import router as web_router
-
+from app.modules.admision import router as admision_router
 app = FastAPI()
 
 # Lista de URLs permitidas (Frontend)
@@ -46,6 +46,8 @@ app.include_router(virtual_router.router)
 app.include_router(behavior_router.router)
 app.include_router(web_router.router)
 app.include_router(chatbot_router.router) 
+app.include_router(admision_router.router)
+
 @app.get("/")
 def check_db_connection(db: Session = Depends(get_db)):
     try:
