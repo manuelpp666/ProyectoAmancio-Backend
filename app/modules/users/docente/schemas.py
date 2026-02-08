@@ -18,6 +18,16 @@ class DocenteCreate(DocenteBase):
     dni: DniStr
     telefono: TelefonoStr
 
+class DocenteUpdate(BaseModel):
+    nombres: Optional[str] = None
+    apellidos: Optional[str] = None
+    especialidad: Optional[str] = None
+    descripcion: Optional[str] = None
+    url_perfil: Optional[str] = None
+    email: Optional[EmailStr] = None
+    dni: Optional[DniStr] = None
+    telefono: Optional[TelefonoStr] = None
+
 class UsuarioEnDocente(BaseModel):
     activo: bool
     model_config = ConfigDict(from_attributes=True)

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from .schemas import DocenteCreate, DocenteResponse
+from .schemas import DocenteCreate, DocenteResponse,DocenteUpdate
 from .models import Docente
 from app.modules.users.models import Usuario
 from typing import List
@@ -78,14 +78,15 @@ def obtener_docente(id: int, db: Session = Depends(get_db)):
     return docente
 
 @router.put("/{id}", response_model=DocenteResponse)
-def actualizar_docente(id: int, docente_update: DocenteCreate, db: Session = Depends(get_db)):
+def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Depends(get_db)):
     db_docente = db.query(Docente).filter(Docente.id_docente == id).first()
     
     if not db_docente:
         raise HTTPException(status_code=404, detail="Docente no encontrado")
     
+    datos_a_actualizar = docente_update.model_dump(exclude_unset=True)
     # Actualizamos los campos dinámicamente
-    for key, value in docente_update.model_dump().items():
+    for key, value in datos_a_actualizar.items():
         setattr(db_docente, key, value)
     
     db.commit()
