@@ -58,8 +58,7 @@ def decidir_admision(
 
             # B. Buscar al apoderado principal para crearle su cuenta
             relacion = db.query(RelacionFamiliar).filter(
-                RelacionFamiliar.id_alumno == id_alumno,
-                RelacionFamiliar.es_apoderado_principal == True
+                RelacionFamiliar.id_alumno == id_alumno
             ).first()
 
             # Si hay una relación y el familiar no tiene cuenta aún
@@ -109,8 +108,6 @@ def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db)):
             "nombre": f"{fam.nombres} {fam.apellidos}",
             "dni": fam.dni,
             "parentesco": rel.tipo_parentesco,  # <--- CORREGIDO: Ahora coincide con tu modelo
-            "es_apoderado": rel.es_apoderado_principal,
-            "vive_con": rel.vive_con_alumno,     # Agregamos este dato que es útil
             "telefono": fam.telefono,
             "email": fam.email,
             "direccion": fam.direccion

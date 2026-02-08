@@ -25,8 +25,6 @@ def postular_alumno(datos: schemas.AdmisionPostulante, db: Session = Depends(get
         nueva_relacion = RelacionFamiliar(
             id_alumno=nuevo_alumno.id_alumno,
             id_familiar=nuevo_familiar.id_familiar,
-            es_apoderado_principal=datos.es_apoderado,
-            vive_con_alumno=datos.vive_con_alumno,
             tipo_parentesco=datos.tipo_parentesco
         )
         db.add(nueva_relacion)

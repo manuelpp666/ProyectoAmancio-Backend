@@ -7,5 +7,3 @@ class AdmisionPostulante(BaseModel):
     alumno: AlumnoCreate
     familiar: FamiliarCreate
     tipo_parentesco: str
-    es_apoderado: bool = True
-    vive_con_alumno: bool = True
