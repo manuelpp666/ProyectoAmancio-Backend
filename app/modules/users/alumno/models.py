@@ -16,11 +16,13 @@ class Alumno(Base):
     enfermedad = Column(String(150))
     talla_polo = Column(String(5))
     colegio_procedencia = Column(String(100))
+    id_grado_ingreso = Column(Integer, ForeignKey("grado.id_grado"), nullable=True)
     relacion_fraternal = Column(Boolean, default=False)
     estado_ingreso = Column(String(20), default='POSTULANTE')
     motivo_rechazo = Column(Text, nullable=True)
     # Relaciones
     usuario = relationship("Usuario")
+    grado_ingreso = relationship("app.modules.academic.models.Grado")
     familiares_rel = relationship("RelacionFamiliar", back_populates="alumno")
     # matriculas = relationship("app.modules.enrollment.models.Matricula", back_populates="alumno") 
     # pagos = relationship("app.modules.finance.models.Pago", back_populates="alumno")

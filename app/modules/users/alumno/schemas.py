@@ -17,6 +17,7 @@ class AlumnoBase(BaseModel):
     enfermedad: Optional[str] = Field(None, max_length=150)
     talla_polo: Optional[str] = Field(None, max_length=5)
     colegio_procedencia: Optional[str] = Field(None, max_length=100)
+    id_grado_ingreso: Optional[int] = None
     relacion_fraternal: bool = False
     estado_ingreso: str = 'POSTULANTE'
 
