@@ -55,24 +55,6 @@ def decidir_admision(
                 db.add(nuevo_user_alumno)
                 db.flush() # Para obtener el id_usuario inmediatamente
                 alumno.id_usuario = nuevo_user_alumno.id_usuario
-
-            # B. Buscar al apoderado principal para crearle su cuenta
-            relacion = db.query(RelacionFamiliar).filter(
-                RelacionFamiliar.id_alumno == id_alumno
-            ).first()
-
-            # Si hay una relación y el familiar no tiene cuenta aún
-            if relacion and relacion.familiar and not relacion.familiar.id_usuario:
-                nuevo_user_familiar = Usuario(
-                    username=relacion.familiar.dni,
-                    password_hash=get_password_hash(relacion.familiar.dni),
-                    rol="FAMILIAR",
-                    activo=True
-                )
-                db.add(nuevo_user_familiar)
-                db.flush()
-                relacion.familiar.id_usuario = nuevo_user_familiar.id_usuario
-
         else:
             # --- LÓGICA DE RECHAZO ---
             alumno.estado_ingreso = "RECHAZADO"
@@ -99,15 +81,20 @@ def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db)):
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
     
+    # Obtenemos el nombre del grado si existe la relación
+    # Ajusta 'grado_ingreso' al nombre de la relación en tu modelo Alumno
+    nombre_grado = "No asignado"
+    if alumno.grado_ingreso:
+        nombre_grado = f"{alumno.grado_ingreso.nombre} ({alumno.grado_ingreso.nivel.nombre})"
+
     familiares_data = []
-    # Usamos la relación definida en tu modelo Alumno
     for rel in alumno.familiares_rel:
         fam = rel.familiar
         familiares_data.append({
             "id_familiar": fam.id_familiar,
             "nombre": f"{fam.nombres} {fam.apellidos}",
             "dni": fam.dni,
-            "parentesco": rel.tipo_parentesco,  # <--- CORREGIDO: Ahora coincide con tu modelo
+            "parentesco": rel.tipo_parentesco,
             "telefono": fam.telefono,
             "email": fam.email,
             "direccion": fam.direccion
@@ -120,6 +107,7 @@ def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db)):
             "apellidos": alumno.apellidos,
             "dni": alumno.dni,
             "estado_ingreso": alumno.estado_ingreso,
+            "grado": nombre_grado, # <--- AGREGAMOS ESTO
             "colegio_procedencia": alumno.colegio_procedencia,
             "enfermedad": alumno.enfermedad,
             "direccion": alumno.direccion,

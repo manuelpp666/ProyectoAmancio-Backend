@@ -25,10 +25,18 @@ class AlumnoCreate(AlumnoBase):
     dni: DniStr  # Validación automática aquí
     id_usuario: Optional[int] = None
 
+class GradoEnAlumno(BaseModel):
+    id_grado: int
+    nombre: str
+    # Si quieres incluir el nivel (Primaria/Secundaria)
+    # nivel: Optional[dict] = None 
+    model_config = ConfigDict(from_attributes=True)
+
 class AlumnoResponse(AlumnoBase):
     id_alumno: int
     id_usuario: Optional[int] = None
     dni: str # En la respuesta se entrega como string normal
     usuario: Optional[UsuarioEnAlumno] = None 
     motivo_rechazo: Optional[str] = None
+    grado_ingreso: Optional[GradoEnAlumno] = None
     model_config = ConfigDict(from_attributes=True)

@@ -22,7 +22,7 @@ class Alumno(Base):
     motivo_rechazo = Column(Text, nullable=True)
     # Relaciones
     usuario = relationship("Usuario")
-    grado_ingreso = relationship("app.modules.academic.models.Grado")
+    grado_ingreso = relationship("Grado")
     familiares_rel = relationship("RelacionFamiliar", back_populates="alumno")
     # matriculas = relationship("app.modules.enrollment.models.Matricula", back_populates="alumno") 
     # pagos = relationship("app.modules.finance.models.Pago", back_populates="alumno")
