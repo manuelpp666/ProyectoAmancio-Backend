@@ -18,9 +18,14 @@ def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db)):
     return db_alumno
 
 @router.get("/", response_model=List[schemas.AlumnoResponse])
-def listar_alumnos(db: Session = Depends(get_db)):
-    # Por defecto listamos activos y postulantes, ocultamos rechazados
-    return db.query(models.Alumno).filter(models.Alumno.estado_ingreso != "rechazado").all()
+def listar_alumnos(dni: str = None, db: Session = Depends(get_db)):
+    query = db.query(models.Alumno).filter(models.Alumno.estado_ingreso != "rechazado")
+    
+    if dni:
+        # Usamos ilike por si acaso, aunque el DNI suele ser exacto
+        query = query.filter(models.Alumno.dni.like(f"{dni}%"))
+    
+    return query.all()
 
 @router.get("/solicitudes-pendientes", response_model=List[schemas.AlumnoResponse])
 def listar_postulantes(db: Session = Depends(get_db)):
