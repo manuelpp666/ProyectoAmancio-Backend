@@ -217,11 +217,26 @@ def eliminar_grado(grado_id: int, db: Session = Depends(get_db)):
 # --- SECCIONES (¡MODIFICADO!) ---
 @router.post("/secciones/", response_model=schemas.SeccionResponse)
 def crear_seccion(seccion: schemas.SeccionCreate, db: Session = Depends(get_db)):
-    # 1. Validar que el año escolar exista (CRÍTICO para tu lógica)
+    # 1. Validar que el año escolar exista
     anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == seccion.id_anio_escolar).first()
     if not anio:
         raise HTTPException(status_code=404, detail="El año escolar indicado no existe")
 
+    # 2. VALIDACIÓN DE DUPLICADOS (NUEVO)
+    # Buscamos si ya existe una sección con el mismo nombre, en el mismo grado y año.
+    seccion_existente = db.query(models.Seccion).filter(
+        models.Seccion.id_anio_escolar == seccion.id_anio_escolar,
+        models.Seccion.id_grado == seccion.id_grado,
+        models.Seccion.nombre == seccion.nombre
+    ).first()
+
+    if seccion_existente:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"La sección '{seccion.nombre}' ya existe en este grado para el año {seccion.id_anio_escolar}."
+        )
+
+    # 3. Crear si no existe
     nuevo = models.Seccion(**seccion.model_dump())
     db.add(nuevo)
     db.commit()
