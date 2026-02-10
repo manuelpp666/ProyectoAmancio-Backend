@@ -9,6 +9,7 @@ from app.modules.users.familiar import router as familiar_router
 from app.modules.users.docente import router as docente_router
 from app.modules.chatbot import router as chatbot_router
 # Resto de módulos
+from app.modules.perfil import router as perfil_router
 from app.modules.academic import router as academic_router
 from app.modules.enrollment import router as enrollment_router
 from app.modules.finance import router as finance_router
@@ -38,6 +39,7 @@ app.include_router(usuario_router.router)
 app.include_router(alumno_router.router)
 app.include_router(familiar_router.router)
 app.include_router(docente_router.router)
+app.include_router(perfil_router.router)
 app.include_router(academic_router.router)
 app.include_router(enrollment_router.router)
 app.include_router(finance_router.router)
