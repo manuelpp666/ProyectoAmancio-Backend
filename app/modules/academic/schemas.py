@@ -8,7 +8,12 @@ class AnioEscolarCreate(BaseModel):
     fecha_inicio: date
     fecha_fin: date
     activo: bool = True
-    tipo: str # "REGULAR" o "VERANO"
+    tipo: str 
+    
+    # --- AGREGAR ESTOS CAMPOS NUEVOS ---
+    inicio_inscripcion: Optional[date] = None
+    fin_inscripcion: Optional[date] = None
+    # -----------------------------------
 
 class AnioEscolarResponse(AnioEscolarCreate):
     class Config: from_attributes = True
@@ -17,6 +22,10 @@ class AnioEscolarResponse(AnioEscolarCreate):
 class CopiarEstructuraRequest(BaseModel):
     anio_origen: str
     anio_destino: str
+
+class InscripcionUpdate(BaseModel):
+    inicio_inscripcion: date
+    fin_inscripcion: date
 
 # --- Seccion ---
 class SeccionBase(BaseModel):

@@ -5,17 +5,25 @@ from app.db.database import Base
 
 class Matricula(Base):
     __tablename__ = "matricula"
-    id_matricula = Column(Integer, primary_key=True)
-    id_anio_escolar = Column(CHAR(6), ForeignKey("anio_escolar.id_anio_escolar"))
-    id_alumno = Column(Integer, ForeignKey("alumno.id_alumno"))
-    id_seccion = Column(Integer, ForeignKey("seccion.id_seccion"))
-    fecha_matricula = Column(DateTime, server_default=func.now())
-    estado = Column(String(20), default='MATRICULADO')
-    tipo_matricula = Column(String(20), default='REGULAR')
 
-    # Relaciones (Asegúrate de que los modelos referenciados existan)
-    # alumno = relationship("Alumno") 
-    # seccion = relationship("Seccion")
+    id_matricula = Column(Integer, primary_key=True, index=True)
+    id_anio_escolar = Column(String(6), ForeignKey("anio_escolar.id_anio_escolar"))
+    id_alumno = Column(Integer, ForeignKey("alumno.id_alumno"))
+    id_seccion = Column(Integer, ForeignKey("seccion.id_seccion"), nullable=True)
+    id_grado = Column(Integer, ForeignKey("grado.id_grado"))
+    
+    fecha_matricula = Column(DateTime, default=func.now())
+    estado = Column(String(20), default="MATRICULADO")
+    tipo_matricula = Column(String(20), default="REGULAR")
+
+    # --- RELACIONES ---
+    alumno = relationship("app.modules.users.alumno.models.Alumno")
+    anio_escolar = relationship("app.modules.academic.models.AnioEscolar")
+    grado = relationship("app.modules.academic.models.Grado")
+    seccion = relationship("app.modules.academic.models.Seccion")
+
+    # --- AQUÍ ESTABA EL ERROR ---
+    # Faltaba definir esta propiedad para que 'Exoneracion' pudiera encontrarla
     exoneraciones = relationship("Exoneracion", back_populates="matricula")
 
 class Exoneracion(Base):

@@ -73,6 +73,22 @@ def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db)):
         print(f"Error no controlado: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+@router.patch("/anios/{anio_id}/inscripciones")
+def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db)):
+    db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
+    if not db_anio:
+        raise HTTPException(status_code=404, detail="Año no encontrado")
+    
+    # Validación simple
+    if fechas.fin_inscripcion < fechas.inicio_inscripcion:
+        raise HTTPException(status_code=400, detail="La fecha de fin no puede ser anterior al inicio.")
+
+    db_anio.inicio_inscripcion = fechas.inicio_inscripcion
+    db_anio.fin_inscripcion = fechas.fin_inscripcion
+    
+    db.commit()
+    return {"message": "Fechas de inscripción actualizadas correctamente"}
+
 @router.patch("/anios/{anio_id}/cerrar")
 def cerrar_anio(anio_id: str, db: Session = Depends(get_db)):
     # Esta función ahora sirve para un cierre MANUAL FORZADO antes de tiempo

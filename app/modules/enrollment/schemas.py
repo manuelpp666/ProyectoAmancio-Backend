@@ -3,6 +3,10 @@ from typing import Optional
 from decimal import Decimal
 from datetime import datetime
 
+# Importamos el esquema de alumno para anidarlo
+from app.modules.users.alumno.schemas import AlumnoResponse
+from app.modules.academic.schemas import GradoResponse, SeccionResponse
+
 # --- Exoneracion ---
 class ExoneracionBase(BaseModel):
     motivo: str
@@ -18,12 +22,12 @@ class ExoneracionResponse(ExoneracionBase):
     fecha_aprobacion: datetime
     class Config: from_attributes = True
 
-# --- Matricula ---
 class MatriculaBase(BaseModel):
     id_anio_escolar: str
     id_alumno: int
-    id_seccion: int
-    tipo_matricula: str = 'REGULAR'
+    id_grado: int
+    id_seccion: Optional[int] = None
+    tipo_matricula: str = "REGULAR"
 
 class MatriculaCreate(MatriculaBase):
     pass
@@ -32,4 +36,12 @@ class MatriculaResponse(MatriculaBase):
     id_matricula: int
     fecha_matricula: datetime
     estado: str
-    class Config: from_attributes = True
+    
+    # --- IMPORTANTE: Estos campos anidados son los que faltaban ---
+    alumno: Optional[AlumnoResponse] = None
+    grado: Optional[GradoResponse] = None
+    seccion: Optional[SeccionResponse] = None
+    # --------------------------------------------------------------
+
+    class Config:
+        from_attributes = True

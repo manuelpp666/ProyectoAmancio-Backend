@@ -6,11 +6,17 @@ from app.db.database import Base
 
 class AnioEscolar(Base):
     __tablename__ = "anio_escolar"
-    id_anio_escolar = Column(CHAR(6), primary_key=True)
+
+    id_anio_escolar = Column(String(6), primary_key=True)
     fecha_inicio = Column(Date, nullable=False)
-    fecha_fin = Column(Date)
+    fecha_fin = Column(Date, nullable=True)
     activo = Column(Boolean, default=False)
-    tipo = Column(String(20), default='REGULAR') # <--- NUEVO CAMPO
+    tipo = Column(String(20), default="REGULAR")
+    
+    # --- AGREGAR ESTOS DOS CAMPOS ---
+    inicio_inscripcion = Column(Date, nullable=True)
+    fin_inscripcion = Column(Date, nullable=True)
+    # -------------------------------
 
 class Nivel(Base):
     __tablename__ = "nivel"
