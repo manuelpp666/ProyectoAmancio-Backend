@@ -22,6 +22,7 @@ class UsuarioLogin(BaseModel):
 
 # Para enviar la respuesta tras un login exitoso
 class LoginResponse(BaseModel):
+    id_usuario: int
     username: str
     rol: str
     status: str = "success"

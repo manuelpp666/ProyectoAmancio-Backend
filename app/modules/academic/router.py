@@ -177,7 +177,9 @@ def listar_niveles(db: Session = Depends(get_db)):
 
 @router.get("/niveles-cursos/", response_model=List[schemas.NivelConCursosResponse])
 def listar_niveles_con_cursos(db: Session = Depends(get_db)):
-    return db.query(models.Nivel).all()
+    return db.query(models.Nivel).options(
+        joinedload(models.Nivel.grados).joinedload(models.Grado.planes_estudio).joinedload(models.PlanEstudio.curso)
+    ).all()
 
 
 # --- GRADOS ---

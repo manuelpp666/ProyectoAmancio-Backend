@@ -45,6 +45,7 @@ def login(credentials: schemas.UsuarioLogin, db: Session = Depends(get_db)):
 
     # 5. Retornar los datos que el frontend necesita para el UseContext(aqui se usara JWT)
     return {
+        "id_usuario": user.id_usuario,
         "username": user.username,
         "rol": user.rol,
         "status": "success"

@@ -14,6 +14,10 @@ class EntregaCreate(BaseModel):
     archivo_url: Optional[str]
     comentario_alumno: Optional[str]
 
+class ConversacionCreate(BaseModel):
+    usuario1_id: int
+    usuario2_id: int
+
 class MensajeCreate(BaseModel):
     id_conversacion: int
     remitente_id: int

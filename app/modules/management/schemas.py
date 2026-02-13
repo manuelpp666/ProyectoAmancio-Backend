@@ -37,3 +37,11 @@ class AsistenciaCreate(BaseModel):
 class AsistenciaResponse(AsistenciaCreate):
     id_asistencia: int
     class Config: from_attributes = True
+
+
+class CursoEstudianteResponse(BaseModel):
+    id_curso: int
+    curso_nombre: str
+    docente_nombres: Optional[str] = "No definido"
+    docente_apellidos: Optional[str] = ""
+    url_perfil_docente: Optional[str] = None

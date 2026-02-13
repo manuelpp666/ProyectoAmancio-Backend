@@ -22,6 +22,8 @@ class Nivel(Base):
     __tablename__ = "nivel"
     id_nivel = Column(Integer, primary_key=True)
     nombre = Column(String(20), nullable=False)
+    grados = relationship("Grado", back_populates="nivel", order_by="Grado.orden")
+
 
 class Grado(Base):
     __tablename__ = "grado"
@@ -31,7 +33,8 @@ class Grado(Base):
     orden = Column(Integer, nullable=False)
     
     # Relación opcional para ver el nivel desde el grado
-    nivel = relationship("Nivel")
+    nivel = relationship("Nivel", back_populates="grados")
+    planes_estudio = relationship("PlanEstudio", back_populates="grado")
 
 class Seccion(Base):
     __tablename__ = "seccion"
@@ -65,3 +68,5 @@ class PlanEstudio(Base):
     id_plan_estudio = Column(Integer, primary_key=True)
     id_curso = Column(Integer, ForeignKey("curso.id_curso"))
     id_grado = Column(Integer, ForeignKey("grado.id_grado"))
+    grado = relationship("Grado", back_populates="planes_estudio")
+    curso = relationship("Curso")
