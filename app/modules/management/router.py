@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from typing import List
 from app.db.database import get_db
@@ -157,3 +157,79 @@ def obtener_detalle_curso_estudiante(
             } for t in tareas_query
         ]
     }
+
+
+# --- Asignación de Docentes ---
+
+@router.get("/vínculos-academicos/{anio_id}", response_model=List[schemas.VinculoAcademicoResponse])
+def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db)):
+    """
+    Obtiene todos los cursos por sección de un año escolar 
+    y muestra qué docente tienen asignado (si lo hay).
+    """
+    # 1. Buscamos todas las secciones del año escolar
+    secciones = db.query(models_ac.Seccion).filter(models_ac.Seccion.id_anio_escolar == anio_id).all()
+    
+    resultado = []
+    for seccion in secciones:
+        # 2. Por cada sección, vemos qué cursos le corresponden según su grado (Plan de Estudio)
+        cursos_plan = db.query(models_ac.Curso).join(
+            models_ac.PlanEstudio, models_ac.PlanEstudio.id_curso == models_ac.Curso.id_curso
+        ).filter(models_ac.PlanEstudio.id_grado == seccion.id_grado).all()
+
+        for curso in cursos_plan:
+            # 3. Buscamos si ya existe una carga académica (docente asignado)
+            carga = db.query(models.CargaAcademica).filter(
+                models.CargaAcademica.id_seccion == seccion.id_seccion,
+                models.CargaAcademica.id_curso == curso.id_curso,
+                models.CargaAcademica.id_anio_escolar == anio_id
+            ).first()
+
+            docente = None
+            if carga and carga.id_docente:
+                docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_docente == carga.id_docente).first()
+
+            resultado.append({
+                "id_seccion": seccion.id_seccion,
+                "seccion_nombre": seccion.nombre,
+                "grado_nombre": seccion.grado.nombre, # Asumiendo relación en el modelo
+                "id_curso": curso.id_curso,
+                "curso_nombre": curso.nombre,
+                "id_carga_academica": carga.id_carga_academica if carga else None,
+                "docente": docente # Puede ser None
+            })
+    
+    return resultado
+
+@router.get("/docentes-disponibles/", response_model=List[schemas.DocenteBasicoResponse])
+def listar_docentes_busqueda(db: Session = Depends(get_db)):
+    """Lista simple de docentes para el selector de la interfaz"""
+    return db.query(models_doc.Docente).all()
+
+
+#--- Delete y update de la carga academica
+@router.delete("/carga/{carga_id}", status_code=status.HTTP_204_NO_CONTENT)
+def eliminar_carga(carga_id: int, db: Session = Depends(get_db)):
+    db_carga = db.query(models.CargaAcademica).filter(models.CargaAcademica.id_carga_academica == carga_id).first()
+    if not db_carga:
+        raise HTTPException(status_code=404, detail="Asignación no encontrada")
+    
+    db.delete(db_carga)
+    db.commit()
+    return None
+
+@router.patch("/carga/{carga_id}", response_model=schemas.CargaResponse)
+def actualizar_carga(carga_id: int, data: schemas.CargaUpdate, db: Session = Depends(get_db)):
+    db_carga = db.query(models.CargaAcademica).filter(models.CargaAcademica.id_carga_academica == carga_id).first()
+    
+    if not db_carga:
+        raise HTTPException(status_code=404, detail="Asignación no encontrada")
+    
+    # Actualización dinámica
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_carga, key, value)
+    
+    db.commit()
+    db.refresh(db_carga)
+    return db_carga

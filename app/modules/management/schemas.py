@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from decimal import Decimal
 from datetime import date, datetime
 from typing import Optional
@@ -25,7 +25,7 @@ class NotaCreate(BaseModel):
 class NotaResponse(NotaCreate):
     id_nota: int
     fecha_registro: datetime
-    class Config: from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # --- Schemas Asistencia ---
 class AsistenciaCreate(BaseModel):
@@ -36,7 +36,7 @@ class AsistenciaCreate(BaseModel):
 
 class AsistenciaResponse(AsistenciaCreate):
     id_asistencia: int
-    class Config: from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CursoEstudianteResponse(BaseModel):
@@ -45,3 +45,26 @@ class CursoEstudianteResponse(BaseModel):
     docente_nombres: Optional[str] = "No definido"
     docente_apellidos: Optional[str] = ""
     url_perfil_docente: Optional[str] = None
+
+#-- Para la asignacion de docente a un curso
+class DocenteBasicoResponse(BaseModel):
+    id_docente: int
+    nombres: str
+    apellidos: str
+    url_perfil: Optional[str]
+
+    model_config = ConfigDict(from_attributes=True)
+
+class VinculoAcademicoResponse(BaseModel):
+    id_seccion: int
+    seccion_nombre: str
+    grado_nombre: str
+    id_curso: int
+    curso_nombre: str
+    id_carga_academica: Optional[int]
+    docente: Optional[DocenteBasicoResponse]
+
+    model_config = ConfigDict(from_attributes=True)
+
+class CargaUpdate(BaseModel):
+    id_docente: Optional[int] = None

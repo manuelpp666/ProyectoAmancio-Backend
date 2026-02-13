@@ -33,6 +33,16 @@ def actualizar_estado_anios(db: Session):
     if cambios:
         db.commit()
 
+@router.get("/anios/ultimo", response_model=schemas.AnioEscolarResponse)
+def obtener_ultimo_anio_creado(db: Session = Depends(get_db)):
+    # Buscamos el año con la fecha de inicio más alta (el más nuevo en el calendario)
+    anio = db.query(models.AnioEscolar).order_by(models.AnioEscolar.fecha_inicio.desc()).first()
+    
+    if not anio:
+        raise HTTPException(status_code=404, detail="No hay años escolares registrados")
+        
+    return anio
+
 @router.post("/anios/", response_model=schemas.AnioEscolarResponse, status_code=status.HTTP_201_CREATED)
 def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db)):
     # 1. Validación de Fechas
@@ -269,8 +279,8 @@ def listar_secciones(
 ):
     """
     Lista secciones con filtros obligatorios para el frontend:
-    - grado_id: Para ver secciones de 1er grado.
-    - anio_id: Para ver solo las de 2026.
+    - grado_id: Para ver secciones.
+    - anio_id: Para ver solo las del año.
     """
     query = db.query(models.Seccion).options(joinedload(models.Seccion.grado))
     
@@ -281,6 +291,30 @@ def listar_secciones(
         query = query.filter(models.Seccion.id_anio_escolar == anio_id)
         
     return query.all()
+
+@router.get("/secciones/{anio_id}", response_model=List[schemas.SeccionResponse])
+def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db)):
+    """
+    Este endpoint ahora coincide con la ruta: /academic/secciones/2025-1
+    """
+    return db.query(models.Seccion)\
+             .options(joinedload(models.Seccion.grado))\
+             .filter(models.Seccion.id_anio_escolar == anio_id).all()
+
+@router.get("/cursos-por-seccion/{seccion_id}", response_model=List[schemas.CursoResponse])
+def obtener_cursos_de_seccion(seccion_id: int, db: Session = Depends(get_db)):
+    # 1. Buscamos la sección para saber qué grado es
+    seccion = db.query(models.Seccion).filter(models.Seccion.id_seccion == seccion_id).first()
+    if not seccion:
+        raise HTTPException(status_code=404, detail="Sección no encontrada")
+    
+    # 2. Buscamos los cursos vinculados a ese grado en el Plan de Estudios
+    cursos = db.query(models.Curso)\
+               .join(models.PlanEstudio, models.PlanEstudio.id_curso == models.Curso.id_curso)\
+               .filter(models.PlanEstudio.id_grado == seccion.id_grado).all()
+    
+    return cursos
+
 
 @router.put("/secciones/{seccion_id}", response_model=schemas.SeccionResponse)
 def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Session = Depends(get_db)):
