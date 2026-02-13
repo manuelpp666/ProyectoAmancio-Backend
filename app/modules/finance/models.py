@@ -4,11 +4,17 @@ from app.db.database import Base
 
 class TipoTramite(Base):
     __tablename__ = "tipo_tramite"
+
     id_tipo_tramite = Column(Integer, primary_key=True)
     nombre = Column(String(100), nullable=False)
     costo = Column(DECIMAL(10, 2), default=0.00)
     requisitos = Column(Text)
     activo = Column(Boolean, default=True)
+    
+    # --- NUEVOS CAMPOS ---
+    alcance = Column(String(20), default="TODOS") # 'TODOS' o 'GRADOS'
+    grados_permitidos = Column(String(255), nullable=True) # Ej: "1,3,5"
+    # --------------------
 
 class SolicitudTramite(Base):
     __tablename__ = "solicitud_tramite"
