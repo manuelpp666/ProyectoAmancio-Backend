@@ -116,3 +116,19 @@ class AreaResponse(AreaBase):
     id_area: int
     model_config = ConfigDict(from_attributes=True)
 
+#-- Para horario
+class SeccionConDetalle(SeccionBase):
+    id_seccion: int
+    grado: Optional[GradoResponse] = None # Aquí incluimos el objeto grado
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class SeccionHorarioResponse(BaseModel):
+    id_seccion: int
+    nombre: str
+    id_grado: int
+    id_anio_escolar: str
+    # Incluimos el grado completo para que el front tenga el nombre (1ero, 2do, etc.)
+    grado: Optional[GradoResponse] = None 
+    
+    model_config = ConfigDict(from_attributes=True)

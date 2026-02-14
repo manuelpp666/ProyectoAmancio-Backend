@@ -18,6 +18,7 @@ from app.modules.virtual import router as virtual_router
 from app.modules.behavior import router as behavior_router
 from app.modules.web import router as web_router
 from app.modules.admision import router as admision_router
+from app.modules.horario import router as horario_router
 
 from app.core.socket_manager import socket_manager
 
@@ -40,6 +41,7 @@ app.add_middleware(
 
 # Incluir Rutas
 app.include_router(usuario_router.router)
+app.include_router(horario_router.router)
 app.include_router(alumno_router.router)
 app.include_router(familiar_router.router)
 app.include_router(docente_router.router)

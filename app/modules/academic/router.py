@@ -443,3 +443,17 @@ def asignar_curso_a_grado(plan: schemas.PlanEstudioCreate, db: Session = Depends
     db.commit()
     db.refresh(nuevo)
     return nuevo
+
+#--- Para el horario
+@router.get("/secciones-horario/{anio_id}", response_model=List[schemas.SeccionHorarioResponse])
+def obtener_secciones_para_constructor(anio_id: str, db: Session = Depends(get_db)):
+    """
+    Endpoint exclusivo para el constructor de horarios.
+    Trae las secciones de un año específico incluyendo la info del grado.
+    """
+    secciones = db.query(models.Seccion)\
+        .options(joinedload(models.Seccion.grado))\
+        .filter(models.Seccion.id_anio_escolar == anio_id)\
+        .all()
+    
+    return secciones

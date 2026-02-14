@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, DECIMAL, ForeignKey, Date, DateTime, CHAR
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from app.db.database import Base
 
 class CargaAcademica(Base):
@@ -9,6 +10,11 @@ class CargaAcademica(Base):
     id_seccion = Column(Integer, ForeignKey("seccion.id_seccion"))
     id_curso = Column(Integer, ForeignKey("curso.id_curso"))
     id_docente = Column(Integer, ForeignKey("docente.id_docente"))
+
+    curso = relationship("Curso") 
+    docente = relationship("Docente")
+    seccion = relationship("Seccion")
+    anio_escolar = relationship("AnioEscolar")
 
 class Asistencia(Base):
     __tablename__ = "asistencia"
