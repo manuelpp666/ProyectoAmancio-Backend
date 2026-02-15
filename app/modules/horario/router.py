@@ -6,6 +6,9 @@ from app.db.database import get_db
 from app.modules.horario.models import HorarioEscolar, HoraLectiva
 from app.modules.management.models import CargaAcademica
 from app.modules.horario.schemas import HorarioCreate, HorarioResponse, HoraLectivaResponse
+from app.modules.academic.models import Seccion
+from app.modules.enrollment.models import Matricula
+from app.modules.users.alumno.models import Alumno
 
 router = APIRouter(prefix="/horarios", tags=["Horarios"])
 
@@ -117,3 +120,57 @@ def obtener_materias_disponibles(id_seccion: int, db: Session = Depends(get_db))
         "curso_nombre": m.curso.nombre,
         "docente_nombre": f"{m.docente.nombres} {m.docente.apellidos}"
     } for m in materias]
+
+@router.get("/alumno/usuario/{id_usuario}", response_model=List[HorarioResponse])
+def obtener_horario_por_usuario(
+    id_usuario: int, 
+    id_anio_escolar: str, 
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna el horario completo de un alumno basado en su id_usuario 
+    para un año escolar específico.
+    """
+    
+    # 1. Buscamos al alumno que pertenece a este id_usuario
+    alumno = db.query(Alumno).filter(Alumno.id_usuario == id_usuario).first()
+
+    if not alumno:
+        raise HTTPException(
+            status_code=404, 
+            detail="No se encontró un alumno asociado a este usuario"
+        )
+
+    # 2. Buscamos la matrícula usando el id_alumno encontrado
+    matricula = db.query(Matricula).join(Seccion).filter(
+        Matricula.id_alumno == alumno.id_alumno,
+        Seccion.id_anio_escolar == id_anio_escolar
+    ).first()
+
+    if not matricula:
+        raise HTTPException(
+            status_code=404, 
+            detail="El alumno no tiene una matrícula registrada para el año escolar seleccionado"
+        )
+
+    # 3. Lógica para obtener los horarios (se mantiene igual)
+    id_seccion = matricula.id_seccion
+    
+    horarios = db.query(HorarioEscolar).join(
+        CargaAcademica, HorarioEscolar.id_carga_academica == CargaAcademica.id_carga_academica
+    ).filter(CargaAcademica.id_seccion == id_seccion).all()
+
+    resultado = []
+    for h in horarios:
+        dia = h.dia_semana.value if hasattr(h.dia_semana, 'value') else h.dia_semana
+        resultado.append({
+            "id_horario": h.id_horario,
+            "id_hora": h.id_hora,
+            "dia_semana": dia,
+            "id_carga_academica": h.id_carga_academica,
+            "curso_nombre": h.carga.curso.nombre,
+            "docente_nombre": f"{h.carga.docente.nombres} {h.carga.docente.apellidos}",
+            "seccion_nombre": h.carga.seccion.nombre
+        })
+    
+    return resultado

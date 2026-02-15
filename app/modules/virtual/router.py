@@ -137,6 +137,19 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
 
     contactos_validos = []
 
+    # --- Función auxiliar para filtrar por DNI o Nombre ---
+    def aplicar_filtro(query_obj, modelo):
+        if query:
+            return query_obj.filter(
+                or_(
+                    modelo.dni.like(f"{query}%"),
+                    modelo.nombres.ilike(f"%{query}%"),
+                    modelo.apellidos.ilike(f"%{query}%")
+                )
+            )
+        return query_obj
+
+    # --- LÓGICA SI EL QUE BUSCA ES UN ALUMNO ---
     if user.rol == 'ALUMNO':
         alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
         matricula = db.query(models_en.Matricula).filter(
@@ -146,53 +159,56 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
 
         if not matricula: return []
 
-        # --- Filtro de Búsqueda Flexible ---
-        # Definimos una función interna para no repetir código
-        def aplicar_filtro(query_obj, modelo):
-            if query:
-                return query_obj.filter(
-                    or_(
-                        modelo.dni.like(f"{query}%"),       # DNI empieza con...
-                        modelo.nombres.ilike(f"%{query}%"),  # Nombre contiene...
-                        modelo.apellidos.ilike(f"%{query}%") # Apellido contiene...
-                    )
-                )
-            return query_obj
-
-        # 1. Buscar Docentes
-        query_docentes = db.query(models_doc.Docente).join(
+        # 1. Sus Docentes (Carga académica en su sección)
+        q_docentes = db.query(models_doc.Docente).join(
             models_mn.CargaAcademica, models_mn.CargaAcademica.id_docente == models_doc.Docente.id_docente
         ).filter(
             models_mn.CargaAcademica.id_seccion == matricula.id_seccion,
             models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
         )
-        docentes = aplicar_filtro(query_docentes, models_doc.Docente).all()
-
-        # 2. Buscar Compañeros
-        query_companheros = db.query(models_al.Alumno).join(
+        
+        # 2. Sus Compañeros (Misma sección)
+        q_companheros = db.query(models_al.Alumno).join(
             models_en.Matricula, models_en.Matricula.id_alumno == models_al.Alumno.id_alumno
         ).filter(
             models_en.Matricula.id_seccion == matricula.id_seccion,
             models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar,
             models_al.Alumno.id_usuario != id_usuario
         )
-        companheros = aplicar_filtro(query_companheros, models_al.Alumno).all()
 
-        # Formatear respuesta final
+        docentes = aplicar_filtro(q_docentes, models_doc.Docente).all()
+        companheros = aplicar_filtro(q_companheros, models_al.Alumno).all()
+
         for d in docentes:
-            contactos_validos.append({
-                "id_usuario": d.id_usuario, 
-                "nombre": f"{d.nombres} {d.apellidos}", 
-                "dni": d.dni,
-                "rol": "DOCENTE"
-            })
+            contactos_validos.append({"id_usuario": d.id_usuario, "nombre": f"{d.nombres} {d.apellidos}", "dni": d.dni, "rol": "DOCENTE"})
         for c in companheros:
-            contactos_validos.append({
-                "id_usuario": c.id_usuario, 
-                "nombre": f"{c.nombres} {c.apellidos}", 
-                "dni": c.dni,
-                "rol": "ALUMNO"
-            })
+            contactos_validos.append({"id_usuario": c.id_usuario, "nombre": f"{c.nombres} {c.apellidos}", "dni": c.dni, "rol": "ALUMNO"})
+
+    # --- LÓGICA SI EL QUE BUSCA ES UN DOCENTE (Lo que te faltaba) ---
+    elif user.rol == 'DOCENTE':
+        docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
+        
+        # 1. Sus Alumnos (Alumnos matriculados en las secciones donde el docente dicta)
+        q_alumnos = db.query(models_al.Alumno).join(
+            models_en.Matricula, models_en.Matricula.id_alumno == models_al.Alumno.id_alumno
+        ).join(
+            models_mn.CargaAcademica, models_mn.CargaAcademica.id_seccion == models_en.Matricula.id_seccion
+        ).filter(
+            models_mn.CargaAcademica.id_docente == docente.id_docente,
+            models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar,
+            models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
+        ).distinct() # distinct por si un alumno está en 2 cursos con el mismo docente
+
+        # 2. Otros Docentes (Todos los docentes del sistema según tu regla)
+        q_colegas = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario != id_usuario)
+
+        alumnos = aplicar_filtro(q_alumnos, models_al.Alumno).all()
+        colegas = aplicar_filtro(q_colegas, models_doc.Docente).all()
+
+        for a in alumnos:
+            contactos_validos.append({"id_usuario": a.id_usuario, "nombre": f"{a.nombres} {a.apellidos}", "dni": a.dni, "rol": "ALUMNO"})
+        for col in colegas:
+            contactos_validos.append({"id_usuario": col.id_usuario, "nombre": f"{col.nombres} {col.apellidos}", "dni": col.dni, "rol": "DOCENTE"})
 
     return contactos_validos
 
