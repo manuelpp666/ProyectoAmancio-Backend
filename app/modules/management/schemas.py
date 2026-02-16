@@ -68,3 +68,14 @@ class VinculoAcademicoResponse(BaseModel):
 
 class CargaUpdate(BaseModel):
     id_docente: Optional[int] = None
+
+
+class CursoDocenteResponse(BaseModel):
+    id_carga: int
+    curso_nombre: str
+    grado_nombre: str
+    seccion_nombre: str
+    alumnos: int
+    img: str
+
+    model_config = ConfigDict(from_attributes=True)

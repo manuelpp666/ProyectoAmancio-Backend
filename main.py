@@ -1,5 +1,7 @@
+import os
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text  # Para escribir SQL puro
 from app.db.database import get_db # Ajusta la ruta según tu carpeta
@@ -38,6 +40,21 @@ app.add_middleware(
     allow_methods=["*"],              # Permite todos los métodos (GET, POST, etc.)
     allow_headers=["*"],              # Permite todos los encabezados
 )
+
+# 1. Esto detecta la carpeta 'Backend' (donde está main.py)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Apuntamos directamente a media dentro de Backend
+MEDIA_PATH = os.path.join(BASE_DIR, "media")
+
+# --- DEBUG ---
+print(f"🚀 Servidor de archivos configurado en: {MEDIA_PATH}")
+
+if not os.path.exists(MEDIA_PATH):
+    os.makedirs(MEDIA_PATH, exist_ok=True)
+
+# 3. Montamos la carpeta
+app.mount("/media", StaticFiles(directory=MEDIA_PATH), name="media")
 
 # Incluir Rutas
 app.include_router(usuario_router.router)

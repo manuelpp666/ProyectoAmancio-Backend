@@ -1,6 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import os
+import uuid
+import shutil
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, status, Form, UploadFile, File
 from sqlalchemy.orm import Session
+from typing import List
 from sqlalchemy import or_
+from sqlalchemy import func
 from app.db.database import get_db
 from app.core.socket_manager import socket_manager # Importa la instancia única
 from datetime import datetime
@@ -13,14 +19,30 @@ from app.modules.users.docente import models as models_doc
 
 from . import models, schemas
 
+
+# 1. Obtenemos la ruta de este archivo (virtual)
+FILE_DIR = os.path.dirname(os.path.abspath(__file__)) 
+
+# 2. Subimos 3 niveles: virtual -> modules -> app -> Backend
+# Esto garantiza que BASE_DIR sea la carpeta raíz del proyecto Backend
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(FILE_DIR)))
+
+# 3. Configuramos UPLOAD_DIR (esto ahora apuntará a Backend/media/entregas_tareas)
+UPLOAD_DIR = os.path.join(BASE_DIR, "media", "entregas_tareas")
+
+# --- DEBUG: Añade este print temporal para estar 100% seguro ---
+print(f"📂 Router configurado para guardar en: {UPLOAD_DIR}")
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png"}
+# Definición de la constante (10 MB)
+MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+
 router = APIRouter(prefix="/virtual", tags=["Aula Virtual"])
 
-@router.post("/tareas/")
-def crear_tarea(tarea: schemas.TareaCreate, db: Session = Depends(get_db)):
-    nuevo = models.Tarea(**tarea.model_dump())
-    db.add(nuevo)
-    db.commit()
-    return nuevo
 
 @router.post("/chat/mensaje/")
 async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(get_db)):
@@ -308,3 +330,380 @@ def obtener_historial(id_conversacion: int, db: Session = Depends(get_db)):
         }
         for m in mensajes
     ]
+
+#--- Tareas
+@router.post("/tareas/", response_model=schemas.TareaResponse)
+def crear_tarea(tarea: schemas.TareaCreate, db: Session = Depends(get_db)):
+    # 1. Validar que la carga académica existe
+    carga = db.query(models_mn.CargaAcademica).filter(
+        models_mn.CargaAcademica.id_carga_academica == tarea.id_carga_academica
+    ).first()
+    
+    if not carga:
+        raise HTTPException(status_code=404, detail="La carga académica no existe.")
+    
+    # 2. VALIDACIÓN DE PESO MÁXIMO
+    
+    peso_actual = db.query(func.sum(models.Tarea.peso)).filter(
+        models.Tarea.id_carga_academica == tarea.id_carga_academica,
+        models.Tarea.bimestre == tarea.bimestre,
+        models.Tarea.estado == "ACTIVO"
+    ).scalar() or 0
+
+    if peso_actual + tarea.peso > 100:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"El peso total del bimestre no puede exceder el 100%. Espacio disponible: {100 - peso_actual}%"
+        )
+
+    # 2. Validar regla de Examen Bimestral único
+    if tarea.tipo_evaluacion == "EXAMEN_BIMESTRAL":
+        existe = db.query(models.Tarea).filter(
+            models.Tarea.id_carga_academica == tarea.id_carga_academica,
+            models.Tarea.bimestre == tarea.bimestre,
+            models.Tarea.tipo_evaluacion == "EXAMEN_BIMESTRAL"
+        ).first()
+        if existe:
+            raise HTTPException(status_code=400, detail="Ya existe un examen bimestral.")
+
+    # 3. Crear registro
+    nueva_tarea = models.Tarea(
+        **tarea.model_dump(),
+        fecha_publicacion=datetime.now(),
+        estado="ACTIVO"
+    )
+    db.add(nueva_tarea)
+    db.commit()
+    db.refresh(nueva_tarea)
+    return nueva_tarea
+
+
+@router.get("/sabana-notas/{id_carga}/{bimestre}", response_model=schemas.SabanaNotasResponse)
+def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get_db)):
+    
+    # 1. Obtener la información de la carga académica
+    carga = db.query(models_mn.CargaAcademica).filter(models_mn.CargaAcademica.id_carga_academica == id_carga).first()
+    if not carga:
+        raise HTTPException(status_code=404, detail="Carga académica no encontrada")
+
+    # 2. Obtener los alumnos matriculados
+    alumnos = db.query(models_al.Alumno).join(
+        models_en.Matricula, models_al.Alumno.id_alumno == models_en.Matricula.id_alumno
+    ).filter(
+        models_en.Matricula.id_seccion == carga.id_seccion,
+        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
+    ).order_by(models_al.Alumno.apellidos).all()
+
+    # 3. Obtener tareas
+    tareas = db.query(models.Tarea).filter(
+        models.Tarea.id_carga_academica == id_carga,
+        models.Tarea.bimestre == bimestre,
+        models.Tarea.estado == "ACTIVO"
+    ).order_by(models.Tarea.fecha_publicacion).all()
+
+    # --- NUEVA LÓGICA PARA EVALUACIONES ---
+    lista_evaluaciones = []
+    for t in tareas:
+        # Contar cuántos archivos se han subido para esta tarea
+        entregas_con_archivo = [e for e in t.entregas if e.archivo_url]
+        conteo_envios = len(entregas_con_archivo)
+
+        lista_evaluaciones.append({
+            "id_tarea": t.id_tarea,
+            "titulo": t.titulo,
+            "tipo": t.tipo_evaluacion,
+            "descripcion": t.descripcion,
+            "fecha_entrega": t.fecha_entrega,
+            "bimestre": t.bimestre,
+            "peso": t.peso,
+            "total_entregas": conteo_envios,
+            "editable_total": conteo_envios == 0  # True si nadie ha subido nada
+        })
+
+    # 4. Construir la respuesta de alumnos (Mantenemos tu lógica de promedios)
+    resultado_alumnos = []
+    for alumno in alumnos:
+        dict_notas = {}
+        promedio_final = 0.0
+
+        for tarea in tareas:
+            entrega = db.query(models.EntregaTarea).filter(
+                models.EntregaTarea.id_tarea == tarea.id_tarea,
+                models.EntregaTarea.id_alumno == alumno.id_alumno
+            ).first()
+
+            valor_nota = float(entrega.calificacion) if entrega and entrega.calificacion else 0.0
+            dict_notas[str(tarea.id_tarea)] = valor_nota
+            
+            # --- LÓGICA DE PESOS ---
+            # Si la tarea vale 20%, multiplicamos nota * 0.20
+            promedio_final += (valor_nota * (tarea.peso / 100.0))
+
+        resultado_alumnos.append({
+            "id_alumno": alumno.id_alumno,
+            "nombres_completos": f"{alumno.apellidos}, {alumno.nombres}",
+            "notas": dict_notas,
+            "promedio": round(promedio_final, 2)
+        })
+
+    return {
+        "evaluaciones": lista_evaluaciones,
+        "alumnos_notas": resultado_alumnos
+    }
+
+@router.post("/guardar-notas-masivo/")
+def guardar_notas_masivo(payload: schemas.NotasMasivasCreate, db: Session = Depends(get_db)):
+    """
+    Se espera un payload como: 
+    { "id_tarea": 10, "notas": { "id_alumno_1": 15, "id_alumno_2": 20 } }
+    """
+    id_tarea = payload.id_tarea
+    notas = payload.notas
+
+    for id_alumno_str, calificacion in notas.items():
+        id_alumno = int(id_alumno_str)
+        # Buscar si ya existe una entrega para actualizarla, sino crearla
+        entrega = db.query(models.EntregaTarea).filter(
+            models.EntregaTarea.id_tarea == id_tarea,
+            models.EntregaTarea.id_alumno == int(id_alumno)
+        ).first()
+
+        if entrega:
+            entrega.calificacion = calificacion
+            entrega.fecha_envio = datetime.now() # Opcional: marcar actualización
+        else:
+            nueva_entrega = models.EntregaTarea(
+                id_tarea=id_tarea,
+                id_alumno=int(id_alumno),
+                calificacion=calificacion
+            )
+            db.add(nueva_entrega)
+    
+    db.commit()
+    return {"message": "Notas actualizadas correctamente"}
+
+@router.put("/calificar-entrega/{id_entrega}")
+def calificar_entrega(id_entrega: int, calificacion: float, retroalimentacion: str = None, db: Session = Depends(get_db)):
+    entrega = db.query(models.EntregaTarea).filter(models.EntregaTarea.id_entrega == id_entrega).first()
+    if not entrega:
+        raise HTTPException(status_code=404, detail="Entrega no encontrada")
+    
+    entrega.calificacion = calificacion
+    entrega.retroalimentacion_docente = retroalimentacion
+    db.commit()
+    return {"message": "Calificación registrada con éxito"}
+
+@router.get("/mis-notas/{id_carga}/{id_alumno}")
+def obtener_mis_notas(id_carga: int, id_alumno: int, db: Session = Depends(get_db)):
+    # Trae todas las tareas del curso
+    tareas = db.query(models.Tarea).filter(models.Tarea.id_carga_academica == id_carga).all()
+    
+    notas_detalle = []
+    for t in tareas:
+        entrega = db.query(models.EntregaTarea).filter(
+            models.EntregaTarea.id_tarea == t.id_tarea,
+            models.EntregaTarea.id_alumno == id_alumno
+        ).first()
+        
+        notas_detalle.append({
+            "tarea": t.titulo,
+            "tipo": t.tipo_evaluacion,
+            "nota": float(entrega.calificacion) if entrega and entrega.calificacion else None,
+            "fecha_entrega": t.fecha_entrega
+        })
+    
+    return notas_detalle
+
+
+@router.put("/tareas/{id_tarea}", response_model=schemas.TareaResponse)
+def editar_tarea(id_tarea: int, tarea_editada: schemas.TareaCreate, db: Session = Depends(get_db)):
+    tarea = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+
+    # Verificamos si existe al menos una entrega con archivo subido
+    tiene_archivos = db.query(models.EntregaTarea).filter(
+        models.EntregaTarea.id_tarea == id_tarea,
+        models.EntregaTarea.archivo_url != None
+    ).first()
+
+    if tiene_archivos:
+        # Si ya hay archivos, SOLO permitimos cambiar la fecha de entrega
+        tarea.fecha_entrega = tarea_editada.fecha_entrega
+        db.commit()
+        # Puedes lanzar un mensaje informativo o simplemente retornar
+        return tarea
+
+    # Si NO hay archivos, permitimos edición completa
+    tarea.titulo = tarea_editada.titulo
+    tarea.descripcion = tarea_editada.descripcion
+    tarea.fecha_entrega = tarea_editada.fecha_entrega
+    tarea.tipo_evaluacion = tarea_editada.tipo_evaluacion
+    tarea.bimestre = tarea_editada.bimestre
+    
+    db.commit()
+    db.refresh(tarea)
+    return tarea
+
+@router.delete("/tareas/{id_tarea}")
+def eliminar_tarea(id_tarea: int, db: Session = Depends(get_db)):
+    tarea = db.get(models.Tarea, id_tarea)
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+
+    # Bloqueo de seguridad: Alumnos con archivos
+    # Usamos la relación del modelo de nuevo
+    if any(e.archivo_url for e in tarea.entregas):
+        raise HTTPException(
+            status_code=400, 
+            detail="No se puede eliminar: Alumnos ya han subido archivos."
+        )
+
+    # Solo borras la tarea y SQLAlchemy borra las notas (EntregaTarea) automáticamente
+    db.delete(tarea)
+    db.commit()
+    return {"message": "Actividad eliminada con éxito"}
+
+@router.get("/tareas/{id_tarea}/entregas", response_model=List[schemas.EntregaDetalleResponse])
+def listar_entregas_con_archivos(id_tarea: int, db: Session = Depends(get_db)):
+    # Buscamos directamente en entregas usando la relación cargada
+    entregas = db.query(models.EntregaTarea).filter(
+        models.EntregaTarea.id_tarea == id_tarea,
+        models.EntregaTarea.archivo_url != None
+    ).all()
+
+    return [
+        {
+            "id_entrega": e.id_entrega,
+            "alumno": f"{e.alumno.apellidos}, {e.alumno.nombres}", # Usamos la relación
+            "archivo_url": e.archivo_url,
+            "comentario": e.comentario_alumno,
+            "fecha_envio": e.fecha_envio.strftime("%d/%m/%Y %H:%M"),
+            "calificacion": e.calificacion
+        } for e in entregas
+    ]
+
+@router.get("/tareas/{id_tarea}", response_model=schemas.TareaResponse)
+def obtener_detalle_tarea(id_tarea: int, db: Session = Depends(get_db)):
+    tarea = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    return tarea
+
+@router.post("/entregar-tarea/")
+async def entregar_tarea(
+    id_tarea: int = Form(...),
+    id_usuario: int = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    # 1. VALIDACIÓN PREVIA: ¿Existe la tarea y el alumno?
+    tarea_existe = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
+    if not tarea_existe:
+        raise HTTPException(status_code=404, detail="La tarea no existe.")
+
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Perfil de alumno no encontrado")
+
+    # 2. VALIDACIONES DE ARCHIVO
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Formato {file_ext} no permitido.")
+
+    # --- SOLUCIÓN DEFINITIVA ---
+    # Accedemos a file.file (objeto SpooledTemporaryFile de Python) 
+    # que sí acepta 2 argumentos en seek()
+    file.file.seek(0, 2) 
+    file_size = file.file.tell()
+    file.file.seek(0)
+
+    if file_size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"El archivo es muy grande ({round(file_size/1024/1024, 2)}MB). Máximo 10MB.")
+
+    # 3. GESTIÓN DE DIRECTORIOS
+    relative_folder = os.path.join("media", "entregas_tareas", f"tarea_{id_tarea}")
+    absolute_folder = os.path.join(BASE_DIR, relative_folder)
+    
+    # Asegurar que los directorios existan
+    try:
+        os.makedirs(absolute_folder, exist_ok=True)
+    except Exception as e:
+        print(f"Error creando carpetas: {e}")
+        raise HTTPException(status_code=500, detail="Error de permisos en el servidor.")
+
+    # Nombre único para evitar colisiones
+    unique_filename = f"alu_{alumno.id_alumno}_{uuid.uuid4().hex[:8]}{file_ext}"
+    file_path = os.path.join(absolute_folder, unique_filename)
+
+    # 4. GUARDADO FÍSICO
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        print(f"Error al guardar archivo: {e}")
+        raise HTTPException(status_code=500, detail="Error al escribir el archivo en disco.")
+
+    # 5. ACTUALIZACIÓN DE BASE DE DATOS
+    entrega = db.query(models.EntregaTarea).filter(
+        models.EntregaTarea.id_tarea == id_tarea,
+        models.EntregaTarea.id_alumno == alumno.id_alumno
+    ).first()
+
+    url_db = f"/{relative_folder}/{unique_filename}".replace("\\", "/")
+
+    if entrega:
+        # Borrar archivo físico anterior si existe para no llenar el disco de basura
+        if entrega.archivo_url:
+            old_file_path = os.path.join(BASE_DIR, entrega.archivo_url.lstrip("/"))
+            if os.path.exists(old_file_path):
+                try:
+                    os.remove(old_file_path)
+                except:
+                    pass 
+        
+        entrega.archivo_url = url_db
+        entrega.fecha_envio = datetime.now()
+    else:
+        entrega = models.EntregaTarea(
+            id_tarea=id_tarea,
+            id_alumno=alumno.id_alumno,
+            archivo_url=url_db,
+            fecha_envio=datetime.now()
+        )
+        db.add(entrega)
+
+    db.commit()
+    return {"message": "Tarea subida exitosamente", "url": url_db}
+
+@router.get("/tareas/{id_tarea}/{id_usuario}")
+def obtener_detalle_tarea_estudiante(id_tarea: int, id_usuario: int, db: Session = Depends(get_db)):
+    # 1. Buscar la tarea básica
+    tarea = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+
+    # 2. Buscar si el alumno ya tiene una entrega para esta tarea
+    # Primero necesitamos el id_alumno a partir del id_usuario
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    
+    entrega = None
+    if alumno:
+        entrega = db.query(models.EntregaTarea).filter(
+            models.EntregaTarea.id_tarea == id_tarea,
+            models.EntregaTarea.id_alumno == alumno.id_alumno
+        ).first()
+
+    # 3. Construimos una respuesta combinada
+    return {
+        "id_tarea": tarea.id_tarea,
+        "titulo": tarea.titulo,
+        "descripcion": tarea.descripcion,
+        "fecha_entrega": tarea.fecha_entrega,
+        "bimestre": tarea.bimestre,
+        "entregado": True if (entrega and entrega.archivo_url) else False,
+        "nota": entrega.calificacion if entrega else None,
+        "peso": tarea.peso,
+        "retroalimentacion_docente": entrega.retroalimentacion_docente if entrega else None,
+        "archivo_url": entrega.archivo_url if entrega else None
+    }

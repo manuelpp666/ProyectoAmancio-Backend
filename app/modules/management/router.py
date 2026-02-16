@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 from typing import List
 from app.db.database import get_db
 from app.modules.academic import models as models_ac
@@ -149,11 +150,13 @@ def obtener_detalle_curso_estudiante(
         "notas": notas,
         "tareas": [
             {
-                "id": t.Tarea.id_tarea,
+                "id_tarea": t.Tarea.id_tarea,
                 "titulo": t.Tarea.titulo,
                 "fecha_entrega": t.Tarea.fecha_entrega,
                 "entregado": t.fecha_envio is not None,
-                "nota": t.calificacion
+                "nota": t.calificacion,
+                "peso": t.Tarea.peso,
+                "bimestre": t.Tarea.bimestre
             } for t in tareas_query
         ]
     }
@@ -233,3 +236,59 @@ def actualizar_carga(carga_id: int, data: schemas.CargaUpdate, db: Session = Dep
     db.commit()
     db.refresh(db_carga)
     return db_carga
+
+@router.get("/mis-cursos-docente/{id_usuario}", response_model=List[schemas.CursoDocenteResponse])
+def obtener_cursos_docente(
+    id_usuario: int, 
+    anio: str, 
+    db: Session = Depends(get_db)
+):
+    # 1. Buscar al docente asociado al usuario
+    docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
+    
+    if not docente:
+        raise HTTPException(status_code=404, detail="Docente no encontrado")
+
+    # 2. Query para obtener los cursos asignados y contar alumnos
+    # Subquery para contar alumnos por sección
+    subquery_alumnos = (
+        db.query(
+            models_en.Matricula.id_seccion, 
+            func.count(models_en.Matricula.id_alumno).label("total_alumnos")
+        )
+        .filter(models_en.Matricula.id_anio_escolar == anio)
+        .group_by(models_en.Matricula.id_seccion)
+        .subquery()
+    )
+
+    cursos_query = (
+        db.query(
+            models.CargaAcademica.id_carga_academica,
+            models_ac.Curso.nombre.label("curso_nombre"),
+            models_ac.Grado.nombre.label("grado_nombre"),
+            models_ac.Seccion.nombre.label("seccion_nombre"),
+            func.coalesce(subquery_alumnos.c.total_alumnos, 0).label("num_alumnos")
+        )
+        .join(models_ac.Curso, models.CargaAcademica.id_curso == models_ac.Curso.id_curso)
+        .join(models_ac.Seccion, models.CargaAcademica.id_seccion == models_ac.Seccion.id_seccion)
+        .join(models_ac.Grado, models_ac.Seccion.id_grado == models_ac.Grado.id_grado)
+        .outerjoin(subquery_alumnos, models_ac.Seccion.id_seccion == subquery_alumnos.c.id_seccion)
+        .filter(
+            models.CargaAcademica.id_docente == docente.id_docente,
+            models.CargaAcademica.id_anio_escolar == anio
+        )
+        .all()
+    )
+
+    return [
+        {
+            "id_carga": c.id_carga_academica,
+            "curso_nombre": c.curso_nombre,
+            "grado_nombre": c.grado_nombre,
+            "seccion_nombre": c.seccion_nombre,
+            "alumnos": c.num_alumnos,
+            # Puedes asignar una imagen por defecto o lógica según el nombre
+            "img": "/matematicas.png" if "Matem" in c.curso_nombre else "/cienciasS.png"
+        }
+        for c in cursos_query
+    ]
