@@ -9,6 +9,15 @@ from . import models, schemas # Asegúrate de importar los modelos correctos
 
 router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
 
+#---- Sacar id_usuario de id_alumno
+# En tu router de alumnos o académico
+@router.get("/alumnos/usuario/{id_usuario}")
+def obtener_alumno_por_usuario(id_usuario: int, db: Session = Depends(get_db)):
+    alumno = db.query(models.Alumno).filter(models.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+    return {"id_alumno": alumno.id_alumno}
+
 @router.post("/", response_model=schemas.AlumnoResponse)
 def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db)):
     db_alumno = models.Alumno(**alumno.model_dump())
