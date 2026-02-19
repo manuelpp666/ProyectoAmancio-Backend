@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
+from datetime import date, datetime
 from app.db.database import get_db
 from app.modules.users.models import Usuario 
 from app.modules.users.relacion_familiar.models import RelacionFamiliar
+from app.modules.users import models as al_models
+from app.modules.finance import models as finance_models
 from app.core.util.password import get_password_hash
 from . import models, schemas # Asegúrate de importar los modelos correctos
 
@@ -60,15 +63,41 @@ def decidir_admision(
 
             # A. Crear Usuario para el ALUMNO (si no tiene uno asignado)
             if not alumno.id_usuario:
-                nuevo_user_alumno = Usuario(
-                    username=alumno.dni,
-                    password_hash=get_password_hash(alumno.dni), # El DNI es su clave inicial
-                    rol="ALUMNO", # Coincide con tu Enum
-                    activo=True
-                )
-                db.add(nuevo_user_alumno)
-                db.flush() # Para obtener el id_usuario inmediatamente
-                alumno.id_usuario = nuevo_user_alumno.id_usuario
+                # Verificamos si ya existe un usuario con ese DNI para evitar errores de duplicidad
+                user_existente = db.query(al_models.Usuario).filter(al_models.Usuario.username == alumno.dni).first()
+                
+                if user_existente:
+                    alumno.id_usuario = user_existente.id_usuario
+                else:
+                    nuevo_user_alumno = al_models.Usuario( # Asegúrate de usar models.Usuario si así se llama en tu archivo
+                        username=alumno.dni,
+                        password_hash=get_password_hash(alumno.dni),
+                        rol="ALUMNO",
+                        activo=True
+                    )
+                    db.add(nuevo_user_alumno)
+                    db.flush() 
+                    alumno.id_usuario = nuevo_user_alumno.id_usuario
+            # C. Buscar el trámite de Vacante
+            # Es vital que este trámite exista, si no, la transacción debe fallar
+            tipo_vacante = db.query(finance_models.TipoTramite).filter(
+                finance_models.TipoTramite.nombre.like("%VACANTE%")
+            ).first()
+
+            if not tipo_vacante:
+                raise Exception("Configuración faltante: No se encontró el trámite 'DERECHO DE VACANTE' en la tabla tipo_tramite.")
+
+            # D. Crear el registro de Pago
+            nuevo_pago = finance_models.Pago(
+                id_alumno=alumno.id_alumno,
+                concepto=f"DERECHO DE VACANTE - {alumno.nombres} {alumno.apellidos}",
+                monto=tipo_vacante.costo,
+                mora=0.00,
+                monto_total=tipo_vacante.costo,
+                estado="PENDIENTE",
+                fecha_vencimiento=date.today()
+            )
+            db.add(nuevo_pago)
         else:
             # --- LÓGICA DE RECHAZO ---
             alumno.estado_ingreso = "RECHAZADO"

@@ -3,6 +3,7 @@ import uuid
 import shutil
 from fastapi import APIRouter, Depends, HTTPException, status,File, UploadFile, Form
 from sqlalchemy.orm import Session, joinedload
+from datetime import datetime
 from typing import List,Optional
 from app.db.database import get_db
 from . import models, schemas
@@ -31,9 +32,40 @@ def listar_tipos_tramite(db: Session = Depends(get_db)):
     """Lista todos los tipos de trámite configurados en el sistema."""
     return db.query(models.TipoTramite).all()
 
+@router.get("/tramites-tipos/alumnos", response_model=List[schemas.TipoTramiteResponse])
+def listar_tipos_tramite_alumnos(db: Session = Depends(get_db)):
+    """
+    Lista los tipos de trámite visibles para los alumnos.
+    Filtra automáticamente procesos de Matrícula y Vacante para evitar confusiones.
+    """
+    return db.query(models.TipoTramite).filter(
+        models.TipoTramite.activo == True,
+        ~models.TipoTramite.nombre.ilike("%VACANTE%"),
+        ~models.TipoTramite.nombre.ilike("%MATRICULA%")
+    ).all()
+
 @router.post("/tramites-tipos/", response_model=schemas.TipoTramiteResponse)
 def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db)):
-    """Crea un nuevo tipo de trámite (Ej: Certificado de Estudios)."""
+    """Crea un nuevo tipo de trámite con validación de unicidad para VACANTE."""
+    
+    # 1. Convertimos el nombre a Mayúsculas para una comparación segura
+    nombre_nuevo = tramite.nombre.upper()
+
+    # 2. Validamos si el nombre contiene la palabra clave restrictiva
+    if "VACANTE" in nombre_nuevo:
+        # Buscamos en la base de datos si ya existe algún trámite que contenga 'VACANTE'
+        existe_vacante = db.query(models.TipoTramite).filter(
+            models.TipoTramite.nombre.ilike("%VACANTE%")
+        ).first()
+        
+        if existe_vacante:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Operación denegada: Ya existe el trámite '{existe_vacante.nombre}'. "
+                       f"Solo se permite un tipo de trámite de VACANTE."
+            )
+
+    # 3. Si pasa la validación, creamos el registro
     nuevo = models.TipoTramite(**tramite.model_dump())
     db.add(nuevo)
     db.commit()
@@ -42,11 +74,31 @@ def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends
 
 @router.put("/tramites-tipos/{id}", response_model=schemas.TipoTramiteResponse)
 def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db)):
-    """Edita un tipo de trámite existente."""
+    """Edita un tipo de trámite existente con validación de integridad para VACANTE."""
     db_tramite = db.query(models.TipoTramite).filter(models.TipoTramite.id_tipo_tramite == id).first()
+    
     if not db_tramite:
         raise HTTPException(status_code=404, detail="Trámite no encontrado")
     
+    # 1. Convertimos el nuevo nombre a mayúsculas para comparar
+    nombre_nuevo = tramite.nombre.upper()
+
+    # 2. Si el usuario intenta ponerle "VACANTE" a un trámite...
+    if "VACANTE" in nombre_nuevo:
+        # Buscamos si ya existe OTRO trámite (con ID diferente) que tenga la palabra VACANTE
+        existe_otro = db.query(models.TipoTramite).filter(
+            models.TipoTramite.nombre.ilike("%VACANTE%"),
+            models.TipoTramite.id_tipo_tramite != id  # Crucial: que no sea el mismo que estamos editando
+        ).first()
+        
+        if existe_otro:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Conflicto de integridad: No se puede renombrar como '{tramite.nombre}' "
+                       f"porque ya existe el trámite '{existe_otro.nombre}' configurado para procesos automáticos."
+            )
+
+    # 3. Aplicamos los cambios
     db_tramite.nombre = tramite.nombre
     db_tramite.costo = tramite.costo
     db_tramite.requisitos = tramite.requisitos
@@ -279,3 +331,33 @@ def dar_dictamen_solicitud(id: int, payload: schemas.DictamenSolicitud, db: Sess
     solicitud.respuesta_administrativa = payload.respuesta_administrativa
     db.commit()
     return {"message": "Dictamen registrado correctamente"}
+
+@router.patch("/pagos/{id_pago}/confirmar-manual")
+def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
+    """
+    Permite a un administrador confirmar un pago recibido en efectivo o fuera del sistema bancario.
+    Esto disparará el trigger de matrícula si el pago es de concepto VACANTE.
+    """
+    pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
+    
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    
+    if pago.estado == "PAGADO":
+        raise HTTPException(status_code=400, detail="Este pago ya fue procesado anteriormente")
+
+    # Actualizamos el estado
+    pago.estado = "PAGADO"
+    pago.fecha_pago = datetime.now()
+    pago.codigo_operacion_bcp = "MANUAL-CAJA" # Referencia interna
+
+    # Si el pago está amarrado a una solicitud de trámite (ej. certificado), actualizarla
+    if pago.id_solicitud_tramite:
+        solicitud = db.query(models.SolicitudTramite).filter(
+            models.SolicitudTramite.id_solicitud_tramite == pago.id_solicitud_tramite
+        ).first()
+        if solicitud:
+            solicitud.estado = "PAGADO_PENDIENTE_REV"
+
+    db.commit()
+    return {"message": "Pago confirmado exitosamente. Matrícula generada si correspondía."}

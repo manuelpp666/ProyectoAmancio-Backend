@@ -25,7 +25,11 @@ from .schemas import ChatbotResponse
 
 load_dotenv()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FILE_DIR = os.path.dirname(os.path.abspath(__file__)) 
+
+# 2. Subimos 3 niveles: virtual -> modules -> app -> Backend
+# Esto garantiza que BASE_DIR sea la carpeta raíz del proyecto Backend
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(FILE_DIR)))
 UPLOAD_DIR = os.path.join(BASE_DIR, "media", "chatbot_files")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
