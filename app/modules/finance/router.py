@@ -10,7 +10,7 @@ from . import models, schemas
 from app.modules.academic import models as academic_models
 from app.modules.users.alumno import models as user_models
 from app.modules.enrollment import models as er_models
-
+from .service import FinanceService
 router = APIRouter(prefix="/finance", tags=["Finanzas"])
 
 
@@ -99,12 +99,9 @@ def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session
             )
 
     # 3. Aplicamos los cambios
-    db_tramite.nombre = tramite.nombre
-    db_tramite.costo = tramite.costo
-    db_tramite.requisitos = tramite.requisitos
-    db_tramite.alcance = tramite.alcance
-    db_tramite.grados_permitidos = tramite.grados_permitidos
-    db_tramite.activo = tramite.activo
+    update_data = tramite.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_tramite, key, value)
     
     db.commit()
     db.refresh(db_tramite)
@@ -190,7 +187,7 @@ async def solicitar_tramite(
             id_usuario=id_usuario_responsable,
             id_alumno=id_alumno,
             id_solicitud_tramite=nueva_solicitud.id_solicitud_tramite,
-            concepto=f"TRAMITE: {tipo_tramite.nombre}",
+            concepto=f"TRAMITE: {tipo_tramite.nombre} ({tipo_tramite.periodo_academico})",
             monto=tipo_tramite.costo,
             monto_total=tipo_tramite.costo,
             estado="PENDIENTE",
@@ -335,8 +332,8 @@ def dar_dictamen_solicitud(id: int, payload: schemas.DictamenSolicitud, db: Sess
 @router.patch("/pagos/{id_pago}/confirmar-manual")
 def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
     """
-    Permite a un administrador confirmar un pago recibido en efectivo o fuera del sistema bancario.
-    Esto disparará el trigger de matrícula si el pago es de concepto VACANTE.
+    Confirma un pago manualmente. Si es de VACANTE, el trigger crea la matrícula
+    y luego el service genera la primera pensión.
     """
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     
@@ -346,12 +343,11 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
     if pago.estado == "PAGADO":
         raise HTTPException(status_code=400, detail="Este pago ya fue procesado anteriormente")
 
-    # Actualizamos el estado
+    # 1. Actualizar estado del pago
     pago.estado = "PAGADO"
     pago.fecha_pago = datetime.now()
-    pago.codigo_operacion_bcp = "MANUAL-CAJA" # Referencia interna
+    pago.codigo_operacion_bcp = "MANUAL-CAJA"
 
-    # Si el pago está amarrado a una solicitud de trámite (ej. certificado), actualizarla
     if pago.id_solicitud_tramite:
         solicitud = db.query(models.SolicitudTramite).filter(
             models.SolicitudTramite.id_solicitud_tramite == pago.id_solicitud_tramite
@@ -359,5 +355,94 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
         if solicitud:
             solicitud.estado = "PAGADO_PENDIENTE_REV"
 
+    # 2. Commit para que el TRIGGER de MySQL se ejecute AHORA
     db.commit()
-    return {"message": "Pago confirmado exitosamente. Matrícula generada si correspondía."}
+    db.refresh(pago) # Esto asegura que tenemos los datos frescos post-trigger
+
+    # 3. Lógica post-matrícula (Generación de pensión)
+    if "VACANTE" in pago.concepto.upper():
+        # Buscamos la matrícula que el trigger acaba de insertar
+        # Importante: Importar el modelo de matrícula si no lo tienes arriba
+        matricula = db.query(er_models.Matricula).filter(
+            er_models.Matricula.id_alumno == pago.id_alumno,
+            er_models.Matricula.estado == "MATRICULADO"
+        ).order_by(er_models.Matricula.id_matricula.desc()).first()
+
+        if matricula:
+            # Generar automáticamente la pensión del mes actual
+            hoy = datetime.now()
+             
+            
+            FinanceService.generar_pension_mensual(
+                db=db,
+                id_alumno=pago.id_alumno,
+                id_matricula=matricula.id_matricula,
+                tipo_periodo=matricula.tipo_matricula,
+                mes=hoy.month,
+                anio=hoy.year
+            )
+
+    return {"message": "Pago confirmado y pensión inicial generada si correspondía."}
+
+@router.get("/alumnos/{id_alumno}/deudas")
+def obtener_deudas_alumno(id_alumno: int, db: Session = Depends(get_db)):
+    deudas = db.query(models.Pago).filter(
+        models.Pago.id_alumno == id_alumno,
+        models.Pago.estado == "PENDIENTE"
+    ).order_by(models.Pago.fecha_vencimiento.asc()).all()
+    return deudas
+
+# Para el historial (Pagados)
+@router.get("/pagos/historial/{id_alumno}")
+def obtener_historial_alumno(id_alumno: int, db: Session = Depends(get_db)):
+    return db.query(models.Pago).filter(
+        models.Pago.id_alumno == id_alumno,
+        models.Pago.estado == "PAGADO" # Asumo que cambias el estado a 'PAGADO' tras el pago
+    ).order_by(models.Pago.fecha_pago.desc()).all()
+
+#-- Estos deberiamos ajustarlos en el cron pero nse como hacerlo :C
+@router.post("/tareas/generar-pensiones-mes")
+def ejecutar_generacion_mensual(db: Session = Depends(get_db)):
+    """
+    Endpoint diseñado para ser llamado por un Cron Job el día 1 de cada mes.
+    """
+    hoy = datetime.now()
+    
+    # 1. Buscamos años escolares que estén marcados como activos
+    anios_activos = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.activo == True
+    ).all()
+    
+    if not anios_activos:
+        return {"message": "No hay años escolares activos para generar pensiones."}
+
+    total_generados = 0
+    
+    for anio in anios_activos:
+        # 2. Buscamos todas las matrículas vigentes de ese año
+        matriculas = db.query(er_models.Matricula).filter(
+            er_models.Matricula.id_anio_escolar == anio.id_anio_escolar,
+            er_models.Matricula.estado == "MATRICULADO"
+        ).all()
+
+        for m in matriculas:
+            # 3. Usamos el Service para generar la pensión (el service ya evita duplicados)
+            FinanceService.generar_pension_mensual(
+                db=db,
+                id_alumno=m.id_alumno,
+                id_matricula=m.id_matricula,
+                tipo_periodo=m.tipo_matricula, # REGULAR o VERANO
+                mes=hoy.month,
+                anio=hoy.year
+            )
+            total_generados += 1
+
+    return {"message": f"Proceso completado. Se revisaron {total_generados} alumnos."}
+
+@router.post("/tareas/actualizar-moras")
+def actualizar_moras_diarias(db: Session = Depends(get_db)):
+    """
+    Endpoint para ser llamado por un Cron Job diariamente a medianoche.
+    """
+    cantidad = FinanceService.aplicar_moras_pagos_vencidos(db)
+    return {"message": f"Se aplicó mora a {cantidad} pagos vencidos."}

@@ -2,10 +2,16 @@ from pydantic import BaseModel, ConfigDict
 from decimal import Decimal
 from typing import Optional
 from datetime import date, datetime
-
+from enum import Enum as PyEnum
 # =======================
 # 1. TIPOS DE TRÁMITE (Configuración - Admin)
 # =======================
+class PeriodoAcademicoSchema(str, PyEnum):
+    REGULAR = "REGULAR"
+    VERANO = "VERANO"
+    AMBOS = "AMBOS"
+
+
 class TipoTramiteBase(BaseModel):
     nombre: str
     costo: Decimal
@@ -13,6 +19,7 @@ class TipoTramiteBase(BaseModel):
     alcance: str = "TODOS"
     grados_permitidos: Optional[str] = None
     activo: bool = True
+    periodo_academico: PeriodoAcademicoSchema = PeriodoAcademicoSchema.REGULAR
 
 class TipoTramiteCreate(TipoTramiteBase):
     pass

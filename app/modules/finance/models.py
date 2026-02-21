@@ -4,6 +4,11 @@ from sqlalchemy.sql import func
 from app.db.database import Base
 import enum
 
+
+class PeriodoAcademico(str, enum.Enum):
+    REGULAR = "REGULAR"
+    VERANO = "VERANO"
+    AMBOS = "AMBOS"
 # Opcional: Definir estados como Enums para evitar errores de escritura
 class EstadoPago(str, enum.Enum):
     PENDIENTE = "PENDIENTE"
@@ -21,7 +26,11 @@ class TipoTramite(Base):
     activo = Column(Boolean, default=True)
     alcance = Column(String(20), default="TODOS") # E.g., 'PRIMARIA', 'SECUNDARIA'
     grados_permitidos = Column(String(255), nullable=True)
-
+    periodo_academico = Column(
+            Enum(PeriodoAcademico), 
+            default=PeriodoAcademico.REGULAR,
+            nullable=False
+        )
     # Relación: Un tipo de trámite puede estar en muchas solicitudes
     solicitudes = relationship("SolicitudTramite", back_populates="tipo")
 
