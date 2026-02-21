@@ -707,3 +707,87 @@ def obtener_detalle_tarea_estudiante(id_tarea: int, id_usuario: int, db: Session
         "retroalimentacion_docente": entrega.retroalimentacion_docente if entrega else None,
         "archivo_url": entrega.archivo_url if entrega else None
     }
+
+@router.get("/api/dashboard/estudiante/{id_usuario}")
+def obtener_dashboard_estudiante(id_usuario: int, db: Session = Depends(get_db)):
+    # --- NUEVO: Buscar el año escolar activo ---
+    anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
+    
+    if not anio_activo:
+        raise HTTPException(status_code=404, detail="No hay un año escolar activo configurado")
+    
+    # Usamos el id del año escolar (o el campo 'nombre'/'anio' según tu modelo)
+    id_anio = anio_activo.id_anio_escolar 
+    # -------------------------------------------
+
+    # 1. Buscar alumno
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
+    # 2. Obtenemos los cursos usando el id_anio dinámico
+    cursos_query = (
+        db.query(
+            models_ac.Curso.id_curso,
+            models_ac.Curso.nombre.label("curso_nombre"),
+            models_mn.CargaAcademica.id_carga_academica,
+            models_doc.Docente.nombres.label("docente_nombres"),
+            models_doc.Docente.apellidos.label("docente_apellidos")
+        )
+        .select_from(models_en.Matricula)
+        .join(models_ac.Seccion, models_ac.Seccion.id_seccion == models_en.Matricula.id_seccion)
+        .join(models_ac.Grado, models_ac.Grado.id_grado == models_ac.Seccion.id_grado)
+        .join(models_ac.PlanEstudio, models_ac.PlanEstudio.id_grado == models_ac.Grado.id_grado)
+        .join(models_ac.Curso, models_ac.Curso.id_curso == models_ac.PlanEstudio.id_curso)
+        .outerjoin(models_mn.CargaAcademica, 
+            (models_mn.CargaAcademica.id_curso == models_ac.Curso.id_curso) & 
+            (models_mn.CargaAcademica.id_seccion == models_en.Matricula.id_seccion) &
+            (models_mn.CargaAcademica.id_anio_escolar == id_anio) # <--- Usamos el ID dinámico
+        )
+        .outerjoin(models_doc.Docente, models_mn.CargaAcademica.id_docente == models_doc.Docente.id_docente)
+        .filter(
+            models_en.Matricula.id_alumno == alumno.id_alumno, 
+            models_en.Matricula.id_anio_escolar == id_anio # <--- Usamos el ID dinámico
+        )
+        .all()
+    )
+
+    lista_cursos = []
+    lista_tareas = []
+
+    for c in cursos_query:
+        # A. Agregar al listado de cursos
+        lista_cursos.append({
+            "id": c.id_curso,
+            "nombre": c.curso_nombre,
+            "docente": f"{c.docente_nombres or ''} {c.docente_apellidos or ''}".strip()
+        })
+
+        # B. Buscar tareas usando el id_carga_academica obtenido en la query
+        if c.id_carga_academica:
+            tareas = db.query(models.Tarea).filter(
+                models.Tarea.id_carga_academica == c.id_carga_academica,
+                models.Tarea.fecha_entrega >= datetime.now()
+            ).all()
+
+            for t in tareas:
+                # Verificar entrega
+                entrega = db.query(models.EntregaTarea).filter(
+                    models.EntregaTarea.id_tarea == t.id_tarea,
+                    models.EntregaTarea.id_alumno == alumno.id_alumno
+                ).first()
+                
+                if not entrega:
+                    lista_tareas.append({
+                        "id": t.id_tarea,
+                        "curso": c.curso_nombre,
+                        "titulo": t.titulo,
+                        "fecha": t.fecha_entrega
+                    })
+
+    return {
+        "nombre_completo": f"{alumno.nombres} {alumno.apellidos}",
+        "cursos": lista_cursos,
+        "tareas_pendientes": lista_tareas,
+        "anio_actual": anio_activo.id_anio_escolar
+    }

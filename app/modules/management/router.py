@@ -292,3 +292,79 @@ def obtener_cursos_docente(
         }
         for c in cursos_query
     ]
+
+
+@router.get("/mis-cursos-docente-dashboard/{id_usuario}")
+def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_db)):
+    # 1. Buscar año activo automáticamente
+    anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
+    if not anio_activo:
+        raise HTTPException(status_code=404, detail="No hay año escolar activo")
+    
+    # 2. Buscar docente
+    docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
+    if not docente:
+        raise HTTPException(status_code=404, detail="Docente no encontrado")
+
+    # 3. Query de cursos
+    cursos_query = (
+        db.query(
+            models_mn.CargaAcademica.id_carga_academica,
+            models_ac.Curso.nombre.label("curso_nombre"),
+            models_ac.Grado.nombre.label("grado_nombre"),
+            models_ac.Seccion.nombre.label("seccion_nombre"),
+        )
+        .join(models_ac.Curso, models_mn.CargaAcademica.id_curso == models_ac.Curso.id_curso)
+        .join(models_ac.Seccion, models_mn.CargaAcademica.id_seccion == models_ac.Seccion.id_seccion)
+        .join(models_ac.Grado, models_ac.Seccion.id_grado == models_ac.Grado.id_grado)
+        .filter(
+            models_mn.CargaAcademica.id_docente == docente.id_docente,
+            models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
+        )
+        .all()
+    )
+
+    return [
+        {
+            "id_carga": c.id_carga_academica,
+            "nombre": c.curso_nombre,
+            "grado_seccion": f"{c.grado_nombre} {c.seccion_nombre}",
+        }
+        for c in cursos_query
+    ]
+
+@router.get("/resumen-docente/{id_usuario}")
+def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db)):
+    # 1. Obtener ID del docente
+    docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
+    if not docente:
+        raise HTTPException(status_code=404, detail="Docente no encontrado")
+        
+    # 2. Obtener las cargas académicas del docente (que tienen id_seccion)
+    cargas = db.query(models_mn.CargaAcademica).filter(models_mn.CargaAcademica.id_docente == docente.id_docente).all()
+    
+    # Extraer los IDs de las secciones que el docente tiene a su cargo
+    ids_secciones = [c.id_seccion for c in cargas]
+    ids_cargas = [c.id_carga_academica for c in cargas] # Los guardamos para la consulta de tareas
+
+    # 3. Cursos asignados (es la cantidad de cargas)
+    num_cursos = len(cargas)
+
+    # 4. Alumnos totales: Matrículas en esas secciones
+    # Filtramos por las secciones que el docente tiene asignadas
+    num_alumnos = db.query(models_en.Matricula).filter(models_en.Matricula.id_seccion.in_(ids_secciones)).count()
+
+    # 5. Pendientes de calificar
+    # Usamos las IDs de carga académica para buscar las tareas de esas secciones
+    num_pendientes = db.query(models_vr.EntregaTarea).join(
+        models_vr.Tarea, models_vr.EntregaTarea.id_tarea == models_vr.Tarea.id_tarea
+    ).filter(
+        models_vr.Tarea.id_carga_academica.in_(ids_cargas),
+        models_vr.EntregaTarea.calificacion == None
+    ).count()
+
+    return {
+        "cursos": num_cursos,
+        "alumnos": num_alumnos,
+        "pendientes": num_pendientes
+    }
