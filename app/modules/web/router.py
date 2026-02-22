@@ -4,8 +4,8 @@ from typing import List
 from app.db.database import get_db
 from . import models, schemas
 from sqlalchemy import or_
-from datetime import datetime
-from sqlalchemy import extract
+from datetime import datetime,date
+from sqlalchemy import extract,desc,asc
 
 router = APIRouter(prefix="/web", tags=["Web Institucional"])
 
@@ -123,3 +123,32 @@ def eliminar_evento(evento_id: int, db: Session = Depends(get_db)):
     db_evento.activo = False
     db.commit()
     return {"message": "Evento desactivado correctamente"}
+
+
+@router.get("/eventos/resumen")
+def obtener_resumen_eventos(db: Session = Depends(get_db)):
+    hoy = datetime.now()
+    
+    # 1. Evento más cercano que YA PASÓ (el último realizado)
+    evento_pasado = db.query(models.Evento).filter(
+        models.Evento.activo == True,
+        models.Evento.fecha_inicio < hoy
+    ).order_by(desc(models.Evento.fecha_inicio)).first()
+    
+    # 2. Próximo evento (el más cercano al futuro)
+    proximo_evento = db.query(models.Evento).filter(
+        models.Evento.activo == True,
+        models.Evento.fecha_inicio >= hoy
+    ).order_by(asc(models.Evento.fecha_inicio)).first()
+    
+    # Calcular días faltantes para el próximo
+    dias_faltantes = None
+    if proximo_evento:
+        delta = proximo_evento.fecha_inicio - hoy
+        dias_faltantes = delta.days if delta.days >= 0 else 0
+        
+    return {
+        "evento_pasado": evento_pasado,
+        "proximo_evento": proximo_evento,
+        "dias_faltantes_proximo": dias_faltantes
+    }

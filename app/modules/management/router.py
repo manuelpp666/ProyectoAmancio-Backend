@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import List
+from datetime import datetime, date
 from app.db.database import get_db
 from app.modules.academic import models as models_ac
 from app.modules.users.alumno import models as models_al
@@ -9,6 +10,8 @@ from app.modules.users.docente import models as models_doc
 from app.modules.enrollment import models as models_en
 from app.modules.virtual import models as models_vr
 from app.modules.management import models as models_mn
+from app.modules.finance import models as models_fi
+from app.modules.web import models as models_web
 from . import models, schemas
 
 
@@ -368,3 +371,74 @@ def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db)):
         "alumnos": num_alumnos,
         "pendientes": num_pendientes
     }
+
+
+@router.get("/notificaciones/{id_usuario}")
+def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db)):
+    # 1. Obtener año activo
+    anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
+    if not anio_activo:
+        return {"notificaciones": []}
+    
+    notificaciones = []
+    hoy = datetime.now()
+
+    # --- A. DOCENTE ---
+    docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
+    if docente:
+        entregas = db.query(models_vr.EntregaTarea).join(models_vr.Tarea).join(models_mn.CargaAcademica)\
+            .filter(
+                models_mn.CargaAcademica.id_docente == docente.id_docente,
+                models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
+            ).order_by(models_vr.EntregaTarea.fecha_envio.desc()).limit(5).all()
+        
+        for e in entregas:
+            notificaciones.append({
+                "tipo": "entrega",
+                "mensaje": f"Nueva entrega: {e.alumno.nombres} en {e.tarea.titulo}",
+                "fecha": e.fecha_envio.isoformat()
+            })
+
+    # --- B. ALUMNO ---
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if alumno:
+        calificaciones = db.query(models_vr.EntregaTarea)\
+            .filter(models_vr.EntregaTarea.id_alumno == alumno.id_alumno, models_vr.EntregaTarea.calificacion != None)\
+            .order_by(models_vr.EntregaTarea.fecha_envio.desc()).limit(3).all()
+        
+        for c in calificaciones:
+            notificaciones.append({
+                "tipo": "nota",
+                "mensaje": f"Nota recibida en {c.tarea.titulo}: {c.calificacion}",
+                "fecha": c.fecha_envio.isoformat()
+            })
+            
+        deudas = db.query(models_fi.Pago).join(models_en.Matricula)\
+            .filter(
+                models_fi.Pago.id_alumno == alumno.id_alumno,
+                models_fi.Pago.estado == "PENDIENTE",
+                models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
+            ).all()
+        
+        for d in deudas:
+            notificaciones.append({
+                "tipo": "pago",
+                "mensaje": f"Pago pendiente: {d.concepto} (S/ {d.monto_total})",
+                "fecha": d.fecha_vencimiento.isoformat() if d.fecha_vencimiento else None
+            })
+
+    # --- C. EVENTOS (Comunes para todos) ---
+    # Buscamos eventos activos que ocurran hoy o a futuro
+    eventos = db.query(models_web.Evento).filter(
+        models_web.Evento.activo == True,
+        models_web.Evento.fecha_inicio >= date.today() # O datetime.now() para mayor precisión
+    ).order_by(models_web.Evento.fecha_inicio.asc()).limit(3).all()
+    
+    for ev in eventos:
+        notificaciones.append({
+            "tipo": "evento",
+            "mensaje": f"Evento: {ev.titulo} - {ev.descripcion or ''}",
+            "fecha": ev.fecha_inicio.isoformat()
+        })
+
+    return {"notificaciones": notificaciones}
