@@ -67,7 +67,7 @@ def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, d
     if not db_noticia:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
     
-    for key, value in noticia_update.dict().items():
+    for key, value in noticia_update.model_dump().items():
         setattr(db_noticia, key, value)
     
     db.commit()
@@ -76,7 +76,7 @@ def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, d
 
 @router.post("/eventos/", response_model=schemas.EventoResponse)
 def crear_evento(evento: schemas.EventoCreate, db: Session = Depends(get_db)):
-    nueva = models.Evento(**evento.dict())
+    nueva = models.Evento(**evento.model_dump())
     db.add(nueva)
     db.commit()
     db.refresh(nueva)
