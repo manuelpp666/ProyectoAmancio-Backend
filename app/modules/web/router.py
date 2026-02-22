@@ -4,6 +4,8 @@ from typing import List
 from app.db.database import get_db
 from . import models, schemas
 from sqlalchemy import or_
+from datetime import datetime
+from sqlalchemy import extract
 
 router = APIRouter(prefix="/web", tags=["Web Institucional"])
 
@@ -80,6 +82,44 @@ def crear_evento(evento: schemas.EventoCreate, db: Session = Depends(get_db)):
     db.refresh(nueva)
     return nueva
 
-@router.get("/eventos/", response_model=List[schemas.EventoResponse])
-def listar_eventos(db: Session = Depends(get_db)):
-    return db.query(models.Evento).filter(models.Evento.activo == True).all()
+# 1. Listar eventos del año actual (filtrado y ordenado)
+@router.get("/eventos/actual", response_model=List[schemas.EventoResponse])
+def listar_eventos_anio_actual(db: Session = Depends(get_db)):
+    anio_actual = datetime.now().year
+    return db.query(models.Evento)\
+             .filter(models.Evento.activo == True, extract('year', models.Evento.fecha_inicio) == anio_actual)\
+             .order_by(models.Evento.fecha_inicio.asc())\
+             .all()
+
+# 2. Listar TODOS los eventos (ordenados)
+@router.get("/eventos/todos", response_model=List[schemas.EventoResponse])
+def listar_todos_eventos(db: Session = Depends(get_db)):
+    return db.query(models.Evento)\
+             .filter(models.Evento.activo == True)\
+             .order_by(models.Evento.fecha_inicio.asc())\
+             .all()
+
+
+@router.put("/eventos/{evento_id}", response_model=schemas.EventoResponse)
+def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: Session = Depends(get_db)):
+    db_evento = db.query(models.Evento).filter(models.Evento.id_evento == evento_id).first()
+    if not db_evento:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    
+    for key, value in evento_update.model_dump().items():
+        setattr(db_evento, key, value)
+    
+    db.commit()
+    db.refresh(db_evento)
+    return db_evento
+
+@router.delete("/eventos/{evento_id}")
+def eliminar_evento(evento_id: int, db: Session = Depends(get_db)):
+    db_evento = db.query(models.Evento).filter(models.Evento.id_evento == evento_id).first()
+    if not db_evento:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    
+    # "Soft delete" lógico (igual que hiciste con noticias)
+    db_evento.activo = False
+    db.commit()
+    return {"message": "Evento desactivado correctamente"}

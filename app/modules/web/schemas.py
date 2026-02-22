@@ -18,6 +18,7 @@ class NoticiaResponse(NoticiaCreate):
 class EventoCreate(BaseModel):
     titulo: str
     fecha_inicio: datetime
+    fecha_fin: Optional[datetime] = None
     tipo_evento: Optional[str] = None
     color: Optional[str] = None
     descripcion: Optional[str] = None
