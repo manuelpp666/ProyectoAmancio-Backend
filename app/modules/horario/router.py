@@ -9,6 +9,8 @@ from app.modules.horario.schemas import HorarioCreate, HorarioResponse, HoraLect
 from app.modules.academic.models import Seccion
 from app.modules.enrollment.models import Matricula
 from app.modules.users.alumno.models import Alumno
+from app.modules.users.models import Usuario
+from app.modules.users.docente.models import Docente
 
 router = APIRouter(prefix="/horarios", tags=["Horarios"])
 
@@ -121,45 +123,67 @@ def obtener_materias_disponibles(id_seccion: int, db: Session = Depends(get_db))
         "docente_nombre": f"{m.docente.nombres} {m.docente.apellidos}"
     } for m in materias]
 
-@router.get("/alumno/usuario/{id_usuario}", response_model=List[HorarioResponse])
+@router.get("/usuario/{id_usuario}", response_model=List[HorarioResponse])
 def obtener_horario_por_usuario(
     id_usuario: int, 
     id_anio_escolar: str, 
     db: Session = Depends(get_db)
 ):
     """
-    Retorna el horario completo de un alumno basado en su id_usuario 
-    para un año escolar específico.
+    Obtiene el horario basado en el rol definido en la tabla Usuario.
     """
+    # 1. Obtenemos el usuario para saber su rol
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == id_usuario).first()
     
-    # 1. Buscamos al alumno que pertenece a este id_usuario
-    alumno = db.query(Alumno).filter(Alumno.id_usuario == id_usuario).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    if not alumno:
-        raise HTTPException(
-            status_code=404, 
-            detail="No se encontró un alumno asociado a este usuario"
-        )
+    horarios = []
+    rol = usuario.rol.upper()  # Aseguramos consistencia
 
-    # 2. Buscamos la matrícula usando el id_alumno encontrado
-    matricula = db.query(Matricula).join(Seccion).filter(
-        Matricula.id_alumno == alumno.id_alumno,
-        Seccion.id_anio_escolar == id_anio_escolar
-    ).first()
+    # 2. Lógica según el rol del usuario
+    if rol == "ALUMNO":
+        alumno = db.query(Alumno).filter(Alumno.id_usuario == id_usuario).first()
 
-    if not matricula:
-        raise HTTPException(
-            status_code=404, 
-            detail="El alumno no tiene una matrícula registrada para el año escolar seleccionado"
-        )
+        if not alumno:
+            raise HTTPException(
+                status_code=404, 
+                detail="No se encontró un alumno asociado a este usuario"
+            )
 
-    # 3. Lógica para obtener los horarios (se mantiene igual)
-    id_seccion = matricula.id_seccion
+        # 2. Buscamos la matrícula usando el id_alumno encontrado
+        matricula = db.query(Matricula).join(Seccion).filter(
+            Matricula.id_alumno == alumno.id_alumno,
+            Seccion.id_anio_escolar == id_anio_escolar
+        ).first()
+
+        if not matricula:
+            raise HTTPException(
+                status_code=404, 
+                detail="El alumno no tiene una matrícula registrada para el año escolar seleccionado"
+            )
+
+        # 3. Lógica para obtener los horarios (se mantiene igual)
+        id_seccion = matricula.id_seccion
+        
+        horarios = db.query(HorarioEscolar).join(
+            CargaAcademica, HorarioEscolar.id_carga_academica == CargaAcademica.id_carga_academica
+        ).filter(CargaAcademica.id_seccion == id_seccion).all()
+    elif rol == "DOCENTE":
+        docente = db.query(Docente).filter(Docente.id_usuario == id_usuario).first()
+        if not docente:
+            raise HTTPException(status_code=404, detail="Docente no vinculado a este usuario")
+
+        # Filtramos horarios donde el docente tiene carga en el año escolar dado
+        horarios = db.query(HorarioEscolar).join(CargaAcademica).join(Seccion).filter(
+            CargaAcademica.id_docente == docente.id_docente,
+            Seccion.id_anio_escolar == id_anio_escolar
+        ).all()
     
-    horarios = db.query(HorarioEscolar).join(
-        CargaAcademica, HorarioEscolar.id_carga_academica == CargaAcademica.id_carga_academica
-    ).filter(CargaAcademica.id_seccion == id_seccion).all()
+    else:
+        raise HTTPException(status_code=400, detail=f"Rol '{rol}' no soportado para consulta de horarios")
 
+    # 3. Mapeo común a la respuesta
     resultado = []
     for h in horarios:
         dia = h.dia_semana.value if hasattr(h.dia_semana, 'value') else h.dia_semana

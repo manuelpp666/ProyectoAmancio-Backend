@@ -164,6 +164,55 @@ def obtener_detalle_curso_estudiante(
         ]
     }
 
+@router.get("/resumen-notas/{id_usuario}")
+def obtener_resumen_notas_estudiante(
+    id_usuario: int, 
+    anio: str, 
+    db: Session = Depends(get_db)
+):
+    # 1. Obtener al alumno
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
+    # 2. Obtener matrícula
+    matricula = db.query(models_en.Matricula).filter(
+        models_en.Matricula.id_alumno == alumno.id_alumno,
+        models_en.Matricula.id_anio_escolar == anio
+    ).first()
+
+    if not matricula:
+        return []
+
+    # 3. Consulta maestra para obtener todos los cursos de la sección del alumno
+    # y sus notas (si existen)
+    resultados = (
+        db.query(
+            models_ac.Curso.id_curso,
+            models_ac.Curso.nombre.label("curso_nombre"),
+            func.coalesce(models_mn.ResumenNota.promedio_final, 0).label("promedio_final"),
+            func.coalesce(models_mn.ResumenNota.nota_bimestre1, 0).label("nota_bimestre1"),
+            func.coalesce(models_mn.ResumenNota.nota_bimestre2, 0).label("nota_bimestre2"),
+            func.coalesce(models_mn.ResumenNota.nota_bimestre3, 0).label("nota_bimestre3"),
+            func.coalesce(models_mn.ResumenNota.nota_bimestre4, 0).label("nota_bimestre4")
+        )
+        .select_from(models_en.Matricula)
+        .join(models_ac.Seccion, models_ac.Seccion.id_seccion == models_en.Matricula.id_seccion)
+        .join(models_ac.Grado, models_ac.Grado.id_grado == models_ac.Seccion.id_grado)
+        .join(models_ac.PlanEstudio, models_ac.PlanEstudio.id_grado == models_ac.Grado.id_grado)
+        .join(models_ac.Curso, models_ac.Curso.id_curso == models_ac.PlanEstudio.id_curso)
+        # El outerjoin permite que el curso aparezca aunque no tenga notas aún
+        .outerjoin(
+            models_mn.ResumenNota, 
+            (models_mn.ResumenNota.id_curso == models_ac.Curso.id_curso) & 
+            (models_mn.ResumenNota.id_matricula == matricula.id_matricula)
+        )
+        .filter(models_en.Matricula.id_matricula == matricula.id_matricula)
+        .all()
+    )
+
+    # Convertir a lista de diccionarios para serialización segura
+    return [row._asdict() for row in resultados]
 
 # --- Asignación de Docentes ---
 
