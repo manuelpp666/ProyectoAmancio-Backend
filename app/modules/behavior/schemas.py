@@ -10,6 +10,6 @@ class ReporteCreate(BaseModel):
 
 class CitaCreate(BaseModel):
     id_alumno: int
-    id_familiar: int
+    id_familiar: Optional[int] = None
     motivo: str
     fecha_cita: datetime

@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text
 from sqlalchemy.sql import func
 from app.db.database import Base
+from sqlalchemy.orm import relationship
 
 class NivelConducta(Base):
     __tablename__ = "nivel_conducta"
@@ -18,6 +19,7 @@ class ReporteConducta(Base):
     fecha_reporte = Column(DateTime, server_default=func.now())
     descripcion_suceso = Column(Text, nullable=False)
     estado = Column(String(20), default='REGISTRADO')
+    nivel = relationship("NivelConducta")
 
 class CitaPsicologia(Base):
     __tablename__ = "cita_psicologia"
