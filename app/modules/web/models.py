@@ -16,6 +16,7 @@ class Noticia(Base):
 class Evento(Base):
     __tablename__ = "evento"
     id_evento = Column(Integer, primary_key=True, index=True)
+    id_anio_escolar = Column(String(6), ForeignKey("anio_escolar.id_anio_escolar"), nullable=True)
     titulo = Column(String(150), nullable=False)
     descripcion = Column(Text)
     fecha_inicio = Column(DateTime, nullable=False)

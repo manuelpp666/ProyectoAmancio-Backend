@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
+from datetime import datetime,date
+from sqlalchemy import extract,desc,asc
 from sqlalchemy.orm import Session
 from typing import List
 from app.db.database import get_db
 from . import models, schemas
-from sqlalchemy import or_
-from datetime import datetime,date
-from sqlalchemy import extract,desc,asc
+
 
 router = APIRouter(prefix="/configuracion", tags=["Configuracion de Pagina"])
 

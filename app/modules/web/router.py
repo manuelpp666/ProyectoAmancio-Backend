@@ -152,3 +152,14 @@ def obtener_resumen_eventos(db: Session = Depends(get_db)):
         "proximo_evento": proximo_evento,
         "dias_faltantes_proximo": dias_faltantes
     }
+
+
+@router.get("/eventos/por-anio/{anio_id}", response_model=List[schemas.EventoResponse])
+def listar_eventos_por_anio_academico(anio_id: str, db: Session = Depends(get_db)):
+    """
+    Lista eventos filtrados por el ID del año académico (ej: '2024-R').
+    """
+    return db.query(models.Evento)\
+             .filter(models.Evento.id_anio_escolar == anio_id, models.Evento.activo == True)\
+             .order_by(models.Evento.fecha_inicio.asc())\
+             .all()
