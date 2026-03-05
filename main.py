@@ -22,6 +22,7 @@ from app.modules.web import router as web_router
 from app.modules.admision import router as admision_router
 from app.modules.horario import router as horario_router
 from app.modules.pagina_principal import router as pagina_web_router
+from app.modules.personal import router as personal_router
 from app.core.socket_manager import socket_manager
 
 
@@ -73,6 +74,7 @@ app.include_router(web_router.router)
 app.include_router(chatbot_router.router) 
 app.include_router(admision_router.router)
 app.include_router(pagina_web_router.router)
+app.include_router(personal_router.router)
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: int):
