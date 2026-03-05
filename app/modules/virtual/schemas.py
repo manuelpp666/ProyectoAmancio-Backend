@@ -1,7 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict
 from datetime import datetime
-from typing import List, Optional
 
 class TareaCreate(BaseModel):
     id_carga_academica: int
@@ -15,12 +14,12 @@ class TareaCreate(BaseModel):
 class TareaResponse(TareaCreate):
     id_tarea: int
     titulo: str
-    descripcion: Optional[str] # <--- ESTE ES EL CAMPO CLAVE
+    descripcion: Optional[str] 
     fecha_entrega: datetime
     tipo_evaluacion: str
     bimestre: int
     estado: str
-
+    archivo_adjunto_url: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 # --- Esquemas de Sábana de Notas (Modificados) ---
@@ -35,6 +34,7 @@ class EvaluacionInfo(BaseModel):
     peso: int
     total_entregas: int  # Para mostrar cuántos archivos se han subido
     editable_total: bool # Para que el front sepa si bloquea campos o permite borrar
+    archivo_adjunto_url: Optional[str] = None
 
 class NotaAlumnoResponse(BaseModel):
     id_alumno: int
@@ -74,3 +74,23 @@ class EntregaDetalleResponse(BaseModel):
     comentario: Optional[str]
     fecha_envio: str
     calificacion: Optional[float]
+
+
+#-- Esquema para la pagina principal
+class ConfigBase(BaseModel):
+    seccion: str
+    clave: str
+    valor: str
+    tipo: str
+
+class ConfigCreate(ConfigBase):
+    pass
+
+class ConfigUpdate(BaseModel):
+    valor: str
+
+class ConfigRead(ConfigBase):
+    id: int
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

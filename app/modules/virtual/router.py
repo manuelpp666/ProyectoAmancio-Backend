@@ -2,6 +2,7 @@ import os
 import uuid
 import shutil
 from datetime import datetime
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List
@@ -29,11 +30,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(FILE_DIR)))
 
 # 3. Configuramos UPLOAD_DIR (esto ahora apuntará a Backend/media/entregas_tareas)
 UPLOAD_DIR = os.path.join(BASE_DIR, "media", "entregas_tareas")
-
+DOCS_TAREAS_DIR = os.path.join(BASE_DIR, "media", "recursos_tareas")
 # --- DEBUG: Añade este print temporal para estar 100% seguro ---
 print(f"📂 Router configurado para guardar en: {UPLOAD_DIR}")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(DOCS_TAREAS_DIR, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png"}
 # Definición de la constante (10 MB)
@@ -333,50 +335,78 @@ def obtener_historial(id_conversacion: int, db: Session = Depends(get_db)):
 
 #--- Tareas
 @router.post("/tareas/", response_model=schemas.TareaResponse)
-def crear_tarea(tarea: schemas.TareaCreate, db: Session = Depends(get_db)):
-    # 1. Validar que la carga académica existe
+async def crear_tarea(
+    id_carga_academica: int = Form(...),
+    titulo: str = Form(...),
+    descripcion: Optional[str] = Form(None),
+    fecha_entrega: datetime = Form(...),
+    tipo_evaluacion: str = Form("TAREA"),
+    bimestre: int = Form(...),
+    peso: int = Form(0),
+    archivo: Optional[UploadFile] = File(None), # <-- Archivo opcional del docente
+    db: Session = Depends(get_db)
+):
+    # 1. Validar existencia de Carga Académica
     carga = db.query(models_mn.CargaAcademica).filter(
-        models_mn.CargaAcademica.id_carga_academica == tarea.id_carga_academica
+        models_mn.CargaAcademica.id_carga_academica == id_carga_academica
     ).first()
-    
     if not carga:
         raise HTTPException(status_code=404, detail="La carga académica no existe.")
-    
-    # 2. VALIDACIÓN DE PESO MÁXIMO
-    
+
+    # 2. Validación de Peso Máximo (Manteniendo tu lógica original)
     peso_actual = db.query(func.sum(models.Tarea.peso)).filter(
-        models.Tarea.id_carga_academica == tarea.id_carga_academica,
-        models.Tarea.bimestre == tarea.bimestre,
+        models.Tarea.id_carga_academica == id_carga_academica,
+        models.Tarea.bimestre == bimestre,
         models.Tarea.estado == "ACTIVO"
     ).scalar() or 0
 
-    if peso_actual + tarea.peso > 100:
+    if peso_actual + peso > 100:
         raise HTTPException(
             status_code=400, 
-            detail=f"El peso total del bimestre no puede exceder el 100%. Espacio disponible: {100 - peso_actual}%"
+            detail=f"El peso acumulado ({peso_actual + peso}%) excede el 100% del bimestre."
         )
 
-    # 2. Validar regla de Examen Bimestral único
-    if tarea.tipo_evaluacion == "EXAMEN_BIMESTRAL":
-        existe = db.query(models.Tarea).filter(
-            models.Tarea.id_carga_academica == tarea.id_carga_academica,
-            models.Tarea.bimestre == tarea.bimestre,
-            models.Tarea.tipo_evaluacion == "EXAMEN_BIMESTRAL"
-        ).first()
-        if existe:
-            raise HTTPException(status_code=400, detail="Ya existe un examen bimestral.")
+    # 3. Procesamiento del Archivo (Si el docente lo subió)
+    url_adjunto = None
+    if archivo and archivo.filename:
+        # Validar extensión
+        ext = os.path.splitext(archivo.filename)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
 
-    # 3. Crear registro
+        # Definir ruta: media/recursos_tareas/carga_X/
+        rel_folder = os.path.join("media", "recursos_tareas", f"carga_{id_carga_academica}")
+        abs_folder = os.path.join(BASE_DIR, rel_folder)
+        os.makedirs(abs_folder, exist_ok=True)
+
+        # Nombre único para evitar colisiones
+        filename = f"ref_{uuid.uuid4().hex[:6]}{ext}"
+        file_path = os.path.join(abs_folder, filename)
+
+        # Guardado físico
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(archivo.file, buffer)
+        
+        url_adjunto = f"/{rel_folder}/{filename}".replace("\\", "/")
+
+    # 4. Crear registro en BD
     nueva_tarea = models.Tarea(
-        **tarea.model_dump(),
+        id_carga_academica=id_carga_academica,
+        titulo=titulo,
+        descripcion=descripcion,
+        fecha_entrega=fecha_entrega,
+        tipo_evaluacion=tipo_evaluacion,
+        bimestre=bimestre,
+        peso=peso,
+        archivo_adjunto_url=url_adjunto, # <-- Guardamos la ruta
         fecha_publicacion=datetime.now(),
         estado="ACTIVO"
     )
+    
     db.add(nueva_tarea)
     db.commit()
     db.refresh(nueva_tarea)
     return nueva_tarea
-
 
 @router.get("/sabana-notas/{id_carga}/{bimestre}", response_model=schemas.SabanaNotasResponse)
 def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get_db)):
@@ -417,7 +447,8 @@ def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get
             "bimestre": t.bimestre,
             "peso": t.peso,
             "total_entregas": conteo_envios,
-            "editable_total": conteo_envios == 0  # True si nadie ha subido nada
+            "editable_total": conteo_envios == 0,  
+            "archivo_adjunto_url": t.archivo_adjunto_url
         })
 
     # 4. Construir la respuesta de alumnos (Mantenemos tu lógica de promedios)
@@ -516,30 +547,60 @@ def obtener_mis_notas(id_carga: int, id_alumno: int, db: Session = Depends(get_d
 
 
 @router.put("/tareas/{id_tarea}", response_model=schemas.TareaResponse)
-def editar_tarea(id_tarea: int, tarea_editada: schemas.TareaCreate, db: Session = Depends(get_db)):
+async def editar_tarea(
+    id_tarea: int,
+    titulo: str = Form(...),
+    descripcion: Optional[str] = Form(None),
+    fecha_entrega: datetime = Form(...),
+    tipo_evaluacion: str = Form(...),
+    bimestre: int = Form(...),
+    peso: int = Form(...),
+    archivo: Optional[UploadFile] = File(None), # Nuevo archivo opcional
+    db: Session = Depends(get_db)
+):
     tarea = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
     if not tarea:
         raise HTTPException(status_code=404, detail="Tarea no encontrada")
 
-    # Verificamos si existe al menos una entrega con archivo subido
-    tiene_archivos = db.query(models.EntregaTarea).filter(
-        models.EntregaTarea.id_tarea == id_tarea,
-        models.EntregaTarea.archivo_url != None
-    ).first()
+    # 1. Verificar si hay entregas de alumnos
+    tiene_entregas = any(e.archivo_url for e in tarea.entregas)
 
-    if tiene_archivos:
-        # Si ya hay archivos, SOLO permitimos cambiar la fecha de entrega
-        tarea.fecha_entrega = tarea_editada.fecha_entrega
+    if tiene_entregas:
+        # Bloqueo parcial: Solo permitimos cambiar la fecha si ya hay alumnos que entregaron
+        tarea.fecha_entrega = fecha_entrega
         db.commit()
-        # Puedes lanzar un mensaje informativo o simplemente retornar
         return tarea
 
-    # Si NO hay archivos, permitimos edición completa
-    tarea.titulo = tarea_editada.titulo
-    tarea.descripcion = tarea_editada.descripcion
-    tarea.fecha_entrega = tarea_editada.fecha_entrega
-    tarea.tipo_evaluacion = tarea_editada.tipo_evaluacion
-    tarea.bimestre = tarea_editada.bimestre
+    # 2. Gestión del archivo adjunto del docente (si se sube uno nuevo)
+    if archivo and archivo.filename:
+        # Borrar el archivo físico anterior si existía
+        if tarea.archivo_adjunto_url:
+            old_path = os.path.join(BASE_DIR, tarea.archivo_adjunto_url.lstrip("/"))
+            if os.path.exists(old_path):
+                try: os.remove(old_path)
+                except: pass
+
+        # Guardar el nuevo archivo
+        rel_folder = os.path.join("media", "recursos_tareas", f"carga_{tarea.id_carga_academica}")
+        abs_folder = os.path.join(BASE_DIR, rel_folder)
+        os.makedirs(abs_folder, exist_ok=True)
+        
+        ext = os.path.splitext(archivo.filename)[1].lower()
+        filename = f"ref_{uuid.uuid4().hex[:6]}{ext}"
+        file_path = os.path.join(abs_folder, filename)
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(archivo.file, buffer)
+        
+        tarea.archivo_adjunto_url = f"/{rel_folder}/{filename}".replace("\\", "/")
+
+    # 3. Actualizar campos de texto
+    tarea.titulo = titulo
+    tarea.descripcion = descripcion
+    tarea.fecha_entrega = fecha_entrega
+    tarea.tipo_evaluacion = tipo_evaluacion
+    tarea.bimestre = bimestre
+    tarea.peso = peso
     
     db.commit()
     db.refresh(tarea)
@@ -551,18 +612,26 @@ def eliminar_tarea(id_tarea: int, db: Session = Depends(get_db)):
     if not tarea:
         raise HTTPException(status_code=404, detail="Tarea no encontrada")
 
-    # Bloqueo de seguridad: Alumnos con archivos
-    # Usamos la relación del modelo de nuevo
+    # 1. Bloqueo de seguridad: No borrar si alumnos ya subieron archivos
     if any(e.archivo_url for e in tarea.entregas):
         raise HTTPException(
             status_code=400, 
             detail="No se puede eliminar: Alumnos ya han subido archivos."
         )
 
-    # Solo borras la tarea y SQLAlchemy borra las notas (EntregaTarea) automáticamente
+    # 2. Borrar archivo físico del DOCENTE (el recurso adjunto)
+    if tarea.archivo_adjunto_url:
+        full_path = os.path.join(BASE_DIR, tarea.archivo_adjunto_url.lstrip("/"))
+        if os.path.exists(full_path):
+            try:
+                os.remove(full_path)
+            except Exception as e:
+                print(f"Error al borrar archivo de tarea: {e}")
+
+    # 3. Eliminar de la base de datos
     db.delete(tarea)
     db.commit()
-    return {"message": "Actividad eliminada con éxito"}
+    return {"message": "Actividad y recursos eliminados con éxito"}
 
 @router.get("/tareas/{id_tarea}/entregas", response_model=List[schemas.EntregaDetalleResponse])
 def listar_entregas_con_archivos(id_tarea: int, db: Session = Depends(get_db)):
@@ -704,6 +773,7 @@ def obtener_detalle_tarea_estudiante(id_tarea: int, id_usuario: int, db: Session
         "entregado": True if (entrega and entrega.archivo_url) else False,
         "nota": entrega.calificacion if entrega else None,
         "peso": tarea.peso,
+        "archivo_adjunto_url": tarea.archivo_adjunto_url,
         "retroalimentacion_docente": entrega.retroalimentacion_docente if entrega else None,
         "archivo_url": entrega.archivo_url if entrega else None
     }
@@ -791,3 +861,4 @@ def obtener_dashboard_estudiante(id_usuario: int, db: Session = Depends(get_db))
         "tareas_pendientes": lista_tareas,
         "anio_actual": anio_activo.id_anio_escolar
     }
+

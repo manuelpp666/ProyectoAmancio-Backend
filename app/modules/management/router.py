@@ -12,6 +12,7 @@ from app.modules.virtual import models as models_vr
 from app.modules.management import models as models_mn
 from app.modules.finance import models as models_fi
 from app.modules.web import models as models_web
+from app.modules.behavior import models as models_psi
 from . import models, schemas
 
 
@@ -474,6 +475,24 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db)):
                 "tipo": "pago",
                 "mensaje": f"Pago pendiente: {d.concepto} (S/ {d.monto_total})",
                 "fecha": d.fecha_vencimiento.isoformat() if d.fecha_vencimiento else None
+            })
+
+        # Filtramos por el alumno, estado programado y que la fecha sea hoy
+        inicio_hoy = datetime.combine(date.today(), datetime.min.time())
+        fin_hoy = datetime.combine(date.today(), datetime.max.time())
+
+        citas_hoy = db.query(models_psi.CitaPsicologia).filter(
+            models_psi.CitaPsicologia.id_alumno == alumno.id_alumno,
+            models_psi.CitaPsicologia.estado == "PROGRAMADA",
+            models_psi.CitaPsicologia.fecha_cita >= inicio_hoy,
+            models_psi.CitaPsicologia.fecha_cita <= fin_hoy
+        ).all()
+
+        for cita in citas_hoy:
+            notificaciones.append({
+                "tipo": "cita",
+                "mensaje": f"Hoy tienes una cita de psicología: {cita.motivo} a las {cita.fecha_cita.strftime('%H:%M')}",
+                "fecha": cita.fecha_cita.isoformat()
             })
 
     # --- C. EVENTOS (Comunes para todos) ---

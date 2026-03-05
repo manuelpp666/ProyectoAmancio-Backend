@@ -11,6 +11,7 @@ class Tarea(Base):
     descripcion = Column(Text)
     fecha_publicacion = Column(DateTime, server_default=func.now())
     fecha_entrega = Column(DateTime, nullable=False)
+    archivo_adjunto_url = Column(String(255), nullable=True)
     estado = Column(String(20), default='ACTIVO')
     tipo_evaluacion = Column(String(30), default='TAREA') # 'TAREA', 'EXAMEN_PARCIAL', 'EXAMEN_BIMESTRAL'
     bimestre = Column(Integer, nullable=False) # 1, 2, 3 o 4
