@@ -828,7 +828,7 @@ def obtener_dashboard_estudiante(id_usuario: int, db: Session = Depends(get_db))
     for c in cursos_query:
         # A. Agregar al listado de cursos
         lista_cursos.append({
-            "id": c.id_curso,
+            "id_curso": c.id_curso,
             "nombre": c.curso_nombre,
             "docente": f"{c.docente_nombres or ''} {c.docente_apellidos or ''}".strip()
         })
@@ -849,10 +849,10 @@ def obtener_dashboard_estudiante(id_usuario: int, db: Session = Depends(get_db))
                 
                 if not entrega:
                     lista_tareas.append({
-                        "id": t.id_tarea,
+                        "id_tarea": t.id_tarea,
                         "curso": c.curso_nombre,
                         "titulo": t.titulo,
-                        "fecha": t.fecha_entrega
+                        "fecha_entrega": t.fecha_entrega
                     })
 
     return {

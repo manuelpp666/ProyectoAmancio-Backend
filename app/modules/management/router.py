@@ -380,8 +380,8 @@ def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_
     return [
         {
             "id_carga": c.id_carga_academica,
-            "nombre": c.curso_nombre,
-            "grado_seccion": f"{c.grado_nombre} {c.seccion_nombre}",
+            "curso_nombre": c.curso_nombre,
+            "grado_nombre": f"{c.grado_nombre} {c.seccion_nombre}",
         }
         for c in cursos_query
     ]
