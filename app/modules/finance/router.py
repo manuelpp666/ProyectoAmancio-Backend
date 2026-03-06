@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status,File, UploadFile, 
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime
 from typing import List,Optional
+from sqlalchemy import func, extract
 from app.db.database import get_db
 from . import models, schemas
 from app.modules.academic import models as academic_models
@@ -271,7 +272,6 @@ def notificar_pago_bcp(payload: schemas.BCPWebhookPayload, db: Session = Depends
     db.commit()
     return {"status": "SUCCESS", "message": "Sistema actualizado"}
 
-from sqlalchemy import func
 
 @router.patch("/admin/actualizar-precios-masivo")
 def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: Session = Depends(get_db)):
@@ -314,9 +314,39 @@ def listar_solicitudes_pendientes(db: Session = Depends(get_db)):
              .all()
 
 @router.get("/pagos/", response_model=List[schemas.PagoResponse])
-def listar_todos_los_pagos(db: Session = Depends(get_db)):
-    """Lista el historial de todos los pagos registrados (Recaudación)."""
-    return db.query(models.Pago).order_by(models.Pago.fecha_pago.desc()).all()
+def listar_pagos_filtrados(
+    busqueda: str = None, 
+    tipo: str = None, 
+    anio: int = None,
+    # "pago" para recaudación real, "vencimiento" para ver deudas/pendientes
+    criterio_fecha: str = "pago", 
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Pago)
+    filtro_anio = anio if anio else datetime.now().year
+
+    # 1. Filtro por Año dinámico
+    if criterio_fecha == "vencimiento":
+        query = query.filter(extract('year', models.Pago.fecha_vencimiento) == filtro_anio)
+        # Ordenamos por vencimiento si buscamos deudas
+        orden = models.Pago.fecha_vencimiento.desc()
+    else:
+        # Por defecto filtramos por fecha de pago
+        query = query.filter(extract('year', models.Pago.fecha_pago) == filtro_anio)
+        orden = models.Pago.fecha_pago.desc()
+
+    # 2. Búsqueda Avanzada (Concepto o DNI)
+    if busqueda:
+        query = query.join(user_models.Alumno).filter(
+            (models.Pago.concepto.ilike(f"%{busqueda}%")) |
+            (user_models.Alumno.dni.ilike(f"%{busqueda}%"))
+        )
+
+    # 3. Filtro por Concepto
+    if tipo and tipo != "TODOS":
+        query = query.filter(models.Pago.concepto.ilike(f"%{tipo}%"))
+
+    return query.order_by(orden).all()
 
 @router.patch("/solicitudes/{id}/dictamen")
 def dar_dictamen_solicitud(id: int, payload: schemas.DictamenSolicitud, db: Session = Depends(get_db)):
