@@ -1,15 +1,15 @@
-from pydantic import BaseModel, ConfigDict
-from typing import Optional, List, Dict
+from pydantic import BaseModel, ConfigDict,Field, field_validator
+from typing import Optional, List, Dict,Literal
 from datetime import datetime
 
 class TareaCreate(BaseModel):
     id_carga_academica: int
-    titulo: str
-    descripcion: Optional[str]
+    titulo: str = Field(..., min_length=3, max_length=100)
+    descripcion: Optional[str] = Field(None, max_length=500)
     fecha_entrega: datetime
-    tipo_evaluacion: str = "TAREA" # TAREA, EXAMEN_PARCIAL o EXAMEN_BIMESTRAL
-    bimestre: int
-    peso: int = 0
+    tipo_evaluacion: Literal["TAREA", "EXAMEN_PARCIAL", "EXAMEN_BIMESTRAL"] = "TAREA" # TAREA, EXAMEN_PARCIAL o EXAMEN_BIMESTRAL
+    bimestre: int = Field(..., ge=1, le=4)
+    peso: int = Field(default=1, ge=1, le=100)
 
 class TareaResponse(TareaCreate):
     id_tarea: int
@@ -50,12 +50,19 @@ class SabanaNotasResponse(BaseModel):
 class NotasMasivasCreate(BaseModel):
     id_tarea: int
     notas: Dict[str, float] # { "15": 18.5, "16": 20.0 } donde la llave es el id_alumno como string
+    @field_validator('notas')
+    @classmethod
+    def validar_rango_notas(cls, v):
+        for alumno_id, nota in v.items():
+            if not (0 <= nota <= 20):
+                raise ValueError(f"La nota {nota} para el alumno {alumno_id} está fuera de rango (0-20)")
+        return v
 # --- Esquemas de Chat ---
 class EntregaCreate(BaseModel):
     id_tarea: int
     id_alumno: int
     archivo_url: Optional[str]
-    comentario_alumno: Optional[str]
+    comentario_alumno: Optional[str] = Field(None, max_length=300)
 
 class ConversacionCreate(BaseModel):
     usuario1_id: int

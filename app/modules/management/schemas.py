@@ -1,7 +1,7 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict,Field, field_validator
 from decimal import Decimal
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional,Literal
 
 # --- Schemas Carga Académica ---
 class CargaCreate(BaseModel):
@@ -18,8 +18,8 @@ class CargaResponse(CargaCreate):
 class NotaCreate(BaseModel):
     id_matricula: int
     id_curso: int
-    bimestre: int
-    valor: Decimal
+    bimestre: int = Field(..., ge=1, le=4)
+    valor: Decimal = Field(..., ge=0, le=20, decimal_places=2)
     tipo_nota: str = 'PROMEDIO'
 
 class NotaResponse(NotaCreate):
@@ -32,7 +32,7 @@ class AsistenciaCreate(BaseModel):
     id_matricula: int
     fecha: date
     estado: str
-    observacion: Optional[str] = None
+    observacion: Optional[str] = Field(None, max_length=255)
 
 class AsistenciaResponse(AsistenciaCreate):
     id_asistencia: int
@@ -51,7 +51,7 @@ class DocenteBasicoResponse(BaseModel):
     id_docente: int
     nombres: str
     apellidos: str
-    url_perfil: Optional[str]
+    url_perfil: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -67,7 +67,7 @@ class VinculoAcademicoResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class CargaUpdate(BaseModel):
-    id_docente: Optional[int] = None
+    id_docente: Optional[int] = Field(None, gt=0)
 
 
 class CursoDocenteResponse(BaseModel):

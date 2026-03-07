@@ -1,14 +1,15 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
 from typing import Optional
 from decimal import Decimal
+from app.core.util.utils import DniStr, TelefonoStr
 
 class PersonalBase(BaseModel):
-    dni: str
+    dni: DniStr
     nombres: str
     apellidos: str
-    telefono: Optional[str] = None
-    email: Optional[str] = None
-    sueldo: Decimal = Decimal('0.00')
+    telefono: Optional[TelefonoStr] = None
+    email: Optional[EmailStr] = None
+    sueldo: Decimal = Field(default=Decimal('0.00'), ge=0, decimal_places=2)
 
 class PersonalCreate(PersonalBase):
     password: str

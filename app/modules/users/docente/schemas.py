@@ -13,14 +13,12 @@ class DocenteBase(BaseModel):
     id_usuario: int | None = None
 
 class DocenteCreate(DocenteBase):
-    # Ya no necesitas las líneas de validator(...)
-    # Al usar DniStr, la validación ocurre automáticamente
     dni: DniStr
     telefono: TelefonoStr
 
 class DocenteUpdate(BaseModel):
-    nombres: Optional[str] = None
-    apellidos: Optional[str] = None
+    nombres: Optional[str] = Field(None, min_length=1, max_length=250)
+    apellidos: Optional[str] = Field(None, min_length=1, max_length=250)
     especialidad: Optional[str] = None
     descripcion: Optional[str] = None
     url_perfil: Optional[str] = None

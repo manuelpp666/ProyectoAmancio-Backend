@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 from datetime import date
 
@@ -16,7 +16,8 @@ class AnioEscolarCreate(BaseModel):
     # -----------------------------------
 
 class AnioEscolarResponse(AnioEscolarCreate):
-    class Config: from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
 
 # Agrega este schema para la acción de copiar
 class CopiarEstructuraRequest(BaseModel):
@@ -30,11 +31,10 @@ class InscripcionUpdate(BaseModel):
 # --- Seccion ---
 class SeccionBase(BaseModel):
     id_grado: int
-    id_anio_escolar: str # <--- NUEVO: Obligatorio
+    id_anio_escolar: str 
     nombre: str
-    vacantes: int = 30
-    # BORRADO: aula
-
+    vacantes: int = Field(default=30, ge=0, le=50)
+    
 class SeccionCreate(SeccionBase): pass
 
 class SeccionResponse(SeccionBase):
@@ -43,7 +43,7 @@ class SeccionResponse(SeccionBase):
 
 # --- Curso ---
 class CursoBase(BaseModel):
-    nombre: str
+    nombre: str = Field(..., min_length=1, max_length=100)
     id_area: int
 
 class CursoCreate(CursoBase):
@@ -68,7 +68,7 @@ class PlanEstudioResponse(BaseModel):
 # --- Grado ---
 
 class GradoBase(BaseModel):
-    nombre: str
+    nombre: str = Field(..., min_length=1, max_length=100)
     orden: int
     id_nivel: int
 
@@ -91,7 +91,7 @@ class GradoConCursos(GradoBase):
 
 # --- Nivel ---
 class NivelBase(BaseModel):
-    nombre: str
+    nombre: str = Field(..., min_length=1, max_length=100)
 
 class NivelCreate(NivelBase):
     pass

@@ -22,6 +22,6 @@ class FamiliarResponse(FamiliarBase):
     id_familiar: int
     dni: str
     telefono: str
-    id_usuario: Optional[int] = None # Agregado para integridad
+    id_usuario: Optional[int] = None 
     usuario: Optional[UsuarioEnFamiliar] = None
     model_config = ConfigDict(from_attributes=True)

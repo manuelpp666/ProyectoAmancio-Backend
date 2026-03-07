@@ -1,7 +1,8 @@
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, ConfigDict
+from typing import Optional, Literal
 from decimal import Decimal
 from datetime import datetime
+from pydantic import Field, field_validator
 
 # Importamos el esquema de alumno para anidarlo
 from app.modules.users.alumno.schemas import AlumnoResponse
@@ -9,9 +10,14 @@ from app.modules.academic.schemas import GradoResponse, SeccionResponse
 
 # --- Exoneracion ---
 class ExoneracionBase(BaseModel):
-    motivo: str
-    concepto_exonerado: str
-    porcentaje_descuento: Decimal = Decimal(100.0)
+    motivo: str = Field(..., min_length=5, max_length=255)
+    concepto_exonerado: str = Field(..., min_length=3, max_length=100)
+    porcentaje_descuento: Decimal = Field(
+        default=Decimal("100.0"), 
+        ge=Decimal("0.0"), 
+        le=Decimal("100.0"),
+        decimal_places=2
+    )
     activo: bool = True
 
 class ExoneracionCreate(ExoneracionBase):
@@ -27,7 +33,7 @@ class MatriculaBase(BaseModel):
     id_alumno: int
     id_grado: int
     id_seccion: Optional[int] = None
-    tipo_matricula: str = "REGULAR"
+    tipo_matricula: Literal["REGULAR", "BECADO"] = "REGULAR"
 
 class MatriculaCreate(MatriculaBase):
     pass
@@ -35,7 +41,7 @@ class MatriculaCreate(MatriculaBase):
 class MatriculaResponse(MatriculaBase):
     id_matricula: int
     fecha_matricula: datetime
-    estado: str
+    estado: Literal["MATRICULADO", "RETIRADO"] = "MATRICULADO"
     
     # --- IMPORTANTE: Estos campos anidados son los que faltaban ---
     alumno: Optional[AlumnoResponse] = None
@@ -43,5 +49,4 @@ class MatriculaResponse(MatriculaBase):
     seccion: Optional[SeccionResponse] = None
     # --------------------------------------------------------------
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
