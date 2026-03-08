@@ -6,6 +6,7 @@ from .models import Docente
 from app.modules.users.models import Usuario
 from typing import List
 from app.core.util.password import get_password_hash
+from app.core.util.security import get_current_user
 from sqlalchemy.orm import joinedload
 from sqlalchemy import or_
 
@@ -16,7 +17,7 @@ router = APIRouter(
 )
 
 @router.post("/", response_model=DocenteResponse, status_code=status.HTTP_201_CREATED)
-def crear_docente(docente_in: DocenteCreate, db: Session = Depends(get_db)):
+def crear_docente(docente_in: DocenteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Verificar si el DNI (username) ya existe
     docente_existente = db.query(Docente).filter(Docente.dni == docente_in.dni).first()
     if docente_existente:
@@ -71,14 +72,14 @@ def listar_docentes(search: str = None, db: Session = Depends(get_db)):
 
 
 @router.get("/{id}", response_model=DocenteResponse)
-def obtener_docente(id: int, db: Session = Depends(get_db)):
+def obtener_docente(id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     docente = db.query(Docente).filter(Docente.id_docente == id).first()
     if not docente:
         raise HTTPException(status_code=404, detail="Docente no encontrado")
     return docente
 
 @router.put("/{id}", response_model=DocenteResponse)
-def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Depends(get_db)):
+def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     db_docente = db.query(Docente).filter(Docente.id_docente == id).first()
     
     if not db_docente:
@@ -94,7 +95,7 @@ def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Dep
     return db_docente
 
 @router.put("/{id}/modificarestado", response_model=DocenteResponse)
-def desactivar_docente(id: int, db: Session = Depends(get_db)):
+def desactivar_docente(id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Buscar al docente por ID
     docente = db.query(Docente).filter(Docente.id_docente == id).first()
     

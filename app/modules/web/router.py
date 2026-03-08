@@ -5,12 +5,14 @@ from app.db.database import get_db
 from . import models, schemas
 from sqlalchemy import or_
 from datetime import datetime,date
+from app.core.util.security import get_current_user
 from sqlalchemy import extract,desc,asc
 
 router = APIRouter(prefix="/web", tags=["Web Institucional"])
 
 @router.post("/noticias/", response_model=schemas.NoticiaResponse)
-def crear_noticia(noticia: schemas.NoticiaCreate, db: Session = Depends(get_db)):
+def crear_noticia(noticia: schemas.NoticiaCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     try:
         # model_dump() es la forma estándar en Pydantic v2
         nueva = models.Noticia(**noticia.model_dump())
@@ -44,14 +46,16 @@ def listar_noticias(search: str = None, db: Session = Depends(get_db)):
     return query.all()
 
 @router.get("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse)
-def obtener_noticia(noticia_id: int, db: Session = Depends(get_db)):
+def obtener_noticia(noticia_id: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     noticia = db.query(models.Noticia).filter(models.Noticia.id_noticia == noticia_id).first()
     if not noticia:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
     return noticia
 
 @router.delete("/noticias/{noticia_id}")
-def eliminar_noticia(noticia_id: int, db: Session = Depends(get_db)):
+def eliminar_noticia(noticia_id: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     noticia = db.query(models.Noticia).filter(models.Noticia.id_noticia == noticia_id).first()
     if not noticia:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
@@ -62,7 +66,8 @@ def eliminar_noticia(noticia_id: int, db: Session = Depends(get_db)):
     return {"message": "Noticia actualizada correctamente"}
 
 @router.put("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse)
-def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, db: Session = Depends(get_db)):
+def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_noticia = db.query(models.Noticia).filter(models.Noticia.id_noticia == noticia_id).first()
     if not db_noticia:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
@@ -75,7 +80,8 @@ def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, d
     return db_noticia
 
 @router.post("/eventos/", response_model=schemas.EventoResponse)
-def crear_evento(evento: schemas.EventoCreate, db: Session = Depends(get_db)):
+def crear_evento(evento: schemas.EventoCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     nueva = models.Evento(**evento.model_dump())
     db.add(nueva)
     db.commit()
@@ -101,7 +107,8 @@ def listar_todos_eventos(db: Session = Depends(get_db)):
 
 
 @router.put("/eventos/{evento_id}", response_model=schemas.EventoResponse)
-def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: Session = Depends(get_db)):
+def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_evento = db.query(models.Evento).filter(models.Evento.id_evento == evento_id).first()
     if not db_evento:
         raise HTTPException(status_code=404, detail="Evento no encontrado")
@@ -114,7 +121,8 @@ def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: S
     return db_evento
 
 @router.delete("/eventos/{evento_id}")
-def eliminar_evento(evento_id: int, db: Session = Depends(get_db)):
+def eliminar_evento(evento_id: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_evento = db.query(models.Evento).filter(models.Evento.id_evento == evento_id).first()
     if not db_evento:
         raise HTTPException(status_code=404, detail="Evento no encontrado")
@@ -126,7 +134,8 @@ def eliminar_evento(evento_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/eventos/resumen")
-def obtener_resumen_eventos(db: Session = Depends(get_db)):
+def obtener_resumen_eventos(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     hoy = datetime.now()
     
     # 1. Evento más cercano que YA PASÓ (el último realizado)
@@ -155,7 +164,8 @@ def obtener_resumen_eventos(db: Session = Depends(get_db)):
 
 
 @router.get("/eventos/por-anio/{anio_id}", response_model=List[schemas.EventoResponse])
-def listar_eventos_por_anio_academico(anio_id: str, db: Session = Depends(get_db)):
+def listar_eventos_por_anio_academico(anio_id: str, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     """
     Lista eventos filtrados por el ID del año académico (ej: '2024-R').
     """

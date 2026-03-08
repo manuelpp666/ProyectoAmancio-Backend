@@ -7,14 +7,14 @@ from app.modules.users.models import Usuario
 from app.modules.users.docente.models import Docente
 from app.modules.personal.models import Administrador 
 from app.modules.personal.models import Auxiliar 
-from app.modules.users.alumno.models import Alumno
+from app.core.util.security import get_current_user
 from .schemas import ChangePasswordSchema
 # from app.modules.users.familiar.models import Familiar # Descomenta si lo usas
 
 router = APIRouter(prefix="/perfil", tags=["Perfil"])
 
 @router.get("/mi-perfil/{username}")
-def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db)):
+def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Buscamos al usuario base
     user = db.query(Usuario).filter(Usuario.username == username).first()
     
@@ -67,7 +67,7 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db)):
 
 
 @router.post("/auth/change-password")
-async def change_password(data: ChangePasswordSchema, db: Session = Depends(get_db)):
+async def change_password(data: ChangePasswordSchema, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Buscar al usuario
     user = db.query(Usuario).filter(Usuario.username == data.username).first()
     if not user:

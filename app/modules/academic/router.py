@@ -5,7 +5,7 @@ from app.db.database import get_db
 from . import models, schemas
 from typing import List, Optional
 from datetime import date
-
+from app.core.util.security import get_current_user
 from app.modules.management.models import CargaAcademica  # <--- Importar CargaAcademica
 from app.modules.users.models import Usuario, RolEnum     # <--- Importar Usuario y RolEnum
 from app.modules.users.docente.models import Docente      # <--- Importar Docente
@@ -34,7 +34,8 @@ def actualizar_estado_anios(db: Session):
         db.commit()
 
 @router.get("/anios/ultimo", response_model=schemas.AnioEscolarResponse)
-def obtener_ultimo_anio_creado(db: Session = Depends(get_db)):
+def obtener_ultimo_anio_creado(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user) ):
     # Buscamos el año con la fecha de inicio más alta (el más nuevo en el calendario)
     anio = db.query(models.AnioEscolar).order_by(models.AnioEscolar.fecha_inicio.desc()).first()
     
@@ -44,7 +45,8 @@ def obtener_ultimo_anio_creado(db: Session = Depends(get_db)):
     return anio
 
 @router.post("/anios/", response_model=schemas.AnioEscolarResponse, status_code=status.HTTP_201_CREATED)
-def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db)):
+def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user) ):
     # 1. Validación de Fechas
     if anio.fecha_fin and anio.fecha_fin <= anio.fecha_inicio:
         raise HTTPException(
@@ -84,7 +86,8 @@ def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @router.patch("/anios/{anio_id}/inscripciones")
-def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db)):
+def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
     if not db_anio:
         raise HTTPException(status_code=404, detail="Año no encontrado")
@@ -100,7 +103,8 @@ def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db
     return {"message": "Fechas de inscripción actualizadas correctamente"}
 
 @router.patch("/anios/{anio_id}/cerrar")
-def cerrar_anio(anio_id: str, db: Session = Depends(get_db)):
+def cerrar_anio(anio_id: str, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # Esta función ahora sirve para un cierre MANUAL FORZADO antes de tiempo
     db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
     if not db_anio:
@@ -129,7 +133,8 @@ def cerrar_anio(anio_id: str, db: Session = Depends(get_db)):
     return {"message": f"Año {anio_id} cerrado manualmente."}
 
 @router.post("/anios/copiar-estructura")
-def copiar_estructura(data: schemas.CopiarEstructuraRequest, db: Session = Depends(get_db)):
+def copiar_estructura(data: schemas.CopiarEstructuraRequest, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # 1. Validar destino
     anio_dest = db.query(models.AnioEscolar).filter_by(id_anio_escolar=data.anio_destino).first()
     if not anio_dest:
@@ -164,7 +169,8 @@ def copiar_estructura(data: schemas.CopiarEstructuraRequest, db: Session = Depen
     return {"message": f"Se copiaron {count} secciones correctamente."}
 
 @router.get("/anios/", response_model=List[schemas.AnioEscolarResponse])
-def listar_anios(db: Session = Depends(get_db)):
+def listar_anios(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # ¡MAGIA AQUÍ! 
     # Antes de devolver la lista, actualizamos los estados automáticamente
     actualizar_estado_anios(db)
@@ -174,7 +180,8 @@ def listar_anios(db: Session = Depends(get_db)):
 
 # --- NIVELES ---
 @router.post("/niveles/", response_model=schemas.NivelResponse)
-def crear_nivel(nivel: schemas.NivelCreate, db: Session = Depends(get_db)):
+def crear_nivel(nivel: schemas.NivelCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     nuevo = models.Nivel(**nivel.model_dump())
     db.add(nuevo)
     db.commit()
@@ -182,11 +189,13 @@ def crear_nivel(nivel: schemas.NivelCreate, db: Session = Depends(get_db)):
     return nuevo
 
 @router.get("/niveles/", response_model=List[schemas.NivelResponse])
-def listar_niveles(db: Session = Depends(get_db)):
+def listar_niveles(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     return db.query(models.Nivel).all()
 
 @router.get("/niveles-cursos/", response_model=List[schemas.NivelConCursosResponse])
-def listar_niveles_con_cursos(db: Session = Depends(get_db)):
+def listar_niveles_con_cursos(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     return db.query(models.Nivel).options(
         joinedload(models.Nivel.grados).joinedload(models.Grado.planes_estudio).joinedload(models.PlanEstudio.curso)
     ).all()
@@ -194,7 +203,8 @@ def listar_niveles_con_cursos(db: Session = Depends(get_db)):
 
 # --- GRADOS ---
 @router.post("/grados/", response_model=schemas.GradoResponse)
-def crear_grado(grado: schemas.GradoCreate, db: Session = Depends(get_db)):
+def crear_grado(grado: schemas.GradoCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     nuevo = models.Grado(**grado.model_dump())
     db.add(nuevo)
     db.commit()
@@ -210,7 +220,8 @@ def listar_grados(nivel_id: int = None, db: Session = Depends(get_db)):
     return query.all()
 
 @router.put("/grados/{grado_id}", response_model=schemas.GradoResponse)
-def actualizar_grado(grado_id: int, grado: schemas.GradoCreate, db: Session = Depends(get_db)):
+def actualizar_grado(grado_id: int, grado: schemas.GradoCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_grado = db.query(models.Grado).filter(models.Grado.id_grado == grado_id).first()
     if not db_grado:
         raise HTTPException(status_code=404, detail="Grado no encontrado")
@@ -223,7 +234,8 @@ def actualizar_grado(grado_id: int, grado: schemas.GradoCreate, db: Session = De
     return db_grado
 
 @router.delete("/grados/{grado_id}")
-def eliminar_grado(grado_id: int, db: Session = Depends(get_db)):
+def eliminar_grado(grado_id: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_grado = db.query(models.Grado).filter(models.Grado.id_grado == grado_id).first()
     if not db_grado:
         raise HTTPException(status_code=404, detail="Grado no encontrado")
@@ -244,7 +256,8 @@ def eliminar_grado(grado_id: int, db: Session = Depends(get_db)):
 
 # --- SECCIONES (¡MODIFICADO!) ---
 @router.post("/secciones/", response_model=schemas.SeccionResponse)
-def crear_seccion(seccion: schemas.SeccionCreate, db: Session = Depends(get_db)):
+def crear_seccion(seccion: schemas.SeccionCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # 1. Validar que el año escolar exista
     anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == seccion.id_anio_escolar).first()
     if not anio:
@@ -275,7 +288,8 @@ def crear_seccion(seccion: schemas.SeccionCreate, db: Session = Depends(get_db))
 def listar_secciones(
     grado_id: int = None, 
     anio_id: str = None, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Lista secciones con filtros obligatorios para el frontend:
@@ -293,7 +307,8 @@ def listar_secciones(
     return query.all()
 
 @router.get("/secciones/{anio_id}", response_model=List[schemas.SeccionResponse])
-def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db)):
+def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     """
     Este endpoint ahora coincide con la ruta: /academic/secciones/2025-1
     """
@@ -302,7 +317,8 @@ def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db)):
              .filter(models.Seccion.id_anio_escolar == anio_id).all()
 
 @router.get("/cursos-por-seccion/{seccion_id}", response_model=List[schemas.CursoResponse])
-def obtener_cursos_de_seccion(seccion_id: int, db: Session = Depends(get_db)):
+def obtener_cursos_de_seccion(seccion_id: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # 1. Buscamos la sección para saber qué grado es
     seccion = db.query(models.Seccion).filter(models.Seccion.id_seccion == seccion_id).first()
     if not seccion:
@@ -317,7 +333,8 @@ def obtener_cursos_de_seccion(seccion_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/secciones/{seccion_id}", response_model=schemas.SeccionResponse)
-def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Session = Depends(get_db)):
+def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_seccion = db.query(models.Seccion).filter(models.Seccion.id_seccion == seccion_id).first()
     if not db_seccion:
         raise HTTPException(status_code=404, detail="Sección no encontrada")
@@ -330,7 +347,8 @@ def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Sess
     return db_seccion
 
 @router.delete("/secciones/{seccion_id}", status_code=status.HTTP_204_NO_CONTENT)
-def eliminar_seccion(seccion_id: int, db: Session = Depends(get_db)):
+def eliminar_seccion(seccion_id: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_seccion = db.query(models.Seccion).filter(models.Seccion.id_seccion == seccion_id).first()
     if not db_seccion:
         raise HTTPException(status_code=404, detail="Sección no encontrada")
@@ -342,7 +360,8 @@ def eliminar_seccion(seccion_id: int, db: Session = Depends(get_db)):
 
 # --- ÁREAS ---
 @router.post("/areas/", response_model=schemas.AreaResponse)
-def crear_area(area: schemas.AreaCreate, db: Session = Depends(get_db)):
+def crear_area(area: schemas.AreaCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     nuevo = models.Area(**area.model_dump())
     db.add(nuevo)
     db.commit()
@@ -350,13 +369,15 @@ def crear_area(area: schemas.AreaCreate, db: Session = Depends(get_db)):
     return nuevo
 
 @router.get("/areas/", response_model=List[schemas.AreaResponse])
-def listar_areas(db: Session = Depends(get_db)):
+def listar_areas(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     return db.query(models.Area).all()
 
 
 # --- CURSOS ---
 @router.post("/cursos/", response_model=schemas.CursoResponse)
-def crear_curso(curso: schemas.CursoCreate, db: Session = Depends(get_db)):
+def crear_curso(curso: schemas.CursoCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     nuevo = models.Curso(**curso.model_dump())
     db.add(nuevo)
     db.commit()
@@ -364,12 +385,14 @@ def crear_curso(curso: schemas.CursoCreate, db: Session = Depends(get_db)):
     return nuevo
 
 @router.get("/cursos/", response_model=List[schemas.CursoResponse])
-def listar_cursos(db: Session = Depends(get_db)):
+def listar_cursos(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # Puedes agregar joinedload(models.Curso.area) si quieres ver el nombre del área
     return db.query(models.Curso).all()
 
 @router.put("/cursos/{curso_id}", response_model=schemas.CursoResponse)
-def actualizar_curso(curso_id: int, curso_data: schemas.CursoCreate, db: Session = Depends(get_db)):
+def actualizar_curso(curso_id: int, curso_data: schemas.CursoCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     db_curso = db.query(models.Curso).filter(models.Curso.id_curso == curso_id).first()
     if not db_curso:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
@@ -385,7 +408,8 @@ def actualizar_curso(curso_id: int, curso_data: schemas.CursoCreate, db: Session
 def eliminar_curso(
     curso_id: int, 
     grados_ids: Optional[List[int]] = Query(None), 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
 ):
     db_curso = db.query(models.Curso).filter(models.Curso.id_curso == curso_id).first()
     if not db_curso:
@@ -413,7 +437,8 @@ def eliminar_curso(
 def actualizar_plan_estudio_batch(
     curso_id: int, 
     grados: List[int] = Body(...), # Usamos Body explícito para recibir la lista [1, 2, 3]
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
 ):
     # 1. Limpiar asignaciones previas
     db.query(models.PlanEstudio).filter(
@@ -429,7 +454,8 @@ def actualizar_plan_estudio_batch(
     return {"message": "Plan de estudio actualizado correctamente"}
 
 @router.post("/plan-estudio/", response_model=schemas.PlanEstudioResponse)
-def asignar_curso_a_grado(plan: schemas.PlanEstudioCreate, db: Session = Depends(get_db)):
+def asignar_curso_a_grado(plan: schemas.PlanEstudioCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     existe = db.query(models.PlanEstudio).filter(
         models.PlanEstudio.id_curso == plan.id_curso,
         models.PlanEstudio.id_grado == plan.id_grado
@@ -446,7 +472,8 @@ def asignar_curso_a_grado(plan: schemas.PlanEstudioCreate, db: Session = Depends
 
 #--- Para el horario
 @router.get("/secciones-horario/{anio_id}", response_model=List[schemas.SeccionHorarioResponse])
-def obtener_secciones_para_constructor(anio_id: str, db: Session = Depends(get_db)):
+def obtener_secciones_para_constructor(anio_id: str, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     """
     Endpoint exclusivo para el constructor de horarios.
     Trae las secciones de un año específico incluyendo la info del grado.

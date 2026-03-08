@@ -6,6 +6,7 @@ from . import models, schemas
 from app.modules.users.models import Usuario
 from app.modules.users.docente.models import Docente
 from app.core.util.password import get_password_hash
+from app.core.util.security import get_current_user
 
 router = APIRouter(prefix="/personal", tags=["Gestión de Personal"])
 
@@ -25,7 +26,7 @@ def to_response(registro, tipo):
     }
 
 @router.get("/{tipo}", response_model=List[schemas.PersonalResponse])
-def listar_personal(tipo: str, db: Session = Depends(get_db)):
+def listar_personal(tipo: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if tipo == "admin":
         registros = db.query(models.Administrador).options(joinedload(models.Administrador.usuario)).all()
     elif tipo == "docente":
@@ -38,7 +39,7 @@ def listar_personal(tipo: str, db: Session = Depends(get_db)):
     return [to_response(r, tipo) for r in registros]
 
 @router.post("/{tipo}", response_model=schemas.PersonalResponse)
-def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = Depends(get_db)):
+def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     rol = "ADMIN" if tipo == "admin" else ("DOCENTE" if tipo == "docente" else "AUXILIAR")
     
     # 1. Crear Usuario
@@ -68,7 +69,7 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
     return to_response(nuevo_perfil, tipo)
 
 @router.put("/{tipo}/{id}", response_model=schemas.PersonalResponse)
-def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Session = Depends(get_db)):
+def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if tipo == "admin":
         perfil = db.query(models.Administrador).filter(models.Administrador.id_admin == id).first()
     elif tipo == "docente":
@@ -95,7 +96,7 @@ def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Sessio
     return to_response(perfil, tipo)
 
 @router.patch("/{tipo}/{id}/estado")
-def cambiar_estado(tipo: str, id: int, activo: bool, db: Session = Depends(get_db)):
+def cambiar_estado(tipo: str, id: int, activo: bool, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if tipo == "admin":
         perfil = db.query(models.Administrador).filter(models.Administrador.id_admin == id).first()
     elif tipo == "docente":

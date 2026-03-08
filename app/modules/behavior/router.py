@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract,func
 from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
+from app.core.util.security import get_current_user
 from . import models, schemas
 from typing import Optional
 from datetime import datetime
@@ -10,7 +11,7 @@ from datetime import datetime
 router = APIRouter(prefix="/conducta", tags=["Conducta y Psicología"])
 
 @router.post("/reportes/")
-def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends(get_db)):
+def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     nuevo_reporte = models.ReporteConducta(**reporte.model_dump())
     db.add(nuevo_reporte)
     db.commit()
@@ -24,7 +25,8 @@ def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends
 def obtener_estado_por_usuario(
     id_usuario: int, 
     anio: Optional[int] = Query(None), 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
 ):
     # 1. Buscar al alumno asociado
     alumno = db.query(alumno_models.Alumno).filter(
@@ -76,7 +78,7 @@ def obtener_estado_por_usuario(
 
 
 @router.get("/usuario/{id_usuario}/anios-reportes")
-def obtener_anios_con_reportes(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_anios_con_reportes(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Buscar al alumno
     alumno = db.query(alumno_models.Alumno).filter(
         alumno_models.Alumno.id_usuario == id_usuario
@@ -97,14 +99,14 @@ def obtener_anios_con_reportes(id_usuario: int, db: Session = Depends(get_db)):
     return [int(a.anio) for a in anios]
 
 @router.get("/niveles-conducta")
-def listar_niveles_disponibles(db: Session = Depends(get_db)):
+def listar_niveles_disponibles(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # Esto servirá para llenar el select/dropdown en la interfaz del auxiliar
     return db.query(models.NivelConducta).all()
 
 # --- ENDPOINTS DE CITAS PSICOLÓGICAS ---
 
 @router.post("/citas/")
-def programar_cita(cita: schemas.CitaCreate, db: Session = Depends(get_db)):
+def programar_cita(cita: schemas.CitaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Permite al psicólogo o auxiliar agendar una nueva cita."""
     nueva_cita = models.CitaPsicologia(**cita.model_dump())
     db.add(nueva_cita)
@@ -113,7 +115,7 @@ def programar_cita(cita: schemas.CitaCreate, db: Session = Depends(get_db)):
     return {"mensaje": "Cita programada exitosamente", "data": nueva_cita}
 
 @router.get("/usuario/{id_usuario}/citas")
-def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
     Lista todas las citas programadas para el estudiante logueado.
     """
@@ -143,7 +145,7 @@ def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db)):
     ]
 
 @router.patch("/citas/{id_cita}/completar")
-def finalizar_cita(id_cita: int, resultado: str, db: Session = Depends(get_db)):
+def finalizar_cita(id_cita: int, resultado: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """El psicólogo registra lo ocurrido en la reunión y cierra la cita."""
     cita = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_cita == id_cita).first()
     if not cita:
@@ -159,7 +161,7 @@ def finalizar_cita(id_cita: int, resultado: str, db: Session = Depends(get_db)):
 
 # 1. Endpoint para el Resumen (Solo envía LA PRÓXIMA CITA activa)
 @router.get("/usuario/{id_usuario}/proxima-cita")
-def obtener_proxima_cita(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_proxima_cita(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     alumno = db.query(alumno_models.Alumno).filter(alumno_models.Alumno.id_usuario == id_usuario).first()
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
@@ -187,7 +189,8 @@ def obtener_proxima_cita(id_usuario: int, db: Session = Depends(get_db)):
 def obtener_historial_citas(
     id_usuario: int, 
     anio: Optional[int] = Query(None), 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
 ):
     alumno = db.query(alumno_models.Alumno).filter(alumno_models.Alumno.id_usuario == id_usuario).first()
     

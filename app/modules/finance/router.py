@@ -12,6 +12,9 @@ from app.modules.academic import models as academic_models
 from app.modules.users.alumno import models as user_models
 from app.modules.enrollment import models as er_models
 from .service import FinanceService
+from app.core.util.security import get_current_user
+
+
 router = APIRouter(prefix="/finance", tags=["Finanzas"])
 
 
@@ -29,12 +32,12 @@ ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 # ==========================================
 
 @router.get("/tramites-tipos/", response_model=List[schemas.TipoTramiteResponse])
-def listar_tipos_tramite(db: Session = Depends(get_db)):
+def listar_tipos_tramite(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Lista todos los tipos de trámite configurados en el sistema."""
     return db.query(models.TipoTramite).all()
 
 @router.get("/tramites-tipos/alumnos", response_model=List[schemas.TipoTramiteResponse])
-def listar_tipos_tramite_alumnos(db: Session = Depends(get_db)):
+def listar_tipos_tramite_alumnos(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
     Lista los tipos de trámite visibles para los alumnos.
     Filtra automáticamente procesos de Matrícula y Vacante para evitar confusiones.
@@ -46,7 +49,7 @@ def listar_tipos_tramite_alumnos(db: Session = Depends(get_db)):
     ).all()
 
 @router.post("/tramites-tipos/", response_model=schemas.TipoTramiteResponse)
-def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db)):
+def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Crea un nuevo tipo de trámite con validación de unicidad para VACANTE."""
     
     # 1. Convertimos el nombre a Mayúsculas para una comparación segura
@@ -74,7 +77,7 @@ def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends
     return nuevo
 
 @router.put("/tramites-tipos/{id}", response_model=schemas.TipoTramiteResponse)
-def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db)):
+def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Edita un tipo de trámite existente con validación de integridad para VACANTE."""
     db_tramite = db.query(models.TipoTramite).filter(models.TipoTramite.id_tipo_tramite == id).first()
     
@@ -109,7 +112,7 @@ def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session
     return db_tramite
 
 @router.patch("/tramites-tipos/{id}/estado")
-def cambiar_estado_tramite(id: int, activo: bool, db: Session = Depends(get_db)):
+def cambiar_estado_tramite(id: int, activo: bool, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Activa o desactiva un trámite."""
     db_tramite = db.query(models.TipoTramite).filter(models.TipoTramite.id_tipo_tramite == id).first()
     if not db_tramite:

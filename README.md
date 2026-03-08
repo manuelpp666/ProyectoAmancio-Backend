@@ -68,6 +68,7 @@ pip install "pydantic[email]"
 
 pip install "passlib[bcrypt]"
 
+
 1.
 pip install -U python-multipart google-genai langchain langchain-pinecone pinecone-client pypdf langchain-huggingface sentence-transformers
 
@@ -77,3 +78,5 @@ pip install -U python-multipart google-genai langchain langchain-pinecone pineco
 3. pip install python-docx
 
 4. pip install docx2txt
+
+5. pip install python-jose[cryptography]

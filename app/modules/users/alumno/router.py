@@ -7,6 +7,7 @@ from app.modules.users.models import Usuario
 from app.modules.users.relacion_familiar.models import RelacionFamiliar
 from app.modules.users import models as al_models
 from app.modules.finance import models as finance_models
+from app.core.util.security import get_current_user
 from app.core.util.password import get_password_hash
 from . import models, schemas # Asegúrate de importar los modelos correctos
 
@@ -15,14 +16,16 @@ router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
 #---- Sacar id_usuario de id_alumno
 # En tu router de alumnos o académico
 @router.get("/alumnos/usuario/{id_usuario}")
-def obtener_alumno_por_usuario(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_alumno_por_usuario(id_usuario: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     alumno = db.query(models.Alumno).filter(models.Alumno.id_usuario == id_usuario).first()
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
     return {"id_alumno": alumno.id_alumno}
 
 @router.post("/", response_model=schemas.AlumnoResponse)
-def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db)):
+def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user) ):
     db_alumno = models.Alumno(**alumno.model_dump())
     db.add(db_alumno)
     db.commit()
@@ -30,7 +33,9 @@ def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db)):
     return db_alumno
 
 @router.get("/", response_model=List[schemas.AlumnoResponse])
-def listar_alumnos(dni: str = None, db: Session = Depends(get_db)):
+def listar_alumnos(dni: str = None, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
+
     query = db.query(models.Alumno).filter(models.Alumno.estado_ingreso != "rechazado")
     
     if dni:
@@ -40,7 +45,15 @@ def listar_alumnos(dni: str = None, db: Session = Depends(get_db)):
     return query.all()
 
 @router.get("/solicitudes-pendientes", response_model=List[schemas.AlumnoResponse])
-def listar_postulantes(db: Session = Depends(get_db)):
+def listar_postulantes(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user) 
+):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="No tienes permisos para ver solicitudes de admisión"
+        )
     return db.query(models.Alumno).filter(models.Alumno.estado_ingreso == "postulante").all()
 
 @router.post("/decidir-admision/{id_alumno}")
@@ -48,7 +61,8 @@ def decidir_admision(
     id_alumno: int, 
     aprobado: bool, 
     motivo: str = None, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user) 
 ):
     try:
         # 1. Buscar al alumno por su ID
@@ -119,7 +133,7 @@ def decidir_admision(
         )
     
 @router.get("/detalle-completo/{id_alumno}")
-def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db)):
+def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     alumno = db.query(models.Alumno).filter(models.Alumno.id_alumno == id_alumno).first()
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")

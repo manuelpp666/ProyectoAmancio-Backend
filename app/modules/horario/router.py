@@ -11,18 +11,19 @@ from app.modules.enrollment.models import Matricula
 from app.modules.users.alumno.models import Alumno
 from app.modules.users.models import Usuario
 from app.modules.users.docente.models import Docente
+from app.core.util.security import get_current_user
 
 router = APIRouter(prefix="/horarios", tags=["Horarios"])
 
 # --- CONFIGURACIÓN DE HORAS ---
 @router.get("/horas", response_model=List[HoraLectivaResponse])
-def obtener_horas_lectivas(db: Session = Depends(get_db)):
+def obtener_horas_lectivas(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Retorna los bloques de tiempo (filas del schedule)"""
     return db.query(HoraLectiva).order_by(HoraLectiva.hora_inicio).all()
 
 # --- HORARIO POR SECCIÓN ---
 @router.get("/seccion/{id_seccion}", response_model=List[HorarioResponse])
-def obtener_horario_seccion(id_seccion: int, db: Session = Depends(get_db)):
+def obtener_horario_seccion(id_seccion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # Join explícito para evitar el error de Mapper
     horarios = db.query(HorarioEscolar).join(
         CargaAcademica, HorarioEscolar.id_carga_academica == CargaAcademica.id_carga_academica
@@ -46,7 +47,7 @@ def obtener_horario_seccion(id_seccion: int, db: Session = Depends(get_db)):
 
 # --- GUARDAR / ACTUALIZAR BLOQUE ---
 @router.post("/", status_code=status.HTTP_201_CREATED)
-def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_db)):
+def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Validar bloque de hora
     bloque_hora = db.query(HoraLectiva).filter(HoraLectiva.id_hora == horario_in.id_hora).first()
     if not bloque_hora:
@@ -103,7 +104,7 @@ def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_
 
 
 @router.delete("/{id_horario}")
-def eliminar_bloque_horario(id_horario: int, db: Session = Depends(get_db)):
+def eliminar_bloque_horario(id_horario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     db_horario = db.query(HorarioEscolar).filter(HorarioEscolar.id_horario == id_horario).first()
     if not db_horario:
         raise HTTPException(status_code=404, detail="No se encontró el bloque")
@@ -113,7 +114,7 @@ def eliminar_bloque_horario(id_horario: int, db: Session = Depends(get_db)):
 
 
 @router.get("/materias-disponibles/{id_seccion}")
-def obtener_materias_disponibles(id_seccion: int, db: Session = Depends(get_db)):
+def obtener_materias_disponibles(id_seccion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # Buscamos la carga académica de esa sección
     materias = db.query(CargaAcademica).filter(CargaAcademica.id_seccion == id_seccion).all()
     
@@ -127,7 +128,7 @@ def obtener_materias_disponibles(id_seccion: int, db: Session = Depends(get_db))
 def obtener_horario_por_usuario(
     id_usuario: int, 
     id_anio_escolar: str, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     """
     Obtiene el horario basado en el rol definido en la tabla Usuario.

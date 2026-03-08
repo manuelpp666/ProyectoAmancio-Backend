@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from . import models, schemas
+from app.core.util.jwt import create_access_token
 from app.core.util.password import get_password_hash
 from app.core.util.password import verify_password
 
@@ -42,11 +43,20 @@ def login(credentials: schemas.UsuarioLogin, db: Session = Depends(get_db)):
     # 4. Validar si el usuario está activo
     if not user.activo:
         raise HTTPException(status_code=403, detail="Cuenta desactivada")
-
-    # 5. Retornar los datos que el frontend necesita para el UseContext(aqui se usara JWT)
+    
+    access_token = create_access_token(
+        data={
+            "sub": user.username, 
+            "id": user.id_usuario, 
+            "rol": user.rol
+        }
+    )
+    # 6. Retornar los datos que el frontend necesita para el UseContext(aqui se usara JWT)
     return {
         "id_usuario": user.id_usuario,
         "username": user.username,
         "rol": user.rol,
+        "access_token": access_token,
+        "token_type": "bearer",
         "status": "success"
     }

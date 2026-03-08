@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.database import get_db
+from app.core.util.security import get_current_user
 from app.modules.users.alumno.models import Alumno
 from app.modules.users.familiar.models import Familiar
 from app.modules.users.relacion_familiar.models import RelacionFamiliar # El que creamos antes

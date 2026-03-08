@@ -4,6 +4,7 @@ from datetime import datetime,date
 from sqlalchemy import extract,desc,asc
 from sqlalchemy.orm import Session
 from typing import List
+from app.core.util.security import get_current_user
 from app.db.database import get_db
 from . import models, schemas
 
@@ -24,7 +25,8 @@ def update_or_create_config(
     clave: str, 
     config_update: schemas.ConfigUpdate, 
     seccion: str, # Pasamos la sección como query param
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user) 
 ):
     item = db.query(models.PaginaConfiguracion).filter(
         models.PaginaConfiguracion.clave == clave

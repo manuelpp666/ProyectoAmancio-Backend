@@ -17,7 +17,7 @@ from app.modules.enrollment import models as models_en
 from app.modules.management import models as models_mn
 from app.modules.users.alumno import models as models_al
 from app.modules.users.docente import models as models_doc
-
+from app.core.util.security import get_current_user
 from . import models, schemas
 
 
@@ -47,7 +47,7 @@ router = APIRouter(prefix="/virtual", tags=["Aula Virtual"])
 
 
 @router.post("/chat/mensaje/")
-async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(get_db)):
+async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Obtener la conversación y determinar quién es el receptor
     conv = db.query(models.Conversacion).filter(models.Conversacion.id_conversacion == mensaje.id_conversacion).first()
     if not conv:
@@ -152,7 +152,7 @@ async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(g
 
 
 @router.get("/chat/contactos/{id_usuario}")
-def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(get_db)):
+def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     user = db.query(models_usuario.Usuario).get(id_usuario)
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == 1).first()
     
@@ -237,7 +237,7 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
     return contactos_validos
 
 @router.get("/chat/conversaciones/{id_usuario}")
-def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db)):
+def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Busca conversaciones donde el usuario participa
     convs = db.query(models.Conversacion).filter(
         or_(models.Conversacion.usuario1_id == id_usuario, 
@@ -293,7 +293,7 @@ def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db)):
 
 
 @router.post("/chat/conversacion/")
-def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = Depends(get_db)):
+def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Verificar si ya existe una conversación entre estos dos usuarios
     existente = db.query(models.Conversacion).filter(
         or_(
@@ -318,7 +318,7 @@ def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = 
 
 
 @router.get("/chat/historial/{id_conversacion}")
-def obtener_historial(id_conversacion: int, db: Session = Depends(get_db)):
+def obtener_historial(id_conversacion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     mensajes = db.query(models.Mensaje).filter(
         models.Mensaje.id_conversacion == id_conversacion
     ).order_by(models.Mensaje.fecha_envio.asc()).all()
@@ -344,7 +344,7 @@ async def crear_tarea(
     bimestre: int = Form(...),
     peso: int = Form(0),
     archivo: Optional[UploadFile] = File(None), # <-- Archivo opcional del docente
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     # 1. Validar existencia de Carga Académica
     carga = db.query(models_mn.CargaAcademica).filter(
@@ -409,7 +409,7 @@ async def crear_tarea(
     return nueva_tarea
 
 @router.get("/sabana-notas/{id_carga}/{bimestre}", response_model=schemas.SabanaNotasResponse)
-def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get_db)):
+def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     # 1. Obtener la información de la carga académica
     carga = db.query(models_mn.CargaAcademica).filter(models_mn.CargaAcademica.id_carga_academica == id_carga).first()
@@ -483,7 +483,8 @@ def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get
     }
 
 @router.post("/guardar-notas-masivo/")
-def guardar_notas_masivo(payload: schemas.NotasMasivasCreate, db: Session = Depends(get_db)):
+def guardar_notas_masivo(payload: schemas.NotasMasivasCreate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     """
     Se espera un payload como: 
     { "id_tarea": 10, "notas": { "id_alumno_1": 15, "id_alumno_2": 20 } }
@@ -514,7 +515,7 @@ def guardar_notas_masivo(payload: schemas.NotasMasivasCreate, db: Session = Depe
     return {"message": "Notas actualizadas correctamente"}
 
 @router.put("/calificar-entrega/{id_entrega}")
-def calificar_entrega(id_entrega: int, calificacion: float, retroalimentacion: str = None, db: Session = Depends(get_db)):
+def calificar_entrega(id_entrega: int, calificacion: float, retroalimentacion: str = None, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     entrega = db.query(models.EntregaTarea).filter(models.EntregaTarea.id_entrega == id_entrega).first()
     if not entrega:
         raise HTTPException(status_code=404, detail="Entrega no encontrada")
@@ -525,7 +526,8 @@ def calificar_entrega(id_entrega: int, calificacion: float, retroalimentacion: s
     return {"message": "Calificación registrada con éxito"}
 
 @router.get("/mis-notas/{id_carga}/{id_alumno}")
-def obtener_mis_notas(id_carga: int, id_alumno: int, db: Session = Depends(get_db)):
+def obtener_mis_notas(id_carga: int, id_alumno: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # Trae todas las tareas del curso
     tareas = db.query(models.Tarea).filter(models.Tarea.id_carga_academica == id_carga).all()
     
@@ -556,7 +558,8 @@ async def editar_tarea(
     bimestre: int = Form(...),
     peso: int = Form(...),
     archivo: Optional[UploadFile] = File(None), # Nuevo archivo opcional
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
 ):
     tarea = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
     if not tarea:
@@ -607,7 +610,8 @@ async def editar_tarea(
     return tarea
 
 @router.delete("/tareas/{id_tarea}")
-def eliminar_tarea(id_tarea: int, db: Session = Depends(get_db)):
+def eliminar_tarea(id_tarea: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     tarea = db.get(models.Tarea, id_tarea)
     if not tarea:
         raise HTTPException(status_code=404, detail="Tarea no encontrada")
@@ -634,7 +638,8 @@ def eliminar_tarea(id_tarea: int, db: Session = Depends(get_db)):
     return {"message": "Actividad y recursos eliminados con éxito"}
 
 @router.get("/tareas/{id_tarea}/entregas", response_model=List[schemas.EntregaDetalleResponse])
-def listar_entregas_con_archivos(id_tarea: int, db: Session = Depends(get_db)):
+def listar_entregas_con_archivos(id_tarea: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # Buscamos directamente en entregas usando la relación cargada
     entregas = db.query(models.EntregaTarea).filter(
         models.EntregaTarea.id_tarea == id_tarea,
@@ -653,7 +658,8 @@ def listar_entregas_con_archivos(id_tarea: int, db: Session = Depends(get_db)):
     ]
 
 @router.get("/tareas/{id_tarea}", response_model=schemas.TareaResponse)
-def obtener_detalle_tarea(id_tarea: int, db: Session = Depends(get_db)):
+def obtener_detalle_tarea(id_tarea: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     tarea = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
     if not tarea:
         raise HTTPException(status_code=404, detail="Tarea no encontrada")
@@ -664,7 +670,8 @@ async def entregar_tarea(
     id_tarea: int = Form(...),
     id_usuario: int = Form(...),
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
 ):
     # 1. VALIDACIÓN PREVIA: ¿Existe la tarea y el alumno?
     tarea_existe = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
@@ -746,7 +753,8 @@ async def entregar_tarea(
     return {"message": "Tarea subida exitosamente", "url": url_db}
 
 @router.get("/tareas/{id_tarea}/{id_usuario}")
-def obtener_detalle_tarea_estudiante(id_tarea: int, id_usuario: int, db: Session = Depends(get_db)):
+def obtener_detalle_tarea_estudiante(id_tarea: int, id_usuario: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # 1. Buscar la tarea básica
     tarea = db.query(models.Tarea).filter(models.Tarea.id_tarea == id_tarea).first()
     if not tarea:
@@ -779,7 +787,8 @@ def obtener_detalle_tarea_estudiante(id_tarea: int, id_usuario: int, db: Session
     }
 
 @router.get("/api/dashboard/estudiante/{id_usuario}")
-def obtener_dashboard_estudiante(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_dashboard_estudiante(id_usuario: int, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
     # --- NUEVO: Buscar el año escolar activo ---
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
     

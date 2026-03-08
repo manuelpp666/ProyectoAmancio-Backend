@@ -13,6 +13,7 @@ from app.modules.management import models as models_mn
 from app.modules.finance import models as models_fi
 from app.modules.web import models as models_web
 from app.modules.behavior import models as models_psi
+from app.core.util.security import get_current_user
 from . import models, schemas
 
 
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/gestion", tags=["Gestión Académica"])
 
 # --- Carga Académica ---
 @router.post("/carga/", response_model=schemas.CargaResponse)
-def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db)):
+def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     nueva = models.CargaAcademica(**carga.model_dump())
     db.add(nueva)
     db.commit()
@@ -28,13 +29,13 @@ def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db)):
     return nueva
 
 @router.get("/carga/", response_model=List[schemas.CargaResponse])
-def listar_cargas(db: Session = Depends(get_db)):
+def listar_cargas(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     return db.query(models.CargaAcademica).all()
 
 # --- Notas ---
 @router.post("/notas/", response_model=schemas.NotaResponse)
-def registrar_nota(nota: schemas.NotaCreate, db: Session = Depends(get_db)):
-    nueva = models.Nota(**nota.dict())
+def registrar_nota(nota: schemas.NotaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    nueva = models.Nota(**nota.model_dump())
     db.add(nueva)
     db.commit()
     db.refresh(nueva)
@@ -42,7 +43,7 @@ def registrar_nota(nota: schemas.NotaCreate, db: Session = Depends(get_db)):
 
 # --- Asistencia ---
 @router.post("/asistencia/", response_model=schemas.AsistenciaResponse)
-def registrar_asistencia(asistencia: schemas.AsistenciaCreate, db: Session = Depends(get_db)):
+def registrar_asistencia(asistencia: schemas.AsistenciaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     nueva = models.Asistencia(**asistencia.model_dump())
     db.add(nueva)
     db.commit()
@@ -55,7 +56,7 @@ def registrar_asistencia(asistencia: schemas.AsistenciaCreate, db: Session = Dep
 def obtener_cursos_estudiante(
     id_usuario: int, 
     anio: str, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     # 1. Buscar al alumno
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
@@ -115,7 +116,7 @@ def obtener_detalle_curso_estudiante(
     id_curso: int, 
     id_usuario: int, 
     anio: str, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     # 1. Identificar al alumno y su matrícula para ese año
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
@@ -169,7 +170,7 @@ def obtener_detalle_curso_estudiante(
 def obtener_resumen_notas_estudiante(
     id_usuario: int, 
     anio: str, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     # 1. Obtener al alumno
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
@@ -218,7 +219,7 @@ def obtener_resumen_notas_estudiante(
 # --- Asignación de Docentes ---
 
 @router.get("/vínculos-academicos/{anio_id}", response_model=List[schemas.VinculoAcademicoResponse])
-def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db)):
+def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
     Obtiene todos los cursos por sección de un año escolar 
     y muestra qué docente tienen asignado (si lo hay).
@@ -258,14 +259,14 @@ def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db))
     return resultado
 
 @router.get("/docentes-disponibles/", response_model=List[schemas.DocenteBasicoResponse])
-def listar_docentes_busqueda(db: Session = Depends(get_db)):
+def listar_docentes_busqueda(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Lista simple de docentes para el selector de la interfaz"""
     return db.query(models_doc.Docente).all()
 
 
 #--- Delete y update de la carga academica
 @router.delete("/carga/{carga_id}", status_code=status.HTTP_204_NO_CONTENT)
-def eliminar_carga(carga_id: int, db: Session = Depends(get_db)):
+def eliminar_carga(carga_id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     db_carga = db.query(models.CargaAcademica).filter(models.CargaAcademica.id_carga_academica == carga_id).first()
     if not db_carga:
         raise HTTPException(status_code=404, detail="Asignación no encontrada")
@@ -275,7 +276,7 @@ def eliminar_carga(carga_id: int, db: Session = Depends(get_db)):
     return None
 
 @router.patch("/carga/{carga_id}", response_model=schemas.CargaResponse)
-def actualizar_carga(carga_id: int, data: schemas.CargaUpdate, db: Session = Depends(get_db)):
+def actualizar_carga(carga_id: int, data: schemas.CargaUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     db_carga = db.query(models.CargaAcademica).filter(models.CargaAcademica.id_carga_academica == carga_id).first()
     
     if not db_carga:
@@ -294,7 +295,7 @@ def actualizar_carga(carga_id: int, data: schemas.CargaUpdate, db: Session = Dep
 def obtener_cursos_docente(
     id_usuario: int, 
     anio: str, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     # 1. Buscar al docente asociado al usuario
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
@@ -348,7 +349,7 @@ def obtener_cursos_docente(
 
 
 @router.get("/mis-cursos-docente-dashboard/{id_usuario}")
-def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Buscar año activo automáticamente
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
     if not anio_activo:
@@ -387,7 +388,7 @@ def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_
     ]
 
 @router.get("/resumen-docente/{id_usuario}")
-def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Obtener ID del docente
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
     if not docente:
@@ -424,7 +425,7 @@ def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db)):
 
 
 @router.get("/notificaciones/{id_usuario}")
-def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db)):
+def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Obtener año activo
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
     if not anio_activo:
