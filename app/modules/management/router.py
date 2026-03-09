@@ -216,6 +216,116 @@ def obtener_resumen_notas_estudiante(
     # Convertir a lista de diccionarios para serialización segura
     return [row._asdict() for row in resultados]
 
+
+@router.post("/cerrar-bimestre/{id_carga}/{bimestre}")
+def cerrar_notas_bimestre(
+    id_carga: int, 
+    bimestre: int, 
+    db: Session = Depends(get_db), 
+    current_user: dict = Depends(get_current_user)
+):
+    # 1. Obtener la carga académica y validar existencia
+    carga = db.query(models_mn.CargaAcademica).filter(
+        models_mn.CargaAcademica.id_carga_academica == id_carga
+    ).first()
+    
+    if not carga:
+        raise HTTPException(status_code=404, detail="Carga académica no encontrada")
+
+    # 2. VALIDACIÓN: Verificar que el peso de las tareas sume 100%
+    suma_pesos = db.query(func.sum(models_vr.Tarea.peso)).filter(
+        models_vr.Tarea.id_carga_academica == id_carga,
+        models_vr.Tarea.bimestre == bimestre,
+        models_vr.Tarea.estado == "ACTIVO"
+    ).scalar() or 0
+
+    if suma_pesos != 100:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"No se puede cerrar el bimestre. El peso total de las tareas es {suma_pesos}%, debe ser 100%."
+        )
+
+    # 3. Obtener todas las tareas del bimestre para el cálculo
+    tareas = db.query(models_vr.Tarea).filter(
+        models_vr.Tarea.id_carga_academica == id_carga,
+        models_vr.Tarea.bimestre == bimestre,
+        models_vr.Tarea.estado == "ACTIVO"
+    ).all()
+
+    # 4. Obtener alumnos matriculados en esa sección y año
+    alumnos_matriculados = db.query(models_al.Alumno, models_en.Matricula).join(
+        models_en.Matricula, models_al.Alumno.id_alumno == models_en.Matricula.id_alumno
+    ).filter(
+        models_en.Matricula.id_seccion == carga.id_seccion,
+        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
+    ).all()
+
+    # 5. Procesar cada alumno
+    for alumno, matricula in alumnos_matriculados:
+        promedio_bimestre = 0.0
+        
+        # Calcular el promedio ponderado
+        for tarea in tareas:
+            entrega = db.query(models_vr.EntregaTarea).filter(
+                models_vr.EntregaTarea.id_tarea == tarea.id_tarea,
+                models_vr.EntregaTarea.id_alumno == alumno.id_alumno
+            ).first()
+            
+            calificacion = float(entrega.calificacion) if entrega and entrega.calificacion else 0.0
+            promedio_bimestre += (calificacion * (tarea.peso / 100.0))
+        
+        promedio_redondeado = round(promedio_bimestre, 2)
+
+        # --- OPERACIÓN EN TABLA 'NOTA' ---
+        # Si ya existe el registro de "PROMEDIO" para ese bimestre, se actualiza
+        nota_existente = db.query(models_mn.Nota).filter(
+            models_mn.Nota.id_matricula == matricula.id_matricula,
+            models_mn.Nota.id_curso == carga.id_curso,
+            models_mn.Nota.bimestre == bimestre,
+            models_mn.Nota.tipo_nota == 'PROMEDIO'
+        ).first()
+
+        if nota_existente:
+            nota_existente.valor = promedio_redondeado
+        else:
+            nueva_nota = models_mn.Nota(
+                id_matricula=matricula.id_matricula,
+                id_curso=carga.id_curso,
+                bimestre=bimestre,
+                tipo_nota='PROMEDIO',
+                valor=promedio_redondeado
+            )
+            db.add(nueva_nota)
+
+        # --- OPERACIÓN EN TABLA 'RESUMEN_NOTA' ---
+        resumen = db.query(models_mn.ResumenNota).filter(
+            models_mn.ResumenNota.id_matricula == matricula.id_matricula,
+            models_mn.ResumenNota.id_curso == carga.id_curso
+        ).first()
+
+        if not resumen:
+            resumen = models_mn.ResumenNota(
+                id_matricula=matricula.id_matricula,
+                id_curso=carga.id_curso
+            )
+            db.add(resumen)
+
+        # Asignar la nota al campo correspondiente según el bimestre
+        setattr(resumen, f"nota_bimestre{bimestre}", promedio_redondeado)
+
+        # --- RECALCULAR PROMEDIO FINAL (Lógica de 25% por bimestre) ---
+        # Si la nota es None (porque no se ha cursado el bimestre), la tratamos como 0.0
+        b1 = float(resumen.nota_bimestre1 or 0.0)
+        b2 = float(resumen.nota_bimestre2 or 0.0)
+        b3 = float(resumen.nota_bimestre3 or 0.0)
+        b4 = float(resumen.nota_bimestre4 or 0.0)
+
+        # El promedio final es la suma de los 4 bimestres dividida entre 4
+        # (Es equivalente a: B1*0.25 + B2*0.25 + B3*0.25 + B4*0.25)
+        resumen.promedio_final = round((b1 + b2 + b3 + b4) / 4.0, 2)
+
+    db.commit()
+    return {"message": f"Bimestre {bimestre} cerrado exitosamente para la carga {id_carga}"}
 # --- Asignación de Docentes ---
 
 @router.get("/vínculos-academicos/{anio_id}", response_model=List[schemas.VinculoAcademicoResponse])
