@@ -25,3 +25,15 @@ class Auxiliar(Base):
     email = Column(String(100))
     sueldo = Column(DECIMAL(10, 2), default=0.00)
     usuario = relationship("Usuario")
+
+class Psicologo(Base):
+    __tablename__ = "psicologo"
+    id_psicologo = Column(Integer, primary_key=True)
+    id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), unique=True)
+    dni = Column(String(8), unique=True, nullable=False)
+    nombres = Column(String(250), nullable=False)
+    apellidos = Column(String(250), nullable=False)
+    telefono = Column(String(9))
+    email = Column(String(100))
+    sueldo = Column(DECIMAL(10, 2), default=0.00)
+    usuario = relationship("Usuario")

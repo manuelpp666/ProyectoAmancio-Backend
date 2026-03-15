@@ -5,12 +5,19 @@ from app.db.database import get_db
 from . import models, schemas
 from typing import List, Optional
 from datetime import date
+from pydantic import BaseModel  # <--- NUEVO: Importación para el endpoint de edición
 from app.core.util.security import get_current_user
 from app.modules.management.models import CargaAcademica  # <--- Importar CargaAcademica
 from app.modules.users.models import Usuario, RolEnum     # <--- Importar Usuario y RolEnum
 from app.modules.users.docente.models import Docente      # <--- Importar Docente
 
 router = APIRouter(prefix="/academic", tags=["Académico"])
+
+# --- NUEVO: Esquema local para editar el año ---
+class EditarAnioRequest(BaseModel):
+    fecha_inicio: date
+    fecha_fin: date
+    tipo: str
 
 # --- AÑO ESCOLAR ---
 def actualizar_estado_anios(db: Session):
@@ -84,6 +91,27 @@ def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
         db.rollback()
         print(f"Error no controlado: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+# --- NUEVO ENDPOINT: Editar fechas de un año existente ---
+@router.patch("/anios/{anio_id}")
+def editar_anio(anio_id: str, datos: EditarAnioRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
+    if not db_anio:
+        raise HTTPException(status_code=404, detail="Año no encontrado")
+    
+    if datos.fecha_fin <= datos.fecha_inicio:
+        raise HTTPException(status_code=400, detail="La fecha de fin debe ser posterior a la fecha de inicio.")
+
+    db_anio.fecha_inicio = datos.fecha_inicio
+    db_anio.fecha_fin = datos.fecha_fin
+    db_anio.tipo = datos.tipo
+    
+    hoy = date.today()
+    db_anio.activo = datos.fecha_inicio <= hoy <= datos.fecha_fin
+
+    db.commit()
+    actualizar_estado_anios(db)
+    return {"message": "Año académico actualizado correctamente"}
 
 @router.patch("/anios/{anio_id}/inscripciones")
 def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db),

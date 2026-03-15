@@ -92,26 +92,63 @@ def decidir_admision(
                     db.add(nuevo_user_alumno)
                     db.flush() 
                     alumno.id_usuario = nuevo_user_alumno.id_usuario
-            # C. Buscar el trámite de Vacante
-            # Es vital que este trámite exista, si no, la transacción debe fallar
-            tipo_vacante = db.query(finance_models.TipoTramite).filter(
-                finance_models.TipoTramite.nombre.like("%VACANTE%")
-            ).first()
+            
+            # C. Buscar el tipo de pago de Vacante y Matrícula (NUEVA LÓGICA MM-DD)
+            hoy = date.today()
+            hoy_md = hoy.strftime("%m-%d")
 
-            if not tipo_vacante:
-                raise Exception("Configuración faltante: No se encontró el trámite 'DERECHO DE VACANTE' en la tabla tipo_tramite.")
+            tipos_activos = db.query(finance_models.TipoPago).filter(finance_models.TipoPago.activo == True).all()
 
-            # D. Crear el registro de Pago
-            nuevo_pago = finance_models.Pago(
+            def esta_vigente(tipo):
+                inicio = tipo.fecha_inicio
+                fin = tipo.fecha_vencimiento
+                if inicio <= fin:
+                    return inicio <= hoy_md <= fin
+                else: # Cruza el año (ej: 11-01 a 02-28)
+                    return hoy_md >= inicio or hoy_md <= fin
+
+            def calcular_fecha_real(mm_dd: str) -> date:
+                mes, dia = map(int, mm_dd.split("-"))
+                anio_pago = hoy.year
+                # Si hoy es Nov/Dic y el pago es Ene/Feb, el pago es para el año que viene
+                if hoy.month >= 10 and mes <= 6:
+                    anio_pago += 1
+                try:
+                    return date(anio_pago, mes, dia)
+                except ValueError: # Febrero 29 en año no bisiesto -> Febrero 28
+                    return date(anio_pago, mes, dia - 1)
+
+            tipo_vacante = next((t for t in tipos_activos if t.categoria == 'VACANTE' and esta_vigente(t)), None)
+            tipo_matricula = next((t for t in tipos_activos if t.categoria == 'MATRICULA' and esta_vigente(t)), None)
+
+            if not tipo_vacante or not tipo_matricula:
+                raise Exception("Configuración faltante: Asegúrate de tener una plantilla de 'VACANTE' y una de 'MATRÍCULA' activas para la fecha de hoy.")
+
+            # D. Crear el registro de Pago (Actualizado)
+            nuevo_pago_vacante = finance_models.Pago(
                 id_alumno=alumno.id_alumno,
-                concepto=f"DERECHO DE VACANTE - {alumno.nombres} {alumno.apellidos}",
+                id_tipo_pago=tipo_vacante.id_tipo_pago, # <--- Se asocia al nuevo ID
+                concepto=f"{tipo_vacante.nombre} - {alumno.nombres} {alumno.apellidos}",
                 monto=tipo_vacante.costo,
                 mora=0.00,
                 monto_total=tipo_vacante.costo,
                 estado="PENDIENTE",
-                fecha_vencimiento=date.today()
+                fecha_vencimiento=calcular_fecha_real(tipo_vacante.fecha_vencimiento) # <--- Toma la fecha del tipo de pago
             )
-            db.add(nuevo_pago)
+            db.add(nuevo_pago_vacante)
+
+            nuevo_pago_matricula = finance_models.Pago(
+                id_alumno=alumno.id_alumno,
+                id_tipo_pago=tipo_matricula.id_tipo_pago,
+                concepto=f"{tipo_matricula.nombre} - {alumno.nombres} {alumno.apellidos}",
+                monto=tipo_matricula.costo,
+                mora=0.00,
+                monto_total=tipo_matricula.costo,
+                estado="PENDIENTE",
+                fecha_vencimiento=calcular_fecha_real(tipo_matricula.fecha_vencimiento) 
+            )
+            db.add(nuevo_pago_matricula)
+            
         else:
             # --- LÓGICA DE RECHAZO ---
             alumno.estado_ingreso = "RECHAZADO"
@@ -129,7 +166,7 @@ def decidir_admision(
         print(f"Error en decidir_admision: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="Error al procesar la admisión"
+            detail=str(e) if "Configuración faltante" in str(e) else "Error al procesar la admisión"
         )
     
 @router.get("/detalle-completo/{id_alumno}")

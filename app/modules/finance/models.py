@@ -59,6 +59,7 @@ class Pago(Base):
     id_alumno = Column(Integer, ForeignKey("alumno.id_alumno"), nullable=False)
     id_matricula = Column(Integer, ForeignKey("matricula.id_matricula"), nullable=True)
     id_solicitud_tramite = Column(Integer, ForeignKey("solicitud_tramite.id_solicitud_tramite"), nullable=True)
+    id_tipo_pago = Column(Integer, ForeignKey("tipo_pago.id_tipo_pago"))
     
     concepto = Column(String(150), nullable=False) # E.g., 'Pensión Marzo', 'Certificado'
     monto = Column(Numeric(10, 2), nullable=False)
@@ -76,3 +77,16 @@ class Pago(Base):
     alumno = relationship("Alumno")
     solicitud = relationship("SolicitudTramite", back_populates="pago")
     matricula = relationship("Matricula")
+
+class TipoPago(Base):
+    __tablename__ = "tipo_pago"
+    
+    id_tipo_pago = Column(Integer, primary_key=True, index=True)
+    categoria = Column(Enum('VACANTE', 'MATRICULA', 'PENSION', 'MODULO', 'OTRO'), default='OTRO')
+    nombre = Column(String(150), nullable=False)
+    costo = Column(Numeric(10, 2), nullable=False)
+    fecha_inicio = Column(String(5), nullable=False) # Formato "MM-DD"
+    fecha_vencimiento = Column(String(5), nullable=False) # Formato "MM-DD"
+    mora = Column(Numeric(10, 2), default=0.00)
+    accion_vencimiento = Column(Enum('DESHABILITAR', 'APLICAR_MORA'), default='APLICAR_MORA')
+    activo = Column(Boolean, default=True)

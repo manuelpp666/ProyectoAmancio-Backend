@@ -33,6 +33,8 @@ def listar_personal(tipo: str, db: Session = Depends(get_db), current_user: dict
         registros = db.query(Docente).options(joinedload(Docente.usuario)).all()
     elif tipo == "auxiliar":
         registros = db.query(models.Auxiliar).options(joinedload(models.Auxiliar.usuario)).all()
+    elif tipo == "psicologo":
+        registros = db.query(models.Psicologo).options(joinedload(models.Psicologo.usuario)).all()
     else:
         raise HTTPException(status_code=400, detail="Tipo inválido")
     
@@ -40,9 +42,12 @@ def listar_personal(tipo: str, db: Session = Depends(get_db), current_user: dict
 
 @router.post("/{tipo}", response_model=schemas.PersonalResponse)
 def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    rol = "ADMIN" if tipo == "admin" else ("DOCENTE" if tipo == "docente" else "AUXILIAR")
+    if tipo == "admin": rol = "ADMIN"
+    elif tipo == "docente": rol = "DOCENTE"
+    elif tipo == "auxiliar": rol = "AUXILIAR"
+    elif tipo == "psicologo": rol = "PSICOLOGO"
+    else: raise HTTPException(status_code=400, detail="Tipo inválido")
     
-    # 1. Crear Usuario
     nuevo_usuario = Usuario(
         username=personal.dni,
         password_hash=get_password_hash(personal.password),
@@ -53,7 +58,6 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
     db.commit()
     db.refresh(nuevo_usuario)
     
-    # 2. Crear Perfil
     datos_perfil = personal.model_dump(exclude={'password'})
     if tipo == "admin":
         nuevo_perfil = models.Administrador(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
@@ -61,6 +65,8 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
         nuevo_perfil = Docente(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
     elif tipo == "auxiliar":
         nuevo_perfil = models.Auxiliar(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
+    elif tipo == "psicologo":
+        nuevo_perfil = models.Psicologo(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
         
     db.add(nuevo_perfil)
     db.commit()
@@ -76,6 +82,8 @@ def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Sessio
         perfil = db.query(Docente).filter(Docente.id_docente == id).first()
     elif tipo == "auxiliar":
         perfil = db.query(models.Auxiliar).filter(models.Auxiliar.id_auxiliar == id).first()
+    elif tipo == "psicologo":
+        perfil = db.query(models.Psicologo).filter(models.Psicologo.id_psicologo == id).first()
         
     if not perfil:
         raise HTTPException(status_code=404, detail="Personal no encontrado")
@@ -103,6 +111,8 @@ def cambiar_estado(tipo: str, id: int, activo: bool, db: Session = Depends(get_d
         perfil = db.query(Docente).filter(Docente.id_docente == id).first()
     elif tipo == "auxiliar":
         perfil = db.query(models.Auxiliar).filter(models.Auxiliar.id_auxiliar == id).first()
+    elif tipo == "psicologo":
+        perfil = db.query(models.Psicologo).filter(models.Psicologo.id_psicologo == id).first()
         
     usuario = db.query(Usuario).filter(Usuario.id_usuario == perfil.id_usuario).first()
     usuario.activo = activo

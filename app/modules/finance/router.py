@@ -3,7 +3,7 @@ import uuid
 import shutil
 from fastapi import APIRouter, Depends, HTTPException, status,File, UploadFile, Form
 from sqlalchemy.orm import Session, joinedload
-from datetime import datetime
+from datetime import datetime, date
 from typing import List,Optional
 from sqlalchemy import func, extract
 from app.db.database import get_db
@@ -321,7 +321,6 @@ def listar_pagos_filtrados(
     busqueda: str = None, 
     tipo: str = None, 
     anio: int = None,
-    # "pago" para recaudación real, "vencimiento" para ver deudas/pendientes
     criterio_fecha: str = "pago", 
     db: Session = Depends(get_db)
 ):
@@ -331,23 +330,24 @@ def listar_pagos_filtrados(
     # 1. Filtro por Año dinámico
     if criterio_fecha == "vencimiento":
         query = query.filter(extract('year', models.Pago.fecha_vencimiento) == filtro_anio)
-        # Ordenamos por vencimiento si buscamos deudas
         orden = models.Pago.fecha_vencimiento.desc()
     else:
-        # Por defecto filtramos por fecha de pago
         query = query.filter(extract('year', models.Pago.fecha_pago) == filtro_anio)
         orden = models.Pago.fecha_pago.desc()
 
     # 2. Búsqueda Avanzada (Concepto o DNI)
     if busqueda:
-        query = query.join(user_models.Alumno).filter(
+        # Usamos outerjoin para evitar perder pagos sin alumno asignado por error
+        query = query.outerjoin(user_models.Alumno, models.Pago.id_alumno == user_models.Alumno.id_alumno).filter(
             (models.Pago.concepto.ilike(f"%{busqueda}%")) |
             (user_models.Alumno.dni.ilike(f"%{busqueda}%"))
         )
 
-    # 3. Filtro por Concepto
+    # 3. Filtro Exacto por CATEGORÍA (NUEVO)
     if tipo and tipo != "TODOS":
-        query = query.filter(models.Pago.concepto.ilike(f"%{tipo}%"))
+        query = query.outerjoin(models.TipoPago, models.Pago.id_tipo_pago == models.TipoPago.id_tipo_pago).filter(
+            models.TipoPago.categoria == tipo
+        )
 
     return query.order_by(orden).all()
 
@@ -362,60 +362,64 @@ def dar_dictamen_solicitud(id: int, payload: schemas.DictamenSolicitud, db: Sess
     db.commit()
     return {"message": "Dictamen registrado correctamente"}
 
+def calcular_fecha_real(mm_dd_str: str) -> date:
+    mes, dia = map(int, mm_dd_str.split("-"))
+    hoy = date.today()
+    anio_pago = hoy.year
+    if hoy.month >= 10 and mes <= 6:
+        anio_pago += 1
+    try:
+        return date(anio_pago, mes, dia)
+    except ValueError:
+        return date(anio_pago, mes, dia - 1)
+
 @router.patch("/pagos/{id_pago}/confirmar-manual")
 def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
-    """
-    Confirma un pago manualmente. Si es de VACANTE, el trigger crea la matrícula
-    y luego el service genera la primera pensión.
-    """
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     
     if not pago:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
     
     if pago.estado == "PAGADO":
-        raise HTTPException(status_code=400, detail="Este pago ya fue procesado anteriormente")
+        raise HTTPException(status_code=400, detail="Este pago ya fue procesado")
 
-    # 1. Actualizar estado del pago
     pago.estado = "PAGADO"
     pago.fecha_pago = datetime.now()
     pago.codigo_operacion_bcp = "MANUAL-CAJA"
 
     if pago.id_solicitud_tramite:
-        solicitud = db.query(models.SolicitudTramite).filter(
-            models.SolicitudTramite.id_solicitud_tramite == pago.id_solicitud_tramite
-        ).first()
+        solicitud = db.query(models.SolicitudTramite).filter(models.SolicitudTramite.id_solicitud_tramite == pago.id_solicitud_tramite).first()
         if solicitud:
             solicitud.estado = "PAGADO_PENDIENTE_REV"
 
-    # 2. Commit para que el TRIGGER de MySQL se ejecute AHORA
-    db.commit()
-    db.refresh(pago) # Esto asegura que tenemos los datos frescos post-trigger
-
-    # 3. Lógica post-matrícula (Generación de pensión)
-    if "VACANTE" in pago.concepto.upper():
-        # Buscamos la matrícula que el trigger acaba de insertar
-        # Importante: Importar el modelo de matrícula si no lo tienes arriba
-        matricula = db.query(er_models.Matricula).filter(
-            er_models.Matricula.id_alumno == pago.id_alumno,
-            er_models.Matricula.estado == "MATRICULADO"
-        ).order_by(er_models.Matricula.id_matricula.desc()).first()
-
-        if matricula:
-            # Generar automáticamente la pensión del mes actual
-            hoy = datetime.now()
-             
+    tipo_pago = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == pago.id_tipo_pago).first()
+    
+    if tipo_pago:
+        if tipo_pago.categoria == 'MATRICULA':
+            pagos_anuales = db.query(models.TipoPago).filter(
+                models.TipoPago.categoria.in_(['PENSION', 'MODULO']),
+                models.TipoPago.activo == True
+            ).all()
             
-            FinanceService.generar_pension_mensual(
-                db=db,
-                id_alumno=pago.id_alumno,
-                id_matricula=matricula.id_matricula,
-                tipo_periodo=matricula.tipo_matricula,
-                mes=hoy.month,
-                anio=hoy.year
-            )
+            for p_anual in pagos_anuales:
+                existe_pago = db.query(models.Pago).filter(
+                    models.Pago.id_alumno == pago.id_alumno, 
+                    models.Pago.id_tipo_pago == p_anual.id_tipo_pago
+                ).first()
+                if not existe_pago:
+                    nuevo_pago = models.Pago(
+                        id_alumno=pago.id_alumno, 
+                        id_tipo_pago=p_anual.id_tipo_pago,
+                        concepto=f"{p_anual.nombre}", 
+                        monto=p_anual.costo, 
+                        monto_total=p_anual.costo,
+                        estado="PENDIENTE", 
+                        fecha_vencimiento=calcular_fecha_real(p_anual.fecha_vencimiento) # <- Se transforma a Fecha Real
+                    )
+                    db.add(nuevo_pago)
 
-    return {"message": "Pago confirmado y pensión inicial generada si correspondía."}
+    db.commit()
+    return {"message": "Pago confirmado y cascada generada."}
 
 @router.get("/alumnos/{id_alumno}/deudas")
 def obtener_deudas_alumno(id_alumno: int, db: Session = Depends(get_db)):
@@ -479,3 +483,40 @@ def actualizar_moras_diarias(db: Session = Depends(get_db)):
     """
     cantidad = FinanceService.aplicar_moras_pagos_vencidos(db)
     return {"message": f"Se aplicó mora a {cantidad} pagos vencidos."}
+
+# ==========================================
+# 5. TIPOS DE PAGO (Pensiones, Matriculas, etc)
+# ==========================================
+@router.get("/tipos-pago", response_model=List[schemas.TipoPagoResponse])
+def listar_tipos_pago(db: Session = Depends(get_db)):
+    return db.query(models.TipoPago).all()
+
+@router.post("/tipos-pago", response_model=schemas.TipoPagoResponse)
+def crear_tipo_pago(tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db)):
+    nuevo_tipo = models.TipoPago(**tipo.model_dump())
+    db.add(nuevo_tipo)
+    db.commit()
+    db.refresh(nuevo_tipo)
+    return nuevo_tipo
+
+@router.put("/tipos-pago/{id}", response_model=schemas.TipoPagoResponse)
+def editar_tipo_pago(id: int, tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db)):
+    db_tipo = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == id).first()
+    if not db_tipo:
+        raise HTTPException(status_code=404, detail="Tipo de pago no encontrado")
+    
+    for key, value in tipo.model_dump().items():
+        setattr(db_tipo, key, value)
+        
+    db.commit()
+    db.refresh(db_tipo)
+    return db_tipo
+
+@router.delete("/tipos-pago/{id}")
+def eliminar_tipo_pago(id: int, db: Session = Depends(get_db)):
+    db_tipo = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == id).first()
+    if not db_tipo:
+        raise HTTPException(status_code=404, detail="No encontrado")
+    db.delete(db_tipo)
+    db.commit()
+    return {"message": "Eliminado correctamente"}

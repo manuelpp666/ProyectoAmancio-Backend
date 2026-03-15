@@ -121,3 +121,27 @@ class ActualizacionCostosMasiva(BaseModel):
 class DictamenSolicitud(BaseModel):
     estado: Literal["APROBADO", "RECHAZADO"]
     respuesta_administrativa: Optional[str] = None
+
+class TipoPagoBase(BaseModel):
+    categoria: str = 'OTRO' # Puede ser: 'VACANTE', 'MATRICULA', 'PENSION', 'OTRO'
+    nombre: str
+    costo: Decimal
+    fecha_inicio: str
+    fecha_vencimiento: str
+    mora: Decimal = Decimal('0.00')
+    accion_vencimiento: str
+    activo: bool = True
+
+    @field_validator('fecha_vencimiento')
+    @classmethod
+    def validar_fechas(cls, v, info):
+        if 'fecha_inicio' in info.data and v <= info.data['fecha_inicio']:
+            raise ValueError('La fecha de vencimiento debe ser posterior a la fecha de inicio.')
+        return v
+
+class TipoPagoCreate(TipoPagoBase):
+    pass
+
+class TipoPagoResponse(TipoPagoBase):
+    id_tipo_pago: int
+    model_config = ConfigDict(from_attributes=True)

@@ -5,7 +5,7 @@ from app.db.database import Base
 class Familiar(Base):
     __tablename__ = "familiar"
     id_familiar = Column(Integer, primary_key=True, index=True)
-    id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), unique=True)
+    # Eliminado el id_usuario
     dni = Column(String(8), unique=True)
     nombres = Column(String(250))
     apellidos = Column(String(250))
@@ -15,4 +15,3 @@ class Familiar(Base):
     tipo_parentesco = Column(String(50))
      
     alumnos_rel = relationship("RelacionFamiliar", back_populates="familiar")
-    usuario = relationship("Usuario")

@@ -1,11 +1,12 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, case
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import calendar
 from . import models
 from app.modules.academic import models as academic_models
 from app.modules.enrollment import models as enrollment_models
-from app.modules.users.alumno import models as user_models 
+from app.modules.users.alumno import models as user_models
+from app.modules.finance import models as finance_models 
 
 class FinanceService:
     @staticmethod
@@ -85,27 +86,29 @@ class FinanceService:
     
 
     @staticmethod
-    def aplicar_moras_pagos_vencidos(db: Session):
-        """
-        Busca pagos PENDIENTES que ya pasaron su fecha de vencimiento
-        y les aplica una mora única de 5 soles.
-        """
+    def aplicar_moras_pagos_vencidos(db):
         hoy = date.today()
+        # Calculamos la fecha límite (10 días después del vencimiento)
+        limite_gracia = hoy - timedelta(days=10)
         
-        # Filtramos:
-        # 1. Solo pagos PENDIENTES
-        # 2. Donde la fecha de vencimiento sea menor a hoy
-        # 3. Donde la mora sea 0 (para asegurar que es la primera vez que se aplica)
-        pagos_vencidos = db.query(models.Pago).filter(
-            models.Pago.estado == "PENDIENTE",
-            models.Pago.fecha_vencimiento < hoy,
-            models.Pago.mora == 0
+        # Buscamos deudas que superen el límite de gracia y que no tengan la mora cobrada aún
+        pagos_vencidos = db.query(finance_models.Pago).options(
+            joinedload(finance_models.Pago.tipo_pago)
+        ).filter(
+            finance_models.Pago.estado == "PENDIENTE",
+            finance_models.Pago.fecha_vencimiento < limite_gracia,
+            finance_models.Pago.mora == 0 
         ).all()
 
+        cantidad = 0
         for pago in pagos_vencidos:
-            pago.mora = 5.00
-            # El monto_total ahora refleja la deuda + la multa
-            pago.monto_total = pago.monto + 5.00
+            # REGLA ESTRICTA: Solo a la categoría PENSION
+            if pago.tipo_pago and pago.tipo_pago.categoria == 'PENSION':
+                mora_configurada = pago.tipo_pago.mora
+                if mora_configurada > 0:
+                    pago.mora = mora_configurada
+                    pago.monto_total = pago.monto + mora_configurada
+                    cantidad += 1
         
         db.commit()
-        return len(pagos_vencidos)
+        return cantidad
