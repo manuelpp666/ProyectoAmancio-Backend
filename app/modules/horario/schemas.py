@@ -20,12 +20,16 @@ class HoraLectivaResponse(HoraLectivaBase):
 # --- Horario Escolar (Asignación) ---
 class HorarioCreate(BaseModel):
     id_carga_academica: int
-    id_hora: int
+    # ELIMINADO id_hora y reemplazado por horas dinámicas
     dia_semana: Literal["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    hora_inicio: str 
+    hora_fin: str
 
 class HorarioResponse(BaseModel):
     id_horario: int
-    id_hora: int
+    # ELIMINADO id_hora y reemplazado por horas dinámicas
+    hora_inicio: str
+    hora_fin: str
     dia_semana: str
     id_carga_academica: int
     
@@ -41,6 +45,9 @@ class MateriaDisponibleResponse(BaseModel):
     id_carga_academica: int
     curso_nombre: str = Field(..., min_length=2, max_length=100)
     docente_nombre: str = Field(..., min_length=2, max_length=250)
-    horas_semanales: int = Field(default=0, ge=0, le=100)
+    
+    # CAMBIAMOS horas_semanales por minutos_semanales Y AÑADIMOS minutos_asignados respetando tus validaciones
+    minutos_semanales: int = Field(default=0, ge=0)
+    minutos_asignados: int = Field(default=0, ge=0)
     
     model_config = ConfigDict(from_attributes=True)

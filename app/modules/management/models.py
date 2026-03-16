@@ -45,3 +45,15 @@ class ResumenNota(Base):
     nota_bimestre4 = Column(DECIMAL(5, 2))
     promedio_final = Column(DECIMAL(5, 2))
     estado_curso = Column(String(20), default='EN CURSO')
+
+# --- NUEVO: MODELO DE TUTORÍA ---
+class TutorSeccion(Base):
+    __tablename__ = "tutor_seccion"
+    id_tutor_seccion = Column(Integer, primary_key=True)
+    id_anio_escolar = Column(CHAR(6), ForeignKey("anio_escolar.id_anio_escolar"))
+    id_seccion = Column(Integer, ForeignKey("seccion.id_seccion"))
+    id_docente = Column(Integer, ForeignKey("docente.id_docente"))
+
+    docente = relationship("Docente")
+    seccion = relationship("Seccion")
+    anio_escolar = relationship("AnioEscolar")

@@ -62,6 +62,7 @@ class Curso(Base):
     id_curso = Column(Integer, primary_key=True)
     id_area = Column(Integer, ForeignKey("area.id_area"))
     nombre = Column(String(100), nullable=False)
+    minutos_semanales = Column(Integer, default=0) # <--- ÚNICO CAMBIO AQUÍ
 
 class PlanEstudio(Base):
     __tablename__ = "plan_estudio"

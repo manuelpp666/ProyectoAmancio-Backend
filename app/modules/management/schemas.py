@@ -79,3 +79,18 @@ class CursoDocenteResponse(BaseModel):
     img: str
 
     model_config = ConfigDict(from_attributes=True)
+
+# --- NUEVO: SCHEMAS DE TUTORÍA ---
+class TutorSeccionCreate(BaseModel):
+    id_anio_escolar: str
+    id_seccion: int
+    id_docente: int
+
+class TutorResponse(BaseModel):
+    id_tutor_seccion: int
+    id_seccion: int
+    seccion_nombre: str
+    grado_nombre: str
+    docente: Optional[DocenteBasicoResponse]
+
+    model_config = ConfigDict(from_attributes=True)

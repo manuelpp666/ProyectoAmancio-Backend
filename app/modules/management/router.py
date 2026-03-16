@@ -621,3 +621,54 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
         })
 
     return {"notificaciones": notificaciones}
+
+
+# --- NUEVO: GESTIÓN DE TUTORES DE SECCIÓN ---
+
+@router.get("/tutores/{anio_id}", response_model=List[schemas.TutorResponse])
+def listar_tutores(anio_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    tutores = db.query(models.TutorSeccion).filter(models.TutorSeccion.id_anio_escolar == anio_id).all()
+    resultado = []
+    for t in tutores:
+        resultado.append({
+            "id_tutor_seccion": t.id_tutor_seccion,
+            "id_seccion": t.id_seccion,
+            "seccion_nombre": t.seccion.nombre,
+            "grado_nombre": t.seccion.grado.nombre,
+            "docente": t.docente
+        })
+    return resultado
+
+@router.post("/tutores/", response_model=schemas.TutorResponse)
+def asignar_tutor(data: schemas.TutorSeccionCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    existe = db.query(models.TutorSeccion).filter(
+        models.TutorSeccion.id_anio_escolar == data.id_anio_escolar,
+        models.TutorSeccion.id_seccion == data.id_seccion,
+        models.TutorSeccion.id_docente == data.id_docente
+    ).first()
+    
+    if existe:
+        raise HTTPException(status_code=400, detail="Este docente ya es tutor de esta sección.")
+    
+    nuevo = models.TutorSeccion(**data.model_dump())
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    
+    return {
+        "id_tutor_seccion": nuevo.id_tutor_seccion,
+        "id_seccion": nuevo.id_seccion,
+        "seccion_nombre": nuevo.seccion.nombre,
+        "grado_nombre": nuevo.seccion.grado.nombre,
+        "docente": nuevo.docente
+    }
+
+@router.delete("/tutores/{id_tutor_seccion}", status_code=status.HTTP_204_NO_CONTENT)
+def eliminar_tutor(id_tutor_seccion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    tutor = db.query(models.TutorSeccion).filter(models.TutorSeccion.id_tutor_seccion == id_tutor_seccion).first()
+    if not tutor:
+        raise HTTPException(status_code=404, detail="Asignación de tutor no encontrada")
+    
+    db.delete(tutor)
+    db.commit()
+    return None

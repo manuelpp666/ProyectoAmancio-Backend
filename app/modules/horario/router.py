@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
-from datetime import time
+from datetime import time, datetime, date
 from app.db.database import get_db
 from app.modules.horario.models import HorarioEscolar, HoraLectiva
 from app.modules.management.models import CargaAcademica
-from app.modules.horario.schemas import HorarioCreate, HorarioResponse, HoraLectivaResponse
+from app.modules.horario.schemas import HorarioCreate, HorarioResponse, HoraLectivaResponse, MateriaDisponibleResponse
 from app.modules.academic.models import Seccion
 from app.modules.enrollment.models import Matricula
 from app.modules.users.alumno.models import Alumno
@@ -36,9 +36,10 @@ def obtener_horario_seccion(id_seccion: int, db: Session = Depends(get_db), curr
         
         resultado.append({
             "id_horario": h.id_horario,
-            "id_hora": h.id_hora,
             "dia_semana": dia,
             "id_carga_academica": h.id_carga_academica,
+            "hora_inicio": h.hora_inicio.strftime("%H:%M"), # NUEVO: Horas dinámicas
+            "hora_fin": h.hora_fin.strftime("%H:%M"),       # NUEVO: Horas dinámicas
             "curso_nombre": h.carga.curso.nombre,
             "docente_nombre": f"{h.carga.docente.nombres} {h.carga.docente.apellidos}",
             "seccion_nombre": h.carga.seccion.nombre
@@ -48,14 +49,9 @@ def obtener_horario_seccion(id_seccion: int, db: Session = Depends(get_db), curr
 # --- GUARDAR / ACTUALIZAR BLOQUE ---
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    # 1. Validar bloque de hora
-    bloque_hora = db.query(HoraLectiva).filter(HoraLectiva.id_hora == horario_in.id_hora).first()
-    if not bloque_hora:
-        raise HTTPException(status_code=404, detail="Bloque de hora no encontrado")
-
-    # 2. Validar que no sea receso (No se puede dictar clases en recreo)
-    if bloque_hora.tipo.lower() == "receso":
-        raise HTTPException(status_code=400, detail="No se pueden asignar materias en horas de receso")
+    # 1. Convertir strings del frontend a objetos time reales para operar en BD
+    t_inicio = datetime.strptime(horario_in.hora_inicio, "%H:%M").time()
+    t_fin = datetime.strptime(horario_in.hora_fin, "%H:%M").time()
 
     # 3. Obtener carga académica
     carga_actual = db.query(CargaAcademica).filter(
@@ -65,13 +61,14 @@ def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_
     if not carga_actual:
         raise HTTPException(status_code=404, detail="La carga académica no existe")
 
-    # 4. VALIDACIÓN DE CONFLICTO DOCENTE (Join explícito)
+    # 4. VALIDACIÓN DE CONFLICTO DOCENTE (Join explícito - Adaptado a horas en vez de ID)
     conflicto = db.query(HorarioEscolar).join(
         CargaAcademica, HorarioEscolar.id_carga_academica == CargaAcademica.id_carga_academica
     ).filter(
         CargaAcademica.id_docente == carga_actual.id_docente,
         HorarioEscolar.dia_semana == horario_in.dia_semana,
-        HorarioEscolar.id_hora == horario_in.id_hora
+        HorarioEscolar.hora_inicio < t_fin,   # Lógica de solapamiento de tiempo
+        HorarioEscolar.hora_fin > t_inicio
     ).first()
 
     if conflicto:
@@ -80,13 +77,14 @@ def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_
             detail=f"Conflicto: El docente ya dicta clases en {conflicto.carga.seccion.nombre} en este horario."
         )
 
-    # 5. Evitar aula ocupada (Faltaba el join explícito aquí)
+    # 5. Evitar aula ocupada (Faltaba el join explícito aquí - Adaptado a horas)
     aula_ocupada = db.query(HorarioEscolar).join(
         CargaAcademica, HorarioEscolar.id_carga_academica == CargaAcademica.id_carga_academica
     ).filter(
         CargaAcademica.id_seccion == carga_actual.id_seccion,
         HorarioEscolar.dia_semana == horario_in.dia_semana,
-        HorarioEscolar.id_hora == horario_in.id_hora
+        HorarioEscolar.hora_inicio < t_fin,
+        HorarioEscolar.hora_fin > t_inicio
     ).first()
 
     if aula_ocupada:
@@ -95,8 +93,9 @@ def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_
     # 6. Guardar (Asegúrate de que los nombres de campos coincidan con tu Model)
     nuevo_horario = HorarioEscolar(
         id_carga_academica=horario_in.id_carga_academica,
-        id_hora=horario_in.id_hora,
-        dia_semana=horario_in.dia_semana
+        dia_semana=horario_in.dia_semana,
+        hora_inicio=t_inicio,
+        hora_fin=t_fin
     )
     db.add(nuevo_horario)
     db.commit()
@@ -113,16 +112,28 @@ def eliminar_bloque_horario(id_horario: int, db: Session = Depends(get_db), curr
     return {"message": "Bloque eliminado"}
 
 
-@router.get("/materias-disponibles/{id_seccion}")
+@router.get("/materias-disponibles/{id_seccion}", response_model=List[MateriaDisponibleResponse])
 def obtener_materias_disponibles(id_seccion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # Buscamos la carga académica de esa sección
     materias = db.query(CargaAcademica).filter(CargaAcademica.id_seccion == id_seccion).all()
     
-    return [{
-        "id_carga_academica": m.id_carga_academica,
-        "curso_nombre": m.curso.nombre,
-        "docente_nombre": f"{m.docente.nombres} {m.docente.apellidos}"
-    } for m in materias]
+    resultado = []
+    for m in materias:
+        # Calcular los minutos que ya se han asignado en el horario
+        horarios = db.query(HorarioEscolar).filter(HorarioEscolar.id_carga_academica == m.id_carga_academica).all()
+        min_asignados = 0
+        for h in horarios:
+            diff = datetime.combine(date.min, h.hora_fin) - datetime.combine(date.min, h.hora_inicio)
+            min_asignados += diff.total_seconds() / 60
+
+        resultado.append({
+            "id_carga_academica": m.id_carga_academica,
+            "curso_nombre": m.curso.nombre,
+            "docente_nombre": f"{m.docente.nombres} {m.docente.apellidos}",
+            "minutos_semanales": m.curso.minutos_semanales,
+            "minutos_asignados": int(min_asignados)
+        })
+    return resultado
 
 @router.get("/usuario/{id_usuario}", response_model=List[HorarioResponse])
 def obtener_horario_por_usuario(
@@ -190,9 +201,10 @@ def obtener_horario_por_usuario(
         dia = h.dia_semana.value if hasattr(h.dia_semana, 'value') else h.dia_semana
         resultado.append({
             "id_horario": h.id_horario,
-            "id_hora": h.id_hora,
             "dia_semana": dia,
             "id_carga_academica": h.id_carga_academica,
+            "hora_inicio": h.hora_inicio.strftime("%H:%M"), # NUEVO: Se formatea la hora para el frontend
+            "hora_fin": h.hora_fin.strftime("%H:%M"),       # NUEVO: Se formatea la hora para el frontend
             "curso_nombre": h.carga.curso.nombre,
             "docente_nombre": f"{h.carga.docente.nombres} {h.carga.docente.apellidos}",
             "seccion_nombre": h.carga.seccion.nombre

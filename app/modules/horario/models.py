@@ -11,21 +11,22 @@ class DiaSemana(enum.Enum):
     Viernes = "Viernes"
     Sábado = "Sábado"
 
+# Conservamos la tabla para que no de error si otros módulos la llaman, pero ya no la usa HorarioEscolar
 class HoraLectiva(Base):
     __tablename__ = "hora_lectiva"
     id_hora = Column(Integer, primary_key=True)
     hora_inicio = Column(Time, nullable=False)
     hora_fin = Column(Time, nullable=False)
-    tipo = Column(String(20), default="clase") # clase, receso
+    tipo = Column(String(20), default="clase")
 
 class HorarioEscolar(Base):
     __tablename__ = "horario_escolar"
     id_horario = Column(Integer, primary_key=True)
-    # En lugar de curso y docente por separado, usamos la carga académica
     id_carga_academica = Column(Integer, ForeignKey("carga_academica.id_carga_academica"))
-    id_hora = Column(Integer, ForeignKey("hora_lectiva.id_hora"))
     dia_semana = Column(Enum(DiaSemana), nullable=False) 
+    
+    # --- AHORA USA HORAS REALES EN VEZ DE ID ---
+    hora_inicio = Column(Time, nullable=False)
+    hora_fin = Column(Time, nullable=False)
 
-    # RELACIÓN CLAVE: Esto arregla el error del JOIN y permite h.carga.curso.nombre
     carga = relationship("CargaAcademica", backref="horarios_asignados")
-    bloque_hora = relationship("HoraLectiva")

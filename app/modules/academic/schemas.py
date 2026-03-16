@@ -45,6 +45,7 @@ class SeccionResponse(SeccionBase):
 class CursoBase(BaseModel):
     nombre: str = Field(..., min_length=1, max_length=100)
     id_area: int
+    minutos_semanales: int = Field(default=0, ge=0) # <--- ÚNICO CAMBIO AQUÍ
 
 class CursoCreate(CursoBase):
     pass
