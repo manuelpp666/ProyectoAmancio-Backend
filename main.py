@@ -24,22 +24,28 @@ from app.modules.horario import router as horario_router
 from app.modules.pagina_principal import router as pagina_web_router
 from app.modules.personal import router as personal_router
 from app.core.socket_manager import socket_manager
+from dotenv import load_dotenv
+load_dotenv()
 
 
 app = FastAPI()
 
-# Lista de URLs permitidas (Frontend)
-origins = [
-    "http://localhost:3000",    # Tu Next.js local
-    "https://tu-colegio.com",   # Tu dominio final en DirectAdmin
-]
+# Solo activar cuando estés en el servidor de producción
+# from fastapi.middleware.proxy_headers import ProxyHeadersMiddleware
+# app.add_middleware(ProxyHeadersMiddleware, trusted_proxies="127.0.0.1")
+
+raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+ALLOWED_ORIGINS = [origin.strip() for origin in raw_origins.split(",")]
+
+# Agregamos un print para que veas en la terminal qué está cargando exactamente
+print(f"📡 CORS Origins: {ALLOWED_ORIGINS}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,            # Permite estas webs
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],              # Permite todos los métodos (GET, POST, etc.)
-    allow_headers=["*"],              # Permite todos los encabezados
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 1. Esto detecta la carpeta 'Backend' (donde está main.py)
