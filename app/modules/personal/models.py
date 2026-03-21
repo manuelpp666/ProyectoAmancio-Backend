@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DECIMAL, ForeignKey
+from sqlalchemy import Column, Integer, String, DECIMAL, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from app.db.database import Base
 
@@ -12,6 +12,7 @@ class Administrador(Base):
     telefono = Column(String(9))
     email = Column(String(100))
     sueldo = Column(DECIMAL(10, 2), default=0.00)
+    permisos = Column(JSON, nullable=True)
     usuario = relationship("Usuario")
 
 class Auxiliar(Base):

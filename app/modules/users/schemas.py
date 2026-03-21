@@ -29,3 +29,4 @@ class LoginResponse(BaseModel):
     access_token: str  
     token_type: str = "bearer"
     status: str = "success"
+    permisos: Optional[dict] = None

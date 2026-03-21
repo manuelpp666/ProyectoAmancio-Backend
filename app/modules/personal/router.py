@@ -22,7 +22,9 @@ def to_response(registro, tipo):
         "telefono": registro.telefono,
         "email": registro.email,
         "sueldo": registro.sueldo,
-        "usuario": registro.usuario
+        "usuario": registro.usuario,
+        # Importante: Solo el administrador tiene permisos
+        "permisos": getattr(registro, "permisos", None) 
     }
 
 @router.get("/{tipo}", response_model=List[schemas.PersonalResponse])
@@ -118,3 +120,29 @@ def cambiar_estado(tipo: str, id: int, activo: bool, db: Session = Depends(get_d
     usuario.activo = activo
     db.commit()
     return {"message": "Estado actualizado"}
+
+
+@router.patch("/admin/{id_admin}/permisos", response_model=schemas.AdminPermisosResponse)
+def actualizar_permisos_admin(
+    id_admin: int, 
+    data: schemas.AdminPermisosUpdate, 
+    db: Session = Depends(get_db), 
+    current_user: dict = Depends(get_current_user)
+):
+    # 1. Buscar al administrador
+    admin = db.query(models.Administrador).filter(models.Administrador.id_admin == id_admin).first()
+    
+    if not admin:
+        raise HTTPException(status_code=404, detail="Administrador no encontrado")
+
+    # 2. Validar que quien hace la petición sea un ADMIN (Opcional pero recomendado)
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permiso para alterar privilegios")
+
+    # 3. Actualizar el campo JSON
+    admin.permisos = data.permisos
+    
+    db.commit()
+    db.refresh(admin)
+    
+    return admin

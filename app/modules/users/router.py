@@ -5,6 +5,7 @@ from . import models, schemas
 from app.core.util.jwt import create_access_token
 from app.core.util.password import get_password_hash
 from app.core.util.password import verify_password
+from app.modules.personal.models import Administrador
 
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
 
@@ -44,6 +45,15 @@ def login(credentials: schemas.UsuarioLogin, db: Session = Depends(get_db)):
     if not user.activo:
         raise HTTPException(status_code=403, detail="Cuenta desactivada")
     
+    # --- NUEVA LÓGICA PARA PERMISOS ---
+    permisos_data = None
+    if user.rol == "ADMIN":
+        # Buscamos el registro en la tabla de administradores vinculado a este usuario
+        admin_profile = db.query(Administrador).filter(Administrador.id_usuario == user.id_usuario).first()
+        if admin_profile:
+            permisos_data = admin_profile.permisos
+    # ----------------------------------
+
     access_token = create_access_token(
         data={
             "sub": user.username, 
@@ -58,5 +68,6 @@ def login(credentials: schemas.UsuarioLogin, db: Session = Depends(get_db)):
         "rol": user.rol,
         "access_token": access_token,
         "token_type": "bearer",
-        "status": "success"
+        "status": "success",
+        "permisos": permisos_data
     }
