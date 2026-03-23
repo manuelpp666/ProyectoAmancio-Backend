@@ -82,3 +82,17 @@ def login(credentials: schemas.UsuarioLogin, response: Response, db: Session = D
         "status": "success",
         "permisos": permisos_data
     }
+
+@router.post("/logout")
+def logout(response: Response):
+    """
+    Elimina la cookie authToken del navegador.
+    """
+    response.delete_cookie(
+        key="authToken",
+        path="/",        # IMPORTANTE: debe coincidir con el path del login
+        httponly=True,
+        samesite="lax",
+        secure=False     # Cambiar a True en producción
+    )
+    return {"status": "success", "message": "Sesión cerrada correctamente"}
