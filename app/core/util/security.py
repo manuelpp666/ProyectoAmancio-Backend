@@ -1,5 +1,5 @@
 # app/core/security.py
-from fastapi import Depends, HTTPException, status
+from fastapi import Request, HTTPException, status, Depends
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from datetime import datetime
@@ -13,17 +13,28 @@ ALGORITHM = os.getenv("ALGORITHM")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="usuarios/login")
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token inválido o expirado",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+def get_current_user(request: Request):
+    # 1. Intentar sacar el token del Header (como antes)
+    authorization: str = request.headers.get("Authorization")
+    token = None
+    
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+    else:
+        # 2. Si no está en el Header, buscarlo en la COOKIE
+        token = request.cookies.get("authToken")
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No se encontró el token de autenticación",
+        )
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
-            raise credentials_exception
-        return payload  # Contiene: {'sub': 'nombre', 'id': 1, 'rol': 'ADMIN', 'exp': ...}
+            raise HTTPException(status_code=401, detail="Token inválido")
+        return payload 
     except JWTError:
-        raise credentials_exception
+        raise HTTPException(status_code=401, detail="Token expirado o corrupto")

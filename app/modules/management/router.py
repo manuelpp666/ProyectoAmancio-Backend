@@ -35,6 +35,8 @@ def listar_cargas(db: Session = Depends(get_db), current_user: dict = Depends(ge
 # --- Notas ---
 @router.post("/notas/", response_model=schemas.NotaResponse)
 def registrar_nota(nota: schemas.NotaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    
     nueva = models.Nota(**nota.model_dump())
     db.add(nueva)
     db.commit()

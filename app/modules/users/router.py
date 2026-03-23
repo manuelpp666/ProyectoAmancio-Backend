@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from . import models, schemas
@@ -23,7 +23,7 @@ def crear_usuario(usuario: schemas.UsuarioCreate, db: Session = Depends(get_db))
     return db_user
 
 @router.post("/login", response_model=schemas.LoginResponse)
-def login(credentials: schemas.UsuarioLogin, db: Session = Depends(get_db)):
+def login(credentials: schemas.UsuarioLogin, response: Response, db: Session = Depends(get_db)):
     # 1. Buscar al usuario por nombre de usuario
     user = db.query(models.Usuario).filter(models.Usuario.username == credentials.username).first()
     
@@ -60,6 +60,17 @@ def login(credentials: schemas.UsuarioLogin, db: Session = Depends(get_db)):
             "id": user.id_usuario, 
             "rol": user.rol
         }
+    )
+
+    # CONFIGURAR LA COOKIE HTTPONLY
+    response.set_cookie(
+        key="authToken",
+        value=access_token,
+        httponly=True,   # <--- Lo más importante: JS no podrá leerla
+        secure=False,    # Ponlo en True cuando uses HTTPS (Producción)
+        samesite="lax",
+        max_age=604800,  # 7 días en segundos
+        path="/",
     )
     # 6. Retornar los datos que el frontend necesita para el UseContext(aqui se usara JWT)
     return {
