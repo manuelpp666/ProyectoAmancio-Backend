@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends,HTTPException
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from . import models, schemas
@@ -18,4 +18,8 @@ def crear_familiar(familiar: schemas.FamiliarCreate, db: Session = Depends(get_d
 @router.get("/")
 def listar_familiares(db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) ):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+
     return db.query(models.Familiar).all()

@@ -49,6 +49,8 @@ def obtener_horario_seccion(id_seccion: int, db: Session = Depends(get_db), curr
 # --- GUARDAR / ACTUALIZAR BLOQUE ---
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN" :
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
     # 1. Convertir strings del frontend a objetos time reales para operar en BD
     t_inicio = datetime.strptime(horario_in.hora_inicio, "%H:%M").time()
     t_fin = datetime.strptime(horario_in.hora_fin, "%H:%M").time()
@@ -104,6 +106,8 @@ def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_
 
 @router.delete("/{id_horario}")
 def eliminar_bloque_horario(id_horario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
     db_horario = db.query(HorarioEscolar).filter(HorarioEscolar.id_horario == id_horario).first()
     if not db_horario:
         raise HTTPException(status_code=404, detail="No se encontró el bloque")
@@ -141,6 +145,8 @@ def obtener_horario_por_usuario(
     id_anio_escolar: str, 
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
+    if  current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     """
     Obtiene el horario basado en el rol definido en la tabla Usuario.
     """

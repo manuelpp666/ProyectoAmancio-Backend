@@ -54,6 +54,9 @@ def obtener_ultimo_anio_creado(db: Session = Depends(get_db),
 @router.post("/anios/", response_model=schemas.AnioEscolarResponse, status_code=status.HTTP_201_CREATED)
 def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) ):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
     # 1. Validación de Fechas
     if anio.fecha_fin and anio.fecha_fin <= anio.fecha_inicio:
         raise HTTPException(
@@ -95,6 +98,9 @@ def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
 # --- NUEVO ENDPOINT: Editar fechas de un año existente ---
 @router.patch("/anios/{anio_id}")
 def editar_anio(anio_id: str, datos: EditarAnioRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+    
     db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
     if not db_anio:
         raise HTTPException(status_code=404, detail="Año no encontrado")
@@ -116,6 +122,11 @@ def editar_anio(anio_id: str, datos: EditarAnioRequest, db: Session = Depends(ge
 @router.patch("/anios/{anio_id}/inscripciones")
 def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
+    
     db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
     if not db_anio:
         raise HTTPException(status_code=404, detail="Año no encontrado")
@@ -134,6 +145,9 @@ def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db
 def cerrar_anio(anio_id: str, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     # Esta función ahora sirve para un cierre MANUAL FORZADO antes de tiempo
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
     if not db_anio:
         raise HTTPException(status_code=404, detail="Año no encontrado")
@@ -164,6 +178,9 @@ def cerrar_anio(anio_id: str, db: Session = Depends(get_db),
 def copiar_estructura(data: schemas.CopiarEstructuraRequest, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     # 1. Validar destino
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     anio_dest = db.query(models.AnioEscolar).filter_by(id_anio_escolar=data.anio_destino).first()
     if not anio_dest:
         raise HTTPException(status_code=404, detail="Año destino no existe")
@@ -210,6 +227,11 @@ def listar_anios(db: Session = Depends(get_db),
 @router.post("/niveles/", response_model=schemas.NivelResponse)
 def crear_nivel(nivel: schemas.NivelCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
+
     nuevo = models.Nivel(**nivel.model_dump())
     db.add(nuevo)
     db.commit()
@@ -224,6 +246,8 @@ def listar_niveles(db: Session = Depends(get_db),
 @router.get("/niveles-cursos/", response_model=List[schemas.NivelConCursosResponse])
 def listar_niveles_con_cursos(db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes acceder esta información.")
     return db.query(models.Nivel).options(
         joinedload(models.Nivel.grados).joinedload(models.Grado.planes_estudio).joinedload(models.PlanEstudio.curso)
     ).all()
@@ -233,6 +257,9 @@ def listar_niveles_con_cursos(db: Session = Depends(get_db),
 @router.post("/grados/", response_model=schemas.GradoResponse)
 def crear_grado(grado: schemas.GradoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     nuevo = models.Grado(**grado.model_dump())
     db.add(nuevo)
     db.commit()
@@ -250,6 +277,9 @@ def listar_grados(nivel_id: int = None, db: Session = Depends(get_db)):
 @router.put("/grados/{grado_id}", response_model=schemas.GradoResponse)
 def actualizar_grado(grado_id: int, grado: schemas.GradoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     db_grado = db.query(models.Grado).filter(models.Grado.id_grado == grado_id).first()
     if not db_grado:
         raise HTTPException(status_code=404, detail="Grado no encontrado")
@@ -264,6 +294,9 @@ def actualizar_grado(grado_id: int, grado: schemas.GradoCreate, db: Session = De
 @router.delete("/grados/{grado_id}")
 def eliminar_grado(grado_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     db_grado = db.query(models.Grado).filter(models.Grado.id_grado == grado_id).first()
     if not db_grado:
         raise HTTPException(status_code=404, detail="Grado no encontrado")
@@ -286,6 +319,9 @@ def eliminar_grado(grado_id: int, db: Session = Depends(get_db),
 @router.post("/secciones/", response_model=schemas.SeccionResponse)
 def crear_seccion(seccion: schemas.SeccionCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     # 1. Validar que el año escolar exista
     anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == seccion.id_anio_escolar).first()
     if not anio:
@@ -363,6 +399,11 @@ def obtener_cursos_de_seccion(seccion_id: int, db: Session = Depends(get_db),
 @router.put("/secciones/{seccion_id}", response_model=schemas.SeccionResponse)
 def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
+
     db_seccion = db.query(models.Seccion).filter(models.Seccion.id_seccion == seccion_id).first()
     if not db_seccion:
         raise HTTPException(status_code=404, detail="Sección no encontrada")
@@ -377,6 +418,9 @@ def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Sess
 @router.delete("/secciones/{seccion_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_seccion(seccion_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     db_seccion = db.query(models.Seccion).filter(models.Seccion.id_seccion == seccion_id).first()
     if not db_seccion:
         raise HTTPException(status_code=404, detail="Sección no encontrada")
@@ -390,6 +434,9 @@ def eliminar_seccion(seccion_id: int, db: Session = Depends(get_db),
 @router.post("/areas/", response_model=schemas.AreaResponse)
 def crear_area(area: schemas.AreaCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     nuevo = models.Area(**area.model_dump())
     db.add(nuevo)
     db.commit()
@@ -406,6 +453,9 @@ def listar_areas(db: Session = Depends(get_db),
 @router.post("/cursos/", response_model=schemas.CursoResponse)
 def crear_curso(curso: schemas.CursoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     nuevo = models.Curso(**curso.model_dump())
     db.add(nuevo)
     db.commit()
@@ -421,6 +471,9 @@ def listar_cursos(db: Session = Depends(get_db),
 @router.put("/cursos/{curso_id}", response_model=schemas.CursoResponse)
 def actualizar_curso(curso_id: int, curso_data: schemas.CursoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     db_curso = db.query(models.Curso).filter(models.Curso.id_curso == curso_id).first()
     if not db_curso:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
@@ -439,6 +492,9 @@ def eliminar_curso(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     db_curso = db.query(models.Curso).filter(models.Curso.id_curso == curso_id).first()
     if not db_curso:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
@@ -468,6 +524,10 @@ def actualizar_plan_estudio_batch(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     # 1. Limpiar asignaciones previas
     db.query(models.PlanEstudio).filter(
         models.PlanEstudio.id_curso == curso_id
@@ -484,6 +544,9 @@ def actualizar_plan_estudio_batch(
 @router.post("/plan-estudio/", response_model=schemas.PlanEstudioResponse)
 def asignar_curso_a_grado(plan: schemas.PlanEstudioCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     existe = db.query(models.PlanEstudio).filter(
         models.PlanEstudio.id_curso == plan.id_curso,
         models.PlanEstudio.id_grado == plan.id_grado

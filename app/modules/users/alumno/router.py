@@ -18,6 +18,8 @@ router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
 @router.get("/alumnos/usuario/{id_usuario}")
 def obtener_alumno_por_usuario(id_usuario: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver perfiles ajenos")
     alumno = db.query(models.Alumno).filter(models.Alumno.id_usuario == id_usuario).first()
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
@@ -26,6 +28,8 @@ def obtener_alumno_por_usuario(id_usuario: int, db: Session = Depends(get_db),
 @router.post("/", response_model=schemas.AlumnoResponse)
 def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) ):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
     db_alumno = models.Alumno(**alumno.model_dump())
     db.add(db_alumno)
     db.commit()
@@ -35,6 +39,9 @@ def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db),
 @router.get("/", response_model=List[schemas.AlumnoResponse])
 def listar_alumnos(dni: str = None, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
 
     query = db.query(models.Alumno).filter(models.Alumno.estado_ingreso != "rechazado")
     
@@ -64,7 +71,11 @@ def decidir_admision(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) 
 ):
+    
     try:
+        
+        if current_user.get("rol") != "ADMIN":
+            raise HTTPException(status_code=403, detail="No puedes ver perfiles ajenos")
         # 1. Buscar al alumno por su ID
         alumno = db.query(models.Alumno).filter(models.Alumno.id_alumno == id_alumno).first()
         if not alumno:
@@ -171,6 +182,11 @@ def decidir_admision(
     
 @router.get("/detalle-completo/{id_alumno}")
 def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+
+
     alumno = db.query(models.Alumno).filter(models.Alumno.id_alumno == id_alumno).first()
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")

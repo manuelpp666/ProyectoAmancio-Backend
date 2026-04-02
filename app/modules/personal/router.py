@@ -29,6 +29,10 @@ def to_response(registro, tipo):
 
 @router.get("/{tipo}", response_model=List[schemas.PersonalResponse])
 def listar_personal(tipo: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+
     if tipo == "admin":
         registros = db.query(models.Administrador).options(joinedload(models.Administrador.usuario)).all()
     elif tipo == "docente":
@@ -44,6 +48,10 @@ def listar_personal(tipo: str, db: Session = Depends(get_db), current_user: dict
 
 @router.post("/{tipo}", response_model=schemas.PersonalResponse)
 def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+
     if tipo == "admin": rol = "ADMIN"
     elif tipo == "docente": rol = "DOCENTE"
     elif tipo == "auxiliar": rol = "AUXILIAR"
@@ -78,6 +86,9 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
 
 @router.put("/{tipo}/{id}", response_model=schemas.PersonalResponse)
 def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+
     if tipo == "admin":
         perfil = db.query(models.Administrador).filter(models.Administrador.id_admin == id).first()
     elif tipo == "docente":
@@ -107,6 +118,9 @@ def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Sessio
 
 @router.patch("/{tipo}/{id}/estado")
 def cambiar_estado(tipo: str, id: int, activo: bool, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+    
     if tipo == "admin":
         perfil = db.query(models.Administrador).filter(models.Administrador.id_admin == id).first()
     elif tipo == "docente":

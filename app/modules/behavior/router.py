@@ -12,6 +12,8 @@ router = APIRouter(prefix="/conducta", tags=["Conducta y Psicología"])
 
 @router.post("/reportes/")
 def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "AUXILIAR":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     nuevo_reporte = models.ReporteConducta(**reporte.model_dump())
     db.add(nuevo_reporte)
     db.commit()
@@ -28,6 +30,8 @@ def obtener_estado_por_usuario(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     # 1. Buscar al alumno asociado
     alumno = db.query(alumno_models.Alumno).filter(
         alumno_models.Alumno.id_usuario == id_usuario
@@ -79,6 +83,8 @@ def obtener_estado_por_usuario(
 
 @router.get("/usuario/{id_usuario}/anios-reportes")
 def obtener_anios_con_reportes(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if  current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     # 1. Buscar al alumno
     alumno = db.query(alumno_models.Alumno).filter(
         alumno_models.Alumno.id_usuario == id_usuario
@@ -108,6 +114,8 @@ def listar_niveles_disponibles(db: Session = Depends(get_db), current_user: dict
 @router.post("/citas/")
 def programar_cita(cita: schemas.CitaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Permite al psicólogo o auxiliar agendar una nueva cita."""
+    if current_user.get("rol") != "AUXILIAR" and current_user.get("rol") != "PSICOLOGO":
+        raise HTTPException(status_code=403, detail="No puedes mddificar esta información")
     nueva_cita = models.CitaPsicologia(**cita.model_dump())
     db.add(nueva_cita)
     db.commit()
@@ -119,6 +127,8 @@ def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db), cur
     """
     Lista todas las citas programadas para el estudiante logueado.
     """
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     # 1. Buscar al alumno asociado al usuario
     alumno = db.query(alumno_models.Alumno).filter(
         alumno_models.Alumno.id_usuario == id_usuario
@@ -147,6 +157,9 @@ def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db), cur
 @router.patch("/citas/{id_cita}/completar")
 def finalizar_cita(id_cita: int, resultado: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """El psicólogo registra lo ocurrido en la reunión y cierra la cita."""
+    if current_user.get("rol") != "AUXILIAR" and current_user.get("rol") != "PSICOLOGO":
+        raise HTTPException(status_code=403, detail="No puedes mddificar esta información")
+    
     cita = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_cita == id_cita).first()
     if not cita:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
@@ -162,6 +175,8 @@ def finalizar_cita(id_cita: int, resultado: str, db: Session = Depends(get_db), 
 # 1. Endpoint para el Resumen (Solo envía LA PRÓXIMA CITA activa)
 @router.get("/usuario/{id_usuario}/proxima-cita")
 def obtener_proxima_cita(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     alumno = db.query(alumno_models.Alumno).filter(alumno_models.Alumno.id_usuario == id_usuario).first()
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
@@ -192,6 +207,9 @@ def obtener_historial_citas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
+    
     alumno = db.query(alumno_models.Alumno).filter(alumno_models.Alumno.id_usuario == id_usuario).first()
     
     if not anio:

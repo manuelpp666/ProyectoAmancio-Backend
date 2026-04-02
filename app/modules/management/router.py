@@ -22,6 +22,13 @@ router = APIRouter(prefix="/gestion", tags=["Gestión Académica"])
 # --- Carga Académica ---
 @router.post("/carga/", response_model=schemas.CargaResponse)
 def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    # VALIDACIÓN DE ROL
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="No tienes permisos para ejecutar esto"
+        )
     nueva = models.CargaAcademica(**carga.model_dump())
     db.add(nueva)
     db.commit()
@@ -30,12 +37,21 @@ def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db), cur
 
 @router.get("/carga/", response_model=List[schemas.CargaResponse])
 def listar_cargas(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    # VALIDACIÓN DE ROL
+    if current_user.get("rol") != "ADMIN" or current_user.get("rol") != "DOCENTE":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="No tienes permisos para ver esta sección"
+        )
     return db.query(models.CargaAcademica).all()
 
 # --- Notas ---
 @router.post("/notas/", response_model=schemas.NotaResponse)
 def registrar_nota(nota: schemas.NotaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     
     nueva = models.Nota(**nota.model_dump())
     db.add(nueva)
@@ -60,6 +76,9 @@ def obtener_cursos_estudiante(
     anio: str, 
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
+    
+    if current_user.get("rol") != "ALUMNO" and current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     # 1. Buscar al alumno
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
     
@@ -120,6 +139,10 @@ def obtener_detalle_curso_estudiante(
     anio: str, 
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
+    
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    
     # 1. Identificar al alumno y su matrícula para ese año
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
     matricula = db.query(models_en.Matricula).filter(
@@ -174,6 +197,9 @@ def obtener_resumen_notas_estudiante(
     anio: str, 
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
+    
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     # 1. Obtener al alumno
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
     if not alumno:
@@ -226,6 +252,8 @@ def cerrar_notas_bimestre(
     db: Session = Depends(get_db), 
     current_user: dict = Depends(get_current_user)
 ):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
     # 1. Obtener la carga académica y validar existencia
     carga = db.query(models_mn.CargaAcademica).filter(
         models_mn.CargaAcademica.id_carga_academica == id_carga
@@ -336,6 +364,8 @@ def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db),
     Obtiene todos los cursos por sección de un año escolar 
     y muestra qué docente tienen asignado (si lo hay).
     """
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     # 1. Buscamos todas las secciones del año escolar
     secciones = db.query(models_ac.Seccion).filter(models_ac.Seccion.id_anio_escolar == anio_id).all()
     
@@ -372,6 +402,8 @@ def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db),
 
 @router.get("/docentes-disponibles/", response_model=List[schemas.DocenteBasicoResponse])
 def listar_docentes_busqueda(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     """Lista simple de docentes para el selector de la interfaz"""
     return db.query(models_doc.Docente).all()
 
@@ -379,6 +411,9 @@ def listar_docentes_busqueda(db: Session = Depends(get_db), current_user: dict =
 #--- Delete y update de la carga academica
 @router.delete("/carga/{carga_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_carga(carga_id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN" :
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+    
     db_carga = db.query(models.CargaAcademica).filter(models.CargaAcademica.id_carga_academica == carga_id).first()
     if not db_carga:
         raise HTTPException(status_code=404, detail="Asignación no encontrada")
@@ -389,6 +424,10 @@ def eliminar_carga(carga_id: int, db: Session = Depends(get_db), current_user: d
 
 @router.patch("/carga/{carga_id}", response_model=schemas.CargaResponse)
 def actualizar_carga(carga_id: int, data: schemas.CargaUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN" :
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     db_carga = db.query(models.CargaAcademica).filter(models.CargaAcademica.id_carga_academica == carga_id).first()
     
     if not db_carga:
@@ -409,6 +448,9 @@ def obtener_cursos_docente(
     anio: str, 
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
+    
+    if current_user.get("rol") != "DOCENTE" and current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     # 1. Buscar al docente asociado al usuario
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
     
@@ -462,6 +504,9 @@ def obtener_cursos_docente(
 
 @router.get("/mis-cursos-docente-dashboard/{id_usuario}")
 def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "DOCENTE" and current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     # 1. Buscar año activo automáticamente
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
     if not anio_activo:
@@ -501,6 +546,9 @@ def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_
 
 @router.get("/resumen-docente/{id_usuario}")
 def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "DOCENTE" and current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
     # 1. Obtener ID del docente
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
     if not docente:
@@ -538,6 +586,10 @@ def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db), curr
 
 @router.get("/notificaciones/{id_usuario}")
 def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver perfiles ajenos")
+    
     # 1. Obtener año activo
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
     if not anio_activo:
@@ -643,6 +695,10 @@ def listar_tutores(anio_id: str, db: Session = Depends(get_db), current_user: di
 
 @router.post("/tutores/", response_model=schemas.TutorResponse)
 def asignar_tutor(data: schemas.TutorSeccionCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN" :
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+    
     existe = db.query(models.TutorSeccion).filter(
         models.TutorSeccion.id_anio_escolar == data.id_anio_escolar,
         models.TutorSeccion.id_seccion == data.id_seccion,
@@ -667,6 +723,10 @@ def asignar_tutor(data: schemas.TutorSeccionCreate, db: Session = Depends(get_db
 
 @router.delete("/tutores/{id_tutor_seccion}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_tutor(id_tutor_seccion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+       
+    if current_user.get("rol") != "ADMIN" :
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
     tutor = db.query(models.TutorSeccion).filter(models.TutorSeccion.id_tutor_seccion == id_tutor_seccion).first()
     if not tutor:
         raise HTTPException(status_code=404, detail="Asignación de tutor no encontrada")

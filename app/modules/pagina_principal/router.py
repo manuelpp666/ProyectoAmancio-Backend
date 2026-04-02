@@ -28,6 +28,10 @@ def update_or_create_config(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) 
 ):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+
     item = db.query(models.PaginaConfiguracion).filter(
         models.PaginaConfiguracion.clave == clave
     ).first()

@@ -18,6 +18,9 @@ router = APIRouter(
 
 @router.post("/", response_model=DocenteResponse, status_code=status.HTTP_201_CREATED)
 def crear_docente(docente_in: DocenteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
     # 1. Verificar si el DNI (username) ya existe
     docente_existente = db.query(Docente).filter(Docente.dni == docente_in.dni).first()
     if docente_existente:
@@ -80,6 +83,11 @@ def obtener_docente(id: int, db: Session = Depends(get_db), current_user: dict =
 
 @router.put("/{id}", response_model=DocenteResponse)
 def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+
+
     db_docente = db.query(Docente).filter(Docente.id_docente == id).first()
     
     if not db_docente:
@@ -96,6 +104,10 @@ def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Dep
 
 @router.put("/{id}/modificarestado", response_model=DocenteResponse)
 def desactivar_docente(id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+
     # 1. Buscar al docente por ID
     docente = db.query(Docente).filter(Docente.id_docente == id).first()
     

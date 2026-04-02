@@ -33,11 +33,15 @@ ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 
 @router.get("/tramites-tipos/", response_model=List[schemas.TipoTramiteResponse])
 def listar_tipos_tramite(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     """Lista todos los tipos de trámite configurados en el sistema."""
     return db.query(models.TipoTramite).all()
 
 @router.get("/tramites-tipos/alumnos", response_model=List[schemas.TipoTramiteResponse])
 def listar_tipos_tramite_alumnos(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ALUMNO":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     """
     Lista los tipos de trámite visibles para los alumnos.
     Filtra automáticamente procesos de Matrícula y Vacante para evitar confusiones.
@@ -50,6 +54,8 @@ def listar_tipos_tramite_alumnos(db: Session = Depends(get_db), current_user: di
 
 @router.post("/tramites-tipos/", response_model=schemas.TipoTramiteResponse)
 def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     """Crea un nuevo tipo de trámite con validación de unicidad para VACANTE."""
     
     # 1. Convertimos el nombre a Mayúsculas para una comparación segura
@@ -78,6 +84,9 @@ def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends
 
 @router.put("/tramites-tipos/{id}", response_model=schemas.TipoTramiteResponse)
 def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     """Edita un tipo de trámite existente con validación de integridad para VACANTE."""
     db_tramite = db.query(models.TipoTramite).filter(models.TipoTramite.id_tipo_tramite == id).first()
     
@@ -113,6 +122,8 @@ def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session
 
 @router.patch("/tramites-tipos/{id}/estado")
 def cambiar_estado_tramite(id: int, activo: bool, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
     """Activa o desactiva un trámite."""
     db_tramite = db.query(models.TipoTramite).filter(models.TipoTramite.id_tipo_tramite == id).first()
     if not db_tramite:
@@ -133,8 +144,12 @@ async def solicitar_tramite(
     id_tipo_tramite: int = Form(...),
     comentario_usuario: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), 
+    current_user: dict = Depends(get_current_user)  
 ):
+    if current_user.get("rol") != "ALUMNO":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
+    
     """
     Registra la solicitud, guarda el archivo adjunto si existe 
     y genera el pago si el trámite tiene costo.
@@ -203,7 +218,10 @@ async def solicitar_tramite(
     return nueva_solicitud
 
 @router.get("/solicitudes/alumno/{id_alumno}", response_model=List[schemas.SolicitudTramiteResponse])
-def listar_mis_solicitudes(id_alumno: int, db: Session = Depends(get_db)):
+def listar_mis_solicitudes(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ALUMNO":
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
+
     return db.query(models.SolicitudTramite)\
              .options(joinedload(models.SolicitudTramite.tipo))\
              .filter(models.SolicitudTramite.id_alumno == id_alumno)\

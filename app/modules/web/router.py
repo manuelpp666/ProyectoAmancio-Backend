@@ -13,6 +13,8 @@ router = APIRouter(prefix="/web", tags=["Web Institucional"])
 @router.post("/noticias/", response_model=schemas.NoticiaResponse)
 def crear_noticia(noticia: schemas.NoticiaCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
     try:
         # model_dump() es la forma estándar en Pydantic v2
         nueva = models.Noticia(**noticia.model_dump())
@@ -56,6 +58,11 @@ def obtener_noticia(noticia_id: int, db: Session = Depends(get_db),
 @router.delete("/noticias/{noticia_id}")
 def eliminar_noticia(noticia_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+    
+
     noticia = db.query(models.Noticia).filter(models.Noticia.id_noticia == noticia_id).first()
     if not noticia:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
@@ -68,6 +75,10 @@ def eliminar_noticia(noticia_id: int, db: Session = Depends(get_db),
 @router.put("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse)
 def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+
     db_noticia = db.query(models.Noticia).filter(models.Noticia.id_noticia == noticia_id).first()
     if not db_noticia:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
@@ -82,6 +93,8 @@ def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, d
 @router.post("/eventos/", response_model=schemas.EventoResponse)
 def crear_evento(evento: schemas.EventoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
     nueva = models.Evento(**evento.model_dump())
     db.add(nueva)
     db.commit()
@@ -109,6 +122,8 @@ def listar_todos_eventos(db: Session = Depends(get_db)):
 @router.put("/eventos/{evento_id}", response_model=schemas.EventoResponse)
 def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
     db_evento = db.query(models.Evento).filter(models.Evento.id_evento == evento_id).first()
     if not db_evento:
         raise HTTPException(status_code=404, detail="Evento no encontrado")
@@ -123,6 +138,11 @@ def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: S
 @router.delete("/eventos/{evento_id}")
 def eliminar_evento(evento_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
+    
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+
+
     db_evento = db.query(models.Evento).filter(models.Evento.id_evento == evento_id).first()
     if not db_evento:
         raise HTTPException(status_code=404, detail="Evento no encontrado")

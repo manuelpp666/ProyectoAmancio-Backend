@@ -15,6 +15,7 @@ router = APIRouter(prefix="/perfil", tags=["Perfil"])
 
 @router.get("/mi-perfil/{username}")
 def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    
     # 1. Buscamos al usuario base
     user = db.query(Usuario).filter(Usuario.username == username).first()
     
