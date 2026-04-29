@@ -10,10 +10,10 @@ class PersonalBase(BaseModel):
     telefono: Optional[TelefonoStr] = None
     email: Optional[EmailStr] = None
     sueldo: Decimal = Field(default=Decimal('0.00'), ge=0, decimal_places=2)
-    permisos: Optional[dict] = None
 
 class PersonalCreate(PersonalBase):
     password: str
+    permisos: Optional[dict] = None
 
 class PersonalUpdate(PersonalBase):
     password: Optional[str] = None
@@ -28,6 +28,7 @@ class PersonalResponse(PersonalBase):
     id: int  # Unificamos id_admin, id_docente e id_auxiliar para el frontend
     id_usuario: int
     usuario: Optional[UsuarioResponse] = None
+    permisos: Optional[dict] = None
     model_config = ConfigDict(from_attributes=True)
 
 

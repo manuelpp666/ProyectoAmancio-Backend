@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, UploadFile, File,Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -11,6 +11,7 @@ from docx import Document as DocxDocument
 from langchain_core.documents import Document as LangDocument
 from typing import List
 from datetime import datetime
+from docx import Document as DocxDocument
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 import os
@@ -45,14 +46,14 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 INDEX_NAME = os.getenv("INDEX_NAME", "colegio-knowledge")
 
-# Aplicar al entorno para que LangChain lo detecte automáticamentes
+# Aplicar al entorno para que LangChain lo detecte automáticamente
 os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
 
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/gemini-embedding-2",
-    google_api_key=GOOGLE_API_KEY
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={'device': 'cpu'}
 )
 
 client = genai.Client(api_key=GOOGLE_API_KEY)
@@ -226,7 +227,6 @@ async def upload(file: UploadFile = File(...), db: Session = Depends(get_db), cu
 
     except Exception as e:
         if os.path.exists(temp_path): os.remove(temp_path)
-        print(f"ERROR REAL: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- ENDPOINT DE PREGUNTA (RAG) ---

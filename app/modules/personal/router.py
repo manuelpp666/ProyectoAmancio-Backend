@@ -50,14 +50,21 @@ def listar_personal(tipo: str, db: Session = Depends(get_db), current_user: dict
 def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     if current_user.get("rol") != "ADMIN":
-        raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
+        raise HTTPException(status_code=403, detail="No tienes permiso para realizar esta acción")
 
-    if tipo == "admin": rol = "ADMIN"
-    elif tipo == "docente": rol = "DOCENTE"
-    elif tipo == "auxiliar": rol = "AUXILIAR"
-    elif tipo == "psicologo": rol = "PSICOLOGO"
-    else: raise HTTPException(status_code=400, detail="Tipo inválido")
+    # 1. Mapeo de roles
+    roles_map = {
+        "admin": "ADMIN",
+        "docente": "DOCENTE",
+        "auxiliar": "AUXILIAR",
+        "psicologo": "PSICOLOGO"
+    }
     
+    rol = roles_map.get(tipo.lower())
+    if not rol:
+        raise HTTPException(status_code=400, detail="Tipo de personal inválido")
+    
+    # 2. Crear el Usuario base
     nuevo_usuario = Usuario(
         username=personal.dni,
         password_hash=get_password_hash(personal.password),
@@ -68,10 +75,21 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
     db.commit()
     db.refresh(nuevo_usuario)
     
+    # 3. Preparar datos del perfil
+    # Extraemos password (que no va al perfil) y permisos (que es condicional)
     datos_perfil = personal.model_dump(exclude={'password'})
+    permisos_data = datos_perfil.pop('permisos', None) # Se quita de datos_perfil pase lo que pase
+
+    # 4. Crear el perfil específico según el tipo
     if tipo == "admin":
-        nuevo_perfil = models.Administrador(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
+        # Al Administrador le pasamos explícitamente los permisos que extrajimos
+        nuevo_perfil = models.Administrador(
+            id_usuario=nuevo_usuario.id_usuario, 
+            permisos=permisos_data, 
+            **datos_perfil
+        )
     elif tipo == "docente":
+        # Aquí 'datos_perfil' ya no tiene la clave 'permisos', el error desaparece
         nuevo_perfil = Docente(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
     elif tipo == "auxiliar":
         nuevo_perfil = models.Auxiliar(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
@@ -79,8 +97,15 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
         nuevo_perfil = models.Psicologo(id_usuario=nuevo_usuario.id_usuario, **datos_perfil)
         
     db.add(nuevo_perfil)
-    db.commit()
-    db.refresh(nuevo_perfil)
+    try:
+        db.commit()
+        db.refresh(nuevo_perfil)
+    except Exception as e:
+        db.rollback()
+        # Si algo falla al crear el perfil, borramos el usuario creado para no dejar basura
+        db.delete(nuevo_usuario)
+        db.commit()
+        raise HTTPException(status_code=500, detail=f"Error al crear el perfil: {str(e)}")
     
     return to_response(nuevo_perfil, tipo)
 
