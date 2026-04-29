@@ -80,7 +80,7 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
     datos_perfil = personal.model_dump(exclude={'password'})
     permisos_data = datos_perfil.pop('permisos', None) # Se quita de datos_perfil pase lo que pase
 
-    # 4. Crear el perfil específico según el tipo
+    # 4. Crear el perfil específico según el tipos
     if tipo == "admin":
         # Al Administrador le pasamos explícitamente los permisos que extrajimos
         nuevo_perfil = models.Administrador(
