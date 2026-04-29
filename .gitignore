@@ -5,3 +5,4 @@ venv
 
 media
 modules/chatbot/router.py
+envoriginal.txt
