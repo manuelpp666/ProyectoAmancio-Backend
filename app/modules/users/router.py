@@ -69,7 +69,6 @@ def login(credentials: schemas.UsuarioLogin, response: Response, db: Session = D
         httponly=True,   # <--- Lo más importante: JS no podrá leerla
         secure=False,    # Ponlo en True cuando uses HTTPS (Producción)
         samesite="lax",
-        max_age=604800,  # 7 días en segundos
         path="/",
     )
     # 6. Retornar los datos que el frontend necesita para el UseContext(aqui se usara JWT)
@@ -85,14 +84,15 @@ def login(credentials: schemas.UsuarioLogin, response: Response, db: Session = D
 
 @router.post("/logout")
 def logout(response: Response):
-    """
-    Elimina la cookie authToken del navegador.
-    """
-    response.delete_cookie(
+    # Forzamos la expiración absoluta de la cookie
+    response.set_cookie(
         key="authToken",
-        path="/",        # IMPORTANTE: debe coincidir con el path del login
+        value="",
         httponly=True,
         samesite="lax",
-        secure=False     # Cambiar a True en producción
+        secure=False, # True en producción con HTTPS
+        path="/",
+        expires=0,    # Expira ya
+        max_age=0     # Expira ya
     )
     return {"status": "success", "message": "Sesión cerrada correctamente"}
