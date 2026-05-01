@@ -7,6 +7,7 @@ from app.modules.users.models import Usuario
 from app.modules.users.docente.models import Docente
 from app.modules.personal.models import Administrador 
 from app.modules.personal.models import Auxiliar 
+from app.modules.personal.models import Psicologo
 from app.core.util.security import get_current_user
 from .schemas import ChangePasswordSchema
 # from app.modules.users.familiar.models import Familiar # Descomenta si lo usas
@@ -63,6 +64,12 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), curr
         if not auxiliar:
             raise HTTPException(status_code=404, detail="Datos de auxiliar no encontrados")
         return {"rol": user.rol, "datos": auxiliar}
+    # --- CASO PSICOLOGO (Nuevo) ---
+    elif user.rol == "PSICOLOGO":
+        psicologo = db.query(Psicologo).filter(Psicologo.id_usuario == user.id_usuario).first()
+        if not psicologo:
+            raise HTTPException(status_code=404, detail="Datos de psicólogo no encontrados")
+        return {"rol": user.rol, "datos": psicologo}
 
     raise HTTPException(status_code=400, detail="Rol no soportado")
 

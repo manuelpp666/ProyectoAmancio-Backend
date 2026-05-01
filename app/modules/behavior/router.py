@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract,func
 from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
+from app.modules.users.familiar.models import Familiar
+from app.modules.users.relacion_familiar.models import RelacionFamiliar
 from app.core.util.security import get_current_user
 from . import models, schemas
 from typing import Optional
@@ -116,6 +118,20 @@ def programar_cita(cita: schemas.CitaCreate, db: Session = Depends(get_db), curr
     """Permite al psicólogo o auxiliar agendar una nueva cita."""
     if current_user.get("rol") != "AUXILIAR" and current_user.get("rol") != "PSICOLOGO":
         raise HTTPException(status_code=403, detail="No puedes mddificar esta información")
+    
+    # Validación 1: Fecha en el futuro
+    if cita.fecha_cita <= datetime.now():
+        raise HTTPException(status_code=400, detail="La fecha y hora de la cita debe ser posterior al momento actual.")
+
+    # Validación 2: Prevención de colisión de horarios
+    cita_existente = db.query(models.CitaPsicologia).filter(
+        models.CitaPsicologia.fecha_cita == cita.fecha_cita,
+        models.CitaPsicologia.estado.in_(["PROGRAMADA", "REPROGRAMADA"])
+    ).first()
+
+    if cita_existente:
+        raise HTTPException(status_code=400, detail="El horario seleccionado ya se encuentra ocupado por otra cita.")
+    
     nueva_cita = models.CitaPsicologia(**cita.model_dump())
     db.add(nueva_cita)
     db.commit()
@@ -230,3 +246,208 @@ def obtener_historial_citas(
             "resultado": c.resultado_reunion # Solo el historial ve el resultado
         } for c in citas
     ]
+
+
+@router.patch("/citas/{id_cita}/reprogramar")
+def reprogramar_cita(
+    id_cita: int, 
+    nueva_fecha: datetime, 
+    db: Session = Depends(get_db), 
+    current_user: dict = Depends(get_current_user)
+):
+    """Permite cambiar la fecha y hora de una cita pendiente."""
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos")
+    
+    cita = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_cita == id_cita).first()
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    
+    if cita.estado != "PROGRAMADA":
+        raise HTTPException(status_code=400, detail="Solo se pueden reprogramar citas pendientes")
+
+    # Validación 1: Fecha en el futuro
+    if nueva_fecha <= datetime.now():
+        raise HTTPException(status_code=400, detail="La nueva fecha y hora debe ser posterior al momento actual.")
+
+    # Validación 2: Prevención de colisión de horarios (excluyendo la cita actual)
+    cita_existente = db.query(models.CitaPsicologia).filter(
+        models.CitaPsicologia.fecha_cita == nueva_fecha,
+        models.CitaPsicologia.estado.in_(["PROGRAMADA", "REPROGRAMADA"]),
+        models.CitaPsicologia.id_cita != id_cita
+    ).first()
+
+    if cita_existente:
+        raise HTTPException(status_code=400, detail="El nuevo horario seleccionado ya se encuentra ocupado por otra cita.")
+    
+    cita.fecha_cita = nueva_fecha
+    cita.estado = "REPROGRAMADA" # Opcional, o mantener como PROGRAMADA
+    db.commit()
+    return {"mensaje": "Cita reprogramada con éxito", "nueva_fecha": nueva_fecha.strftime("%d/%m/%Y %H:%M")}
+
+@router.patch("/citas/{id_cita}/cancelar")
+def cancelar_cita(id_cita: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos")
+    
+    cita = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_cita == id_cita).first()
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    
+    cita.estado = "CANCELADA"
+    db.commit()
+    return {"mensaje": "Cita cancelada"}
+
+@router.get("/citas/agenda-diaria")
+def obtener_agenda_dia(fecha: Optional[datetime] = None, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="Acceso denegado")
+    
+    if not fecha: fecha = datetime.now()
+
+    # Hacemos join con la tabla alumno para traer el nombre
+    citas = db.query(
+        models.CitaPsicologia.id_cita,
+        models.CitaPsicologia.id_alumno,
+        models.CitaPsicologia.motivo,
+        models.CitaPsicologia.fecha_cita,
+        models.CitaPsicologia.estado,
+        (alumno_models.Alumno.nombres + " " + alumno_models.Alumno.apellidos).label("alumno_nombre")
+    ).join(alumno_models.Alumno, models.CitaPsicologia.id_alumno == alumno_models.Alumno.id_alumno)\
+     .filter(func.date(models.CitaPsicologia.fecha_cita) == fecha.date())\
+     .all()
+
+    return [
+        {
+            "id_cita": c.id_cita,
+            "id_alumno": c.id_alumno,
+            "motivo": c.motivo,
+            "fecha_cita": c.fecha_cita,
+            "estado": c.estado,
+            "alumno_nombre": c.alumno_nombre
+        } for c in citas
+    ]
+
+@router.get("/seguimiento/{id_alumno}")
+def obtener_seguimiento_detallado(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Vista integral para el psicólogo: Reportes de conducta + Citas pasadas."""
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="Acceso denegado")
+
+    reportes = db.query(models.ReporteConducta).filter(models.ReporteConducta.id_alumno == id_alumno).all()
+    citas = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_alumno == id_alumno).all()
+
+    return {
+        "id_alumno": id_alumno,
+        "total_incidentes": len(reportes),
+        "total_citas": len(citas),
+        "historial_conducta": reportes,
+        "historial_psicologico": citas
+    }
+
+@router.get("/resumen-psicologo")
+def obtener_resumen_dashboard(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") not in ["PSICOLOGO", "AUXILIAR"]:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    
+    anio_actual = datetime.now().year
+
+    # Lógica para contar alumnos en riesgo (< 75 puntos)
+    # 1. Obtener puntos perdidos por cada alumno en el año actual
+    subquery = db.query(
+        models.ReporteConducta.id_alumno,
+        func.sum(models.NivelConducta.puntos).label("total_perdido")
+    ).join(models.NivelConducta).filter(
+        extract('year', models.ReporteConducta.fecha_reporte) == anio_actual
+    ).group_by(models.ReporteConducta.id_alumno).subquery()
+
+    # 2. Contar cuántos tienen un puntaje (100 - perdido) menor a 75
+    conteo_riesgo = db.query(subquery).filter(
+        (100 - subquery.c.total_perdido) < 75
+    ).count()
+    atenciones_mes = db.query(models.CitaPsicologia).filter(
+        extract('month', models.CitaPsicologia.fecha_cita) == datetime.now().month,
+        models.CitaPsicologia.estado == "COMPLETADA"
+    ).count()
+
+    return {
+        "citas_pendientes": db.query(models.CitaPsicologia).filter(models.CitaPsicologia.estado == "PROGRAMADA").count(),
+        "alumnos_riesgo": conteo_riesgo,
+        "atenciones_mes": atenciones_mes
+    }
+
+#Búsqueda de alumnos
+@router.get("/buscar-alumnos")
+def buscar_alumnos(
+    q: str = Query(..., min_length=3), 
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Busca alumnos matriculados por nombre o DNI (Escalable)."""
+    # Filtramos solo alumnos con matrícula activa (asumiendo que existe la tabla matricula)
+    alumnos = db.query(alumno_models.Alumno).filter(
+        (alumno_models.Alumno.nombres.ilike(f"%{q}%")) | 
+        (alumno_models.Alumno.apellidos.ilike(f"%{q}%")) |
+        (alumno_models.Alumno.dni.ilike(f"%{q}%"))
+    ).limit(10).all() # Limitamos para que sea rápido
+    
+    return alumnos
+
+@router.get("/alumno/{id_alumno}/familiares")
+def obtener_familiares_alumno(id_alumno: int, db: Session = Depends(get_db)):
+    """Devuelve los familiares vinculados a un alumno específico."""
+    # Nota: Asegúrate de tener importado RelacionFamiliar y Familiar
+    relaciones = db.query(RelacionFamiliar).filter(
+        RelacionFamiliar.id_alumno == id_alumno
+    ).all()
+    
+    return [
+        {
+            "id_familiar": r.familiar.id_familiar,
+            "nombre": f"{r.familiar.nombres} {r.familiar.apellidos}",
+            "parentesco": r.tipo_parentesco
+        } for r in relaciones
+    ]
+
+@router.get("/alumnos-en-riesgo")
+def obtener_alumnos_riesgo(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Devuelve la lista de alumnos que requieren atención psicológica por baja conducta (< 75 pts)."""
+    if current_user.get("rol") not in ["PSICOLOGO", "AUXILIAR"]:
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    anio_actual = datetime.now().year
+    
+    # 1. Obtener todos los reportes del año actual con su respectivo alumno y nivel
+    reportes = db.query(
+        models.ReporteConducta
+    ).join(
+        alumno_models.Alumno, models.ReporteConducta.id_alumno == alumno_models.Alumno.id_alumno
+    ).filter(
+        extract('year', models.ReporteConducta.fecha_reporte) == anio_actual
+    ).all()
+
+    # 2. Agrupar puntos por alumno
+    puntajes_alumnos = {}
+    for r in reportes:
+        if r.alumno not in puntajes_alumnos:
+            puntajes_alumnos[r.alumno] = 0
+        if r.nivel:
+            puntajes_alumnos[r.alumno] += r.nivel.puntos
+
+    # 3. Filtrar los que están en riesgo
+    alumnos_riesgo = []
+    for alumno, puntos_perdidos in puntajes_alumnos.items():
+        puntaje_actual = max(0, 100 - puntos_perdidos)
+        if puntaje_actual < 75:
+            alumnos_riesgo.append({
+                "id_alumno": alumno.id_alumno,
+                "nombre_completo": f"{alumno.nombres} {alumno.apellidos}",
+                "dni": alumno.dni,
+                "puntaje": puntaje_actual,
+                "estado": "Rojo" if puntaje_actual < 40 else "Amarillo"
+            })
+
+    # Ordenar priorizando los casos más críticos (menor puntaje)
+    alumnos_riesgo.sort(key=lambda x: x["puntaje"])
+    
+    return alumnos_riesgo
