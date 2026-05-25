@@ -11,6 +11,7 @@ class Administrador(Base):
     apellidos = Column(String(250), nullable=False)
     telefono = Column(String(9))
     email = Column(String(100))
+    url_perfil = Column(String(255), nullable=True)
     sueldo = Column(DECIMAL(10, 2), default=0.00)
     permisos = Column(JSON, nullable=True)
     usuario = relationship("Usuario")

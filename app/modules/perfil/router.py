@@ -9,7 +9,7 @@ from app.modules.personal.models import Administrador
 from app.modules.personal.models import Auxiliar 
 from app.modules.personal.models import Psicologo
 from app.core.util.security import get_current_user
-from .schemas import ChangePasswordSchema
+from .schemas import ChangePasswordSchema, ActualizarPerfilAdminSchema
 # from app.modules.users.familiar.models import Familiar # Descomenta si lo usas
 
 router = APIRouter(prefix="/perfil", tags=["Perfil"])
@@ -72,6 +72,37 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), curr
         return {"rol": user.rol, "datos": psicologo}
 
     raise HTTPException(status_code=400, detail="Rol no soportado")
+
+
+@router.patch("/admin/{username}")
+def actualizar_perfil_admin(
+    username: str,
+    data: ActualizarPerfilAdminSchema,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    # Solo el propio administrador puede editar sus datos
+    user = db.query(Usuario).filter(Usuario.username == username).first()
+    if not user or user.rol != "ADMIN":
+        raise HTTPException(status_code=404, detail="Administrador no encontrado")
+    if current_user.get("id") != user.id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes editar un perfil ajeno")
+
+    admin = db.query(Administrador).filter(Administrador.id_usuario == user.id_usuario).first()
+    if not admin:
+        raise HTTPException(status_code=404, detail="Datos de administrador no encontrados")
+
+    cambios = data.model_dump(exclude_unset=True)
+    for campo, valor in cambios.items():
+        setattr(admin, campo, valor)
+
+    db.commit()
+    db.refresh(admin)
+    return {"message": "Perfil actualizado con éxito", "datos": {
+        "telefono": admin.telefono,
+        "email": admin.email,
+        "url_perfil": admin.url_perfil
+    }}
 
 
 @router.post("/auth/change-password")
