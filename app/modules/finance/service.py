@@ -102,8 +102,7 @@ class FinanceService:
 
         cantidad = 0
         for pago in pagos_vencidos:
-            # REGLA ESTRICTA: Solo a la categoría PENSION
-            if pago.tipo_pago and pago.tipo_pago.categoria == 'PENSION':
+            if pago.tipo_pago and pago.tipo_pago.categoria in ('PENSION', 'MODULO'):
                 mora_configurada = pago.tipo_pago.mora
                 if mora_configurada > 0:
                     pago.mora = mora_configurada

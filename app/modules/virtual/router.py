@@ -127,6 +127,10 @@ async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(g
                 ).first()
                 if misma_seccion: puede_enviar = True
 
+    # --- REGLA: ADMIN ENVÍA ---
+    elif remitente.rol == 'ADMIN':
+        puede_enviar = True
+
     if not puede_enviar:
         raise HTTPException(status_code=403, detail="Restricción académica: No puedes enviar mensajes a este usuario.")
 
@@ -246,6 +250,23 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
             contactos_validos.append({"id_usuario": d.id_usuario, "nombre": f"{d.nombres} {d.apellidos}", "dni": d.dni, "rol": "DOCENTE"})
         for p in aplicar_filtro(q_psicologos, models_psi.Psicologo).all():
             contactos_validos.append({"id_usuario": p.id_usuario, "nombre": f"{p.nombres} {p.apellidos}", "dni": p.dni, "rol": "PSICOLOGO"})
+
+    # --- LÓGICA SI EL QUE BUSCA ES UN ADMIN ---
+    elif user.rol == 'ADMIN':
+        q_docentes = db.query(models_doc.Docente)
+        q_alumnos = db.query(models_al.Alumno)
+        q_psicologos = db.query(models_psi.Psicologo)
+        q_admins = db.query(models_psi.Administrador).filter(
+            models_psi.Administrador.id_usuario != id_usuario
+        )
+        for d in aplicar_filtro(q_docentes, models_doc.Docente).all():
+            contactos_validos.append({"id_usuario": d.id_usuario, "nombre": f"{d.nombres} {d.apellidos}", "dni": d.dni, "rol": "DOCENTE"})
+        for a in aplicar_filtro(q_alumnos, models_al.Alumno).all():
+            contactos_validos.append({"id_usuario": a.id_usuario, "nombre": f"{a.nombres} {a.apellidos}", "dni": a.dni, "rol": "ALUMNO"})
+        for p in aplicar_filtro(q_psicologos, models_psi.Psicologo).all():
+            contactos_validos.append({"id_usuario": p.id_usuario, "nombre": f"{p.nombres} {p.apellidos}", "dni": p.dni, "rol": "PSICOLOGO"})
+        for adm in aplicar_filtro(q_admins, models_psi.Administrador).all():
+            contactos_validos.append({"id_usuario": adm.id_usuario, "nombre": f"{adm.nombres} {adm.apellidos}", "dni": adm.dni, "rol": "ADMIN"})
 
     return contactos_validos
 

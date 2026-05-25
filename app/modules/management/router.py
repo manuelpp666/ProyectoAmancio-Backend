@@ -660,19 +660,48 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
                 "fecha": cita.fecha_cita.isoformat()
             })
 
-    # --- C. EVENTOS (Comunes para todos) ---
-    # Buscamos eventos activos que ocurran hoy o a futuro
-    eventos = db.query(models_web.Evento).filter(
-        models_web.Evento.activo == True,
-        models_web.Evento.fecha_inicio >= date.today() # O datetime.now() para mayor precisión
-    ).order_by(models_web.Evento.fecha_inicio.asc()).limit(3).all()
-    
+    rol = current_user.get("rol")
+
+    # --- C. EVENTOS DEL CALENDARIO ---
+    q_eventos = db.query(models_web.Evento).filter(models_web.Evento.activo == True)
+    if rol == "ADMIN":
+        # El administrador ve TODOS los eventos del calendario
+        eventos = q_eventos.order_by(models_web.Evento.fecha_inicio.desc()).all()
+    else:
+        # El resto solo ve los próximos eventos
+        eventos = q_eventos.filter(
+            models_web.Evento.fecha_inicio >= date.today()
+        ).order_by(models_web.Evento.fecha_inicio.asc()).limit(3).all()
+
     for ev in eventos:
         notificaciones.append({
             "tipo": "evento",
             "mensaje": f"Evento: {ev.titulo} - {ev.descripcion or ''}",
             "fecha": ev.fecha_inicio.isoformat()
         })
+
+    # --- D. MENSAJES RECIBIDOS (Comunes para todos) ---
+    mensajes = db.query(models_vr.Mensaje).join(
+        models_vr.Conversacion,
+        models_vr.Mensaje.id_conversacion == models_vr.Conversacion.id_conversacion
+    ).filter(
+        models_vr.Mensaje.remitente_id != id_usuario,
+        models_vr.Mensaje.leido == False,
+        (models_vr.Conversacion.usuario1_id == id_usuario) |
+        (models_vr.Conversacion.usuario2_id == id_usuario)
+    ).order_by(models_vr.Mensaje.fecha_envio.desc()).limit(10).all()
+
+    for m in mensajes:
+        contenido = m.contenido or ""
+        resumen = contenido if len(contenido) <= 60 else contenido[:60] + "..."
+        notificaciones.append({
+            "tipo": "mensaje",
+            "mensaje": f"Nuevo mensaje: {resumen}",
+            "fecha": m.fecha_envio.isoformat() if m.fecha_envio else None
+        })
+
+    # Ordenamos todas las notificaciones por fecha (más recientes primero)
+    notificaciones.sort(key=lambda n: n.get("fecha") or "", reverse=True)
 
     return {"notificaciones": notificaciones}
 

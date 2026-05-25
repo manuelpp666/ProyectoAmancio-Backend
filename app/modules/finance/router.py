@@ -1,6 +1,7 @@
 import os
 import uuid
 import shutil
+import calendar
 from fastapi import APIRouter, Depends, HTTPException, status,File, UploadFile, Form
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date
@@ -336,19 +337,25 @@ def listar_solicitudes_pendientes(db: Session = Depends(get_db)):
 
 @router.get("/pagos/", response_model=List[schemas.PagoResponse])
 def listar_pagos_filtrados(
-    busqueda: str = None, 
-    tipo: str = None, 
+    busqueda: str = None,
+    tipo: str = None,
     anio: int = None,
-    criterio_fecha: str = "pago", 
+    criterio_fecha: str = "pago",
     db: Session = Depends(get_db)
 ):
+    # Aplicar moras antes de devolver resultados para que los montos estén siempre actualizados
+    FinanceService.aplicar_moras_pagos_vencidos(db)
+
     query = db.query(models.Pago)
     filtro_anio = anio if anio else datetime.now().year
 
     # 1. Filtro por Año dinámico
     if criterio_fecha == "vencimiento":
-        query = query.filter(extract('year', models.Pago.fecha_vencimiento) == filtro_anio)
-        orden = models.Pago.fecha_vencimiento.desc()
+        query = query.filter(
+            extract('year', models.Pago.fecha_vencimiento) == filtro_anio,
+            models.Pago.estado == "PENDIENTE"
+        )
+        orden = models.Pago.fecha_vencimiento.asc()
     else:
         query = query.filter(extract('year', models.Pago.fecha_pago) == filtro_anio)
         orden = models.Pago.fecha_pago.desc()
@@ -391,13 +398,16 @@ def calcular_fecha_real(mm_dd_str: str) -> date:
     except ValueError:
         return date(anio_pago, mes, dia - 1)
 
+NOMBRES_MES = ["", "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+               "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"]
+
 @router.patch("/pagos/{id_pago}/confirmar-manual")
 def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
-    
+
     if not pago:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
-    
+
     if pago.estado == "PAGADO":
         raise HTTPException(status_code=400, detail="Este pago ya fue procesado")
 
@@ -406,38 +416,118 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
     pago.codigo_operacion_bcp = "MANUAL-CAJA"
 
     if pago.id_solicitud_tramite:
-        solicitud = db.query(models.SolicitudTramite).filter(models.SolicitudTramite.id_solicitud_tramite == pago.id_solicitud_tramite).first()
+        solicitud = db.query(models.SolicitudTramite).filter(
+            models.SolicitudTramite.id_solicitud_tramite == pago.id_solicitud_tramite
+        ).first()
         if solicitud:
             solicitud.estado = "PAGADO_PENDIENTE_REV"
 
     tipo_pago = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == pago.id_tipo_pago).first()
-    
-    if tipo_pago:
-        if tipo_pago.categoria == 'MATRICULA':
-            pagos_anuales = db.query(models.TipoPago).filter(
-                models.TipoPago.categoria.in_(['PENSION', 'MODULO']),
-                models.TipoPago.activo == True
-            ).all()
-            
-            for p_anual in pagos_anuales:
-                existe_pago = db.query(models.Pago).filter(
-                    models.Pago.id_alumno == pago.id_alumno, 
-                    models.Pago.id_tipo_pago == p_anual.id_tipo_pago
+
+    if tipo_pago and tipo_pago.categoria == 'MATRICULA':
+        anio_escolar = db.query(academic_models.AnioEscolar).filter(
+            academic_models.AnioEscolar.activo == True
+        ).first()
+
+        if not anio_escolar:
+            db.commit()
+            return {"message": "Pago confirmado. No hay año escolar activo para generar pensiones."}
+
+        # --- PENSIONES: un pago por cada mes del año escolar ---
+        plantillas_pension = db.query(models.TipoPago).filter(
+            models.TipoPago.categoria == 'PENSION',
+            models.TipoPago.activo == True
+        ).all()
+
+        for plantilla in plantillas_pension:
+            # El DD de fecha_vencimiento define el día de vencimiento de cada mes
+            _, dia_venc = map(int, plantilla.fecha_vencimiento.split("-"))
+
+            fecha_iter = anio_escolar.fecha_inicio.replace(day=1)
+            fecha_fin_ae = anio_escolar.fecha_fin.replace(day=1)
+
+            while fecha_iter <= fecha_fin_ae:
+                mes = fecha_iter.month
+                anio = fecha_iter.year
+                concepto = f"PENSION {NOMBRES_MES[mes]} {anio}"
+
+                ultimo_dia = calendar.monthrange(anio, mes)[1]
+                fecha_venc_real = date(anio, mes, min(dia_venc, ultimo_dia))
+
+                existe = db.query(models.Pago).filter(
+                    models.Pago.id_alumno == pago.id_alumno,
+                    models.Pago.concepto == concepto
                 ).first()
-                if not existe_pago:
-                    nuevo_pago = models.Pago(
-                        id_alumno=pago.id_alumno, 
-                        id_tipo_pago=p_anual.id_tipo_pago,
-                        concepto=f"{p_anual.nombre}", 
-                        monto=p_anual.costo, 
-                        monto_total=p_anual.costo,
-                        estado="PENDIENTE", 
-                        fecha_vencimiento=calcular_fecha_real(p_anual.fecha_vencimiento) # <- Se transforma a Fecha Real
-                    )
-                    db.add(nuevo_pago)
+
+                if not existe:
+                    db.add(models.Pago(
+                        id_alumno=pago.id_alumno,
+                        id_tipo_pago=plantilla.id_tipo_pago,
+                        concepto=concepto,
+                        monto=plantilla.costo,
+                        mora=0,
+                        monto_total=plantilla.costo,
+                        estado="PENDIENTE",
+                        fecha_vencimiento=fecha_venc_real
+                    ))
+
+                if mes == 12:
+                    fecha_iter = date(anio + 1, 1, 1)
+                else:
+                    fecha_iter = date(anio, mes + 1, 1)
+
+        # --- MÓDULOS: un pago único por cada plantilla activa ---
+        plantillas_modulo = db.query(models.TipoPago).filter(
+            models.TipoPago.categoria == 'MODULO',
+            models.TipoPago.activo == True
+        ).all()
+
+        for plantilla in plantillas_modulo:
+            mes_venc, dia_venc = map(int, plantilla.fecha_vencimiento.split("-"))
+            anio_venc = anio_escolar.fecha_inicio.year
+            ultimo_dia = calendar.monthrange(anio_venc, mes_venc)[1]
+            fecha_venc_real = date(anio_venc, mes_venc, min(dia_venc, ultimo_dia))
+
+            existe = db.query(models.Pago).filter(
+                models.Pago.id_alumno == pago.id_alumno,
+                models.Pago.id_tipo_pago == plantilla.id_tipo_pago
+            ).first()
+
+            if not existe:
+                db.add(models.Pago(
+                    id_alumno=pago.id_alumno,
+                    id_tipo_pago=plantilla.id_tipo_pago,
+                    concepto=plantilla.nombre,
+                    monto=plantilla.costo,
+                    mora=0,
+                    monto_total=plantilla.costo,
+                    estado="PENDIENTE",
+                    fecha_vencimiento=fecha_venc_real
+                ))
 
     db.commit()
-    return {"message": "Pago confirmado y cascada generada."}
+    return {"message": "Pago confirmado y pagos del año generados."}
+
+@router.put("/pagos/{id_pago}", response_model=schemas.PagoResponse)
+def editar_pago(id_pago: int, pago_data: schemas.PagoUpdate, db: Session = Depends(get_db)):
+    pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    for key, value in pago_data.model_dump(exclude_unset=True).items():
+        setattr(pago, key, value)
+    db.commit()
+    db.refresh(pago)
+    return pago
+
+@router.delete("/pagos/{id_pago}")
+def eliminar_pago(id_pago: int, db: Session = Depends(get_db)):
+    pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    db.delete(pago)
+    db.commit()
+    return {"message": "Pago eliminado correctamente"}
+
 
 @router.get("/alumnos/{id_alumno}/deudas")
 def obtener_deudas_alumno(id_alumno: int, db: Session = Depends(get_db)):

@@ -135,9 +135,20 @@ class TipoPagoBase(BaseModel):
     @field_validator('fecha_vencimiento')
     @classmethod
     def validar_fechas(cls, v, info):
+        # Para PENSION solo importa el día (DD) de fecha_vencimiento, el mes es irrelevante
+        if info.data.get('categoria') == 'PENSION':
+            return v
         if 'fecha_inicio' in info.data and v <= info.data['fecha_inicio']:
             raise ValueError('La fecha de vencimiento debe ser posterior a la fecha de inicio.')
         return v
+
+class PagoUpdate(BaseModel):
+    concepto: Optional[str] = None
+    monto: Optional[Decimal] = None
+    mora: Optional[Decimal] = None
+    monto_total: Optional[Decimal] = None
+    fecha_vencimiento: Optional[date] = None
+    estado: Optional[str] = None
 
 class TipoPagoCreate(TipoPagoBase):
     pass

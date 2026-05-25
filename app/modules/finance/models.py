@@ -77,6 +77,7 @@ class Pago(Base):
     alumno = relationship("Alumno")
     solicitud = relationship("SolicitudTramite", back_populates="pago")
     matricula = relationship("Matricula")
+    tipo_pago = relationship("TipoPago")
 
 class TipoPago(Base):
     __tablename__ = "tipo_pago"

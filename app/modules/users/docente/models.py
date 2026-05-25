@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DECIMAL # <-- Asegúrate de importar DECIMAL
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DECIMAL, Boolean # <-- Asegúrate de importar DECIMAL
 from sqlalchemy.orm import relationship
 from app.db.database import Base
 
@@ -17,5 +17,8 @@ class Docente(Base):
     url_perfil = Column(String(255))
     
     sueldo = Column(DECIMAL(10, 2), default=0.00) # <--- NUEVA COLUMNA AGREGADA
+
+    # Controla si el docente aparece en la página pública de Docentes
+    visible_web = Column(Boolean, nullable=False, default=True)
 
     usuario = relationship("Usuario")

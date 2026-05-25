@@ -7,8 +7,64 @@ from sqlalchemy import or_
 from datetime import datetime,date
 from app.core.util.security import get_current_user
 from sqlalchemy import extract,desc,asc
+from app.modules.academic import models as academic_models
 
 router = APIRouter(prefix="/web", tags=["Web Institucional"])
+
+@router.get("/anio-activo")
+def obtener_anio_activo_publico(db: Session = Depends(get_db)):
+    """
+    Endpoint público: devuelve el tipo (REGULAR/VERANO) del año escolar
+    vigente según la fecha actual. Usado en el inicio de la web.
+    """
+    hoy = date.today()
+    anio = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.fecha_inicio <= hoy,
+        academic_models.AnioEscolar.fecha_fin >= hoy
+    ).first()
+    return {"tipo": anio.tipo if anio else "REGULAR", "activo": anio is not None}
+
+
+@router.get("/estado-admision")
+def estado_admision_publico(db: Session = Depends(get_db)):
+    """
+    Endpoint público para el botón de Admisión del inicio:
+    - abierto=True  -> hay inscripciones vigentes hoy (devuelve tipo y fin).
+    - abierto=False + proxima_inscripcion -> hay inscripciones futuras (devuelve fecha y tipo).
+    - abierto=False sin proxima_inscripcion -> no mostrar nada.
+    """
+    hoy = date.today()
+
+    # 1. ¿Hay un año con inscripciones abiertas hoy?
+    abierto = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.inicio_inscripcion != None,
+        academic_models.AnioEscolar.fin_inscripcion != None,
+        academic_models.AnioEscolar.inicio_inscripcion <= hoy,
+        academic_models.AnioEscolar.fin_inscripcion >= hoy
+    ).order_by(academic_models.AnioEscolar.inicio_inscripcion.asc()).first()
+
+    if abierto:
+        return {
+            "abierto": True,
+            "tipo": abierto.tipo,
+            "fin_inscripcion": abierto.fin_inscripcion,
+        }
+
+    # 2. Si no, ¿hay inscripciones futuras? -> la más próxima
+    proxima = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.inicio_inscripcion != None,
+        academic_models.AnioEscolar.inicio_inscripcion > hoy
+    ).order_by(academic_models.AnioEscolar.inicio_inscripcion.asc()).first()
+
+    if proxima:
+        return {
+            "abierto": False,
+            "tipo": proxima.tipo,
+            "proxima_inscripcion": proxima.inicio_inscripcion,
+        }
+
+    # 3. Nada que mostrar
+    return {"abierto": False}
 
 @router.post("/noticias/", response_model=schemas.NoticiaResponse)
 def crear_noticia(noticia: schemas.NoticiaCreate, db: Session = Depends(get_db),
@@ -48,8 +104,8 @@ def listar_noticias(search: str = None, db: Session = Depends(get_db)):
     return query.all()
 
 @router.get("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse)
-def obtener_noticia(noticia_id: int, db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)):
+def obtener_noticia(noticia_id: int, db: Session = Depends(get_db)):
+    # Público: la web principal necesita leer el detalle de la noticia sin sesión
     noticia = db.query(models.Noticia).filter(models.Noticia.id_noticia == noticia_id).first()
     if not noticia:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")

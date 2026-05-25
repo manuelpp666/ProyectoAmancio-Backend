@@ -25,6 +25,7 @@ class DocenteUpdate(BaseModel):
     email: Optional[EmailStr] = None
     dni: Optional[DniStr] = None
     telefono: Optional[TelefonoStr] = None
+    visible_web: Optional[bool] = None
 
 class UsuarioEnDocente(BaseModel):
     activo: bool
@@ -33,7 +34,10 @@ class UsuarioEnDocente(BaseModel):
 class DocenteResponse(DocenteBase):
     id_docente: int
     dni: str
-    telefono: str
+    # Tolerantes a nulos para no romper la lista si un docente no tiene estos datos
+    email: Optional[EmailStr] = None
+    telefono: Optional[str] = None
+    visible_web: bool = True
     usuario: UsuarioEnDocente | None = None
     # Pydantic V2 usa model_config en lugar de class Config
     model_config = ConfigDict(from_attributes=True)

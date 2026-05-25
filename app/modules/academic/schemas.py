@@ -39,6 +39,7 @@ class SeccionCreate(SeccionBase): pass
 
 class SeccionResponse(SeccionBase):
     id_seccion: int
+    ocupadas: int = 0
     model_config = ConfigDict(from_attributes=True)
 
 # --- Curso ---

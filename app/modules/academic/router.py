@@ -361,14 +361,39 @@ def listar_secciones(
     - anio_id: Para ver solo las del año.
     """
     query = db.query(models.Seccion).options(joinedload(models.Seccion.grado))
-    
+
     if grado_id:
         query = query.filter(models.Seccion.id_grado == grado_id)
-    
+
     if anio_id:
         query = query.filter(models.Seccion.id_anio_escolar == anio_id)
-        
-    return query.all()
+
+    secciones = query.all()
+    _adjuntar_ocupacion(db, secciones)
+    return secciones
+
+
+def _adjuntar_ocupacion(db: Session, secciones):
+    """Calcula y adjunta el atributo 'ocupadas' (matrículas activas) a cada sección."""
+    from sqlalchemy import func
+    from app.modules.enrollment import models as enrollment_models
+
+    ids = [s.id_seccion for s in secciones]
+    if not ids:
+        return
+
+    conteos = dict(
+        db.query(
+            enrollment_models.Matricula.id_seccion,
+            func.count(enrollment_models.Matricula.id_matricula)
+        ).filter(
+            enrollment_models.Matricula.id_seccion.in_(ids),
+            enrollment_models.Matricula.estado.notin_(["RETIRADO", "ANULADO"])
+        ).group_by(enrollment_models.Matricula.id_seccion).all()
+    )
+
+    for s in secciones:
+        s.ocupadas = conteos.get(s.id_seccion, 0)
 
 @router.get("/secciones/{anio_id}", response_model=List[schemas.SeccionResponse])
 def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db),
