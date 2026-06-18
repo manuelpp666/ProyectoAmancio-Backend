@@ -305,6 +305,11 @@ def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db), curren
             if perfil:
                 nombre_real = perfil.nombres
                 apellidos_real = perfil.apellidos
+        elif otro_usuario.rol == 'PSICOLOGO':
+            perfil = db.query(models_psi.Psicologo).filter(models_psi.Psicologo.id_usuario == otro_id).first()
+            if perfil:
+                nombre_real = perfil.nombres
+                apellidos_real = perfil.apellidos
         else:
             # Fallback por si es ADMIN o FAMILIAR
             nombre_real = otro_usuario.username
@@ -332,8 +337,9 @@ def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db), curren
 
 @router.post("/chat/conversacion/")
 def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    
-    if current_user.get("rol") != "ADMIN" and current_user.get("rol") != "DOCENTE":
+
+    # Solo puede crearla un ADMIN o uno de los dos participantes de la conversación
+    if current_user.get("rol") != "ADMIN" and current_user.get("id") not in [req.usuario1_id, req.usuario2_id]:
         raise HTTPException(status_code=403, detail="No puedes modificar esta información")
 
 
@@ -362,8 +368,13 @@ def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = 
 
 @router.get("/chat/historial/{id_conversacion}")
 def obtener_historial(id_conversacion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    
-    if current_user.get("rol") != "ADMIN" and current_user.get("rol") != "DOCENTE":
+
+    conv = db.query(models.Conversacion).filter(models.Conversacion.id_conversacion == id_conversacion).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+
+    # Solo el ADMIN o los participantes de la conversación pueden ver el historial
+    if current_user.get("rol") != "ADMIN" and current_user.get("id") not in [conv.usuario1_id, conv.usuario2_id]:
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
 
     mensajes = db.query(models.Mensaje).filter(

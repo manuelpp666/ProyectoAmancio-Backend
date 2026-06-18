@@ -75,9 +75,9 @@ def obtener_estado_por_usuario(
             {
                 "id_reporte": r.id_reporte,
                 "fecha": r.fecha_reporte.strftime("%d/%m/%Y"),
-                "motivo": r.nivel.nombre,
-                "puntos_restados": r.nivel.puntos,
-                "nota_reglamento": r.nivel.descripcion
+                "motivo": r.nivel.nombre if r.nivel else "Falta registrada",
+                "puntos_restados": r.nivel.puntos if r.nivel else 0,
+                "nota_reglamento": r.descripcion_suceso or (r.nivel.descripcion if r.nivel else "")
             } for r in reportes
         ]
     }
@@ -197,10 +197,10 @@ def obtener_proxima_cita(id_usuario: int, db: Session = Depends(get_db), current
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
 
-    # Filtramos en la base de datos: solo PROGRAMADAS y fecha futura
+    # Filtramos en la base de datos: solo citas activas (programadas o reprogramadas) y fecha futura
     cita = db.query(models.CitaPsicologia).filter(
         models.CitaPsicologia.id_alumno == alumno.id_alumno,
-        models.CitaPsicologia.estado == "PROGRAMADA",
+        models.CitaPsicologia.estado.in_(["PROGRAMADA", "REPROGRAMADA"]),
         models.CitaPsicologia.fecha_cita >= datetime.now()
     ).order_by(models.CitaPsicologia.fecha_cita.asc()).first() # .first() solo trae UNA
 
@@ -227,7 +227,9 @@ def obtener_historial_citas(
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
     
     alumno = db.query(alumno_models.Alumno).filter(alumno_models.Alumno.id_usuario == id_usuario).first()
-    
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
     if not anio:
         anio = datetime.now().year
 
@@ -242,10 +244,30 @@ def obtener_historial_citas(
             "id_cita": c.id_cita,
             "motivo": c.motivo,
             "fecha": c.fecha_cita.strftime("%d/%m/%Y"),
+            "hora": c.fecha_cita.strftime("%H:%M"),
             "estado": c.estado,
             "resultado": c.resultado_reunion # Solo el historial ve el resultado
         } for c in citas
     ]
+
+
+@router.get("/usuario/{id_usuario}/anios-citas")
+def obtener_anios_con_citas(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """Años en los que el alumno tiene citas registradas (para el selector del historial)."""
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver esta información")
+
+    alumno = db.query(alumno_models.Alumno).filter(alumno_models.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
+    anios = db.query(
+        extract('year', models.CitaPsicologia.fecha_cita).label('anio')
+    ).filter(
+        models.CitaPsicologia.id_alumno == alumno.id_alumno
+    ).distinct().order_by(extract('year', models.CitaPsicologia.fecha_cita).desc()).all()
+
+    return [int(a.anio) for a in anios]
 
 
 @router.patch("/citas/{id_cita}/reprogramar")

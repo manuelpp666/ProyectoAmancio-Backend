@@ -28,6 +28,25 @@ class ExoneracionResponse(ExoneracionBase):
     fecha_aprobacion: datetime
     class Config: from_attributes = True
 
+# --- Solicitud de renovación de matrícula ---
+class SolicitudMatriculaCreate(BaseModel):
+    id_usuario: int
+    comentario: Optional[str] = None
+
+class SolicitudMatriculaResponse(BaseModel):
+    id_solicitud_matricula: int
+    id_alumno: int
+    id_anio_escolar_origen: Optional[str] = None
+    anio_destino: str
+    grado_destino: Optional[str] = None
+    comentario: Optional[str] = None
+    estado: str
+    respuesta_admin: Optional[str] = None
+    fecha_solicitud: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MatriculaBase(BaseModel):
     id_anio_escolar: str
     id_alumno: int

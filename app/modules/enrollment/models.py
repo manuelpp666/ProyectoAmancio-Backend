@@ -26,6 +26,22 @@ class Matricula(Base):
     # Faltaba definir esta propiedad para que 'Exoneracion' pudiera encontrarla
     exoneraciones = relationship("Exoneracion", back_populates="matricula")
 
+class SolicitudMatricula(Base):
+    __tablename__ = "solicitud_matricula"
+
+    id_solicitud_matricula = Column(Integer, primary_key=True, index=True)
+    id_alumno = Column(Integer, ForeignKey("alumno.id_alumno"), nullable=False)
+    id_anio_escolar_origen = Column(String(6), nullable=True)
+    anio_destino = Column(String(6), nullable=False)
+    grado_destino = Column(String(50), nullable=True)
+    comentario = Column(String, nullable=True)
+    estado = Column(String(20), default="PENDIENTE")  # PENDIENTE / APROBADA / RECHAZADA
+    respuesta_admin = Column(String, nullable=True)
+    fecha_solicitud = Column(DateTime, default=func.now())
+
+    alumno = relationship("app.modules.users.alumno.models.Alumno")
+
+
 class Exoneracion(Base):
     __tablename__ = "exoneracion"
     id_exoneracion = Column(Integer, primary_key=True)

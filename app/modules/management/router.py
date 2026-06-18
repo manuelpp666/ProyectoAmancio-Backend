@@ -39,9 +39,9 @@ def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db), cur
 def listar_cargas(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     # VALIDACIÓN DE ROL
-    if current_user.get("rol") != "ADMIN" or current_user.get("rol") != "DOCENTE":
+    if current_user.get("rol") not in ["ADMIN", "DOCENTE"]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para ver esta sección"
         )
     return db.query(models.CargaAcademica).all()
@@ -145,17 +145,32 @@ def obtener_detalle_curso_estudiante(
     
     # 1. Identificar al alumno y su matrícula para ese año
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
     matricula = db.query(models_en.Matricula).filter(
         models_en.Matricula.id_alumno == alumno.id_alumno,
         models_en.Matricula.id_anio_escolar == anio
     ).first()
+    if not matricula:
+        raise HTTPException(status_code=404, detail="No tienes matrícula registrada en este año escolar")
 
-    # 2. Obtener Carga Académica (para las tareas)
+    # 2. Obtener el curso y la Carga Académica (para las tareas y el docente)
+    curso = db.query(models_ac.Curso).filter(models_ac.Curso.id_curso == id_curso).first()
+    if not curso:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
     carga = db.query(models.CargaAcademica).filter(
         models.CargaAcademica.id_curso == id_curso,
         models.CargaAcademica.id_seccion == matricula.id_seccion,
         models.CargaAcademica.id_anio_escolar == anio
     ).first()
+
+    docente_nombre = "Docente por asignar"
+    if carga and carga.id_docente:
+        docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_docente == carga.id_docente).first()
+        if docente:
+            docente_nombre = f"{docente.nombres} {docente.apellidos}"
 
     # 3. Obtener Notas (Resumen)
     notas = db.query(models_mn.ResumenNota).filter(
@@ -165,18 +180,22 @@ def obtener_detalle_curso_estudiante(
 
     # 4. Obtener Tareas y si el alumno ya entregó
     # Aquí unimos Tarea con EntregaTarea (Left Join)
-    tareas_query = db.query(
-        models_vr.Tarea,
-        models_vr.EntregaTarea.calificacion,
-        models_vr.EntregaTarea.fecha_envio
-    ).outerjoin(
-        models_vr.EntregaTarea, 
-        (models_vr.EntregaTarea.id_tarea == models_vr.Tarea.id_tarea) & 
-        (models_vr.EntregaTarea.id_alumno == alumno.id_alumno)
-    ).filter(models_vr.Tarea.id_carga_academica == carga.id_carga_academica).all()
+    tareas_query = []
+    if carga:
+        tareas_query = db.query(
+            models_vr.Tarea,
+            models_vr.EntregaTarea.calificacion,
+            models_vr.EntregaTarea.fecha_envio
+        ).outerjoin(
+            models_vr.EntregaTarea,
+            (models_vr.EntregaTarea.id_tarea == models_vr.Tarea.id_tarea) &
+            (models_vr.EntregaTarea.id_alumno == alumno.id_alumno)
+        ).filter(models_vr.Tarea.id_carga_academica == carga.id_carga_academica).all()
 
     return {
         "curso_info": {"id": id_curso, "anio": anio},
+        "curso_nombre": curso.nombre,
+        "docente_nombre": docente_nombre,
         "notas": notas,
         "tareas": [
             {

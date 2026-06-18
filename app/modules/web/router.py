@@ -220,21 +220,24 @@ def obtener_resumen_eventos(db: Session = Depends(get_db),
         models.Evento.fecha_inicio < hoy
     ).order_by(desc(models.Evento.fecha_inicio)).first()
     
-    # 2. Próximo evento (el más cercano al futuro)
-    proximo_evento = db.query(models.Evento).filter(
+    # 2. Próximos eventos (los más cercanos al futuro, ordenados)
+    proximos_eventos = db.query(models.Evento).filter(
         models.Evento.activo == True,
         models.Evento.fecha_inicio >= hoy
-    ).order_by(asc(models.Evento.fecha_inicio)).first()
-    
+    ).order_by(asc(models.Evento.fecha_inicio)).limit(5).all()
+
+    proximo_evento = proximos_eventos[0] if proximos_eventos else None
+
     # Calcular días faltantes para el próximo
     dias_faltantes = None
     if proximo_evento:
         delta = proximo_evento.fecha_inicio - hoy
         dias_faltantes = delta.days if delta.days >= 0 else 0
-        
+
     return {
         "evento_pasado": evento_pasado,
         "proximo_evento": proximo_evento,
+        "proximos_eventos": proximos_eventos,
         "dias_faltantes_proximo": dias_faltantes
     }
 
