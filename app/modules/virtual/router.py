@@ -397,7 +397,7 @@ async def crear_tarea(
     id_carga_academica: int = Form(...),
     titulo: str = Form(...),
     descripcion: Optional[str] = Form(None),
-    fecha_entrega: datetime = Form(...),
+    fecha_entrega: Optional[datetime] = Form(None),
     tipo_evaluacion: str = Form("TAREA"),
     bimestre: int = Form(...),
     peso: int = Form(0),
@@ -468,6 +468,171 @@ async def crear_tarea(
     db.commit()
     db.refresh(nueva_tarea)
     return nueva_tarea
+
+@router.get("/curso-docente-detalle/{id_carga}")
+def obtener_detalle_curso_docente(id_carga: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+
+    # 1. Carga académica con información del curso, sección, grado y docente
+    carga = (
+        db.query(
+            models_mn.CargaAcademica.id_carga_academica,
+            models_ac.Curso.nombre.label("curso_nombre"),
+            models_ac.Grado.nombre.label("grado_nombre"),
+            models_ac.Seccion.nombre.label("seccion_nombre"),
+            models_ac.Seccion.id_seccion,
+            models_mn.CargaAcademica.id_anio_escolar,
+            models_doc.Docente.nombres.label("docente_nombres"),
+            models_doc.Docente.apellidos.label("docente_apellidos"),
+        )
+        .join(models_ac.Curso, models_mn.CargaAcademica.id_curso == models_ac.Curso.id_curso)
+        .join(models_ac.Seccion, models_mn.CargaAcademica.id_seccion == models_ac.Seccion.id_seccion)
+        .join(models_ac.Grado, models_ac.Seccion.id_grado == models_ac.Grado.id_grado)
+        .outerjoin(models_doc.Docente, models_mn.CargaAcademica.id_docente == models_doc.Docente.id_docente)
+        .filter(models_mn.CargaAcademica.id_carga_academica == id_carga)
+        .first()
+    )
+    if not carga:
+        raise HTTPException(status_code=404, detail="Carga académica no encontrada")
+
+    # 2. Total de alumnos matriculados en la sección
+    num_alumnos = db.query(func.count(models_en.Matricula.id_alumno)).filter(
+        models_en.Matricula.id_seccion == carga.id_seccion,
+        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
+    ).scalar() or 0
+
+    # 3. Todas las tareas/evaluaciones activas del curso (los 4 bimestres)
+    tareas = db.query(models.Tarea).filter(
+        models.Tarea.id_carga_academica == id_carga,
+        models.Tarea.estado == "ACTIVO"
+    ).order_by(models.Tarea.bimestre, models.Tarea.fecha_publicacion).all()
+
+    lista_tareas = []
+    for t in tareas:
+        conteo_envios = len([e for e in t.entregas if e.archivo_url])
+        lista_tareas.append({
+            "id_tarea": t.id_tarea,
+            "titulo": t.titulo,
+            "tipo": t.tipo_evaluacion,
+            "descripcion": t.descripcion,
+            "fecha_entrega": t.fecha_entrega,
+            "bimestre": t.bimestre,
+            "peso": t.peso or 0,
+            "total_entregas": conteo_envios,
+            "editable_total": conteo_envios == 0,
+            "archivo_adjunto_url": t.archivo_adjunto_url
+        })
+
+    # 4. Materiales / contenido de clase (los 4 bimestres)
+    materiales = db.query(models.MaterialClase).filter(
+        models.MaterialClase.id_carga_academica == id_carga
+    ).order_by(models.MaterialClase.bimestre, models.MaterialClase.fecha_publicacion).all()
+
+    lista_materiales = [
+        {
+            "id_material": m.id_material,
+            "titulo": m.titulo,
+            "descripcion": m.descripcion,
+            "archivo_url": m.archivo_url,
+            "bimestre": m.bimestre
+        }
+        for m in materiales
+    ]
+
+    docente_nombre = f"{carga.docente_nombres or ''} {carga.docente_apellidos or ''}".strip()
+
+    return {
+        "id_carga": carga.id_carga_academica,
+        "curso_nombre": carga.curso_nombre,
+        "docente_nombre": docente_nombre or "Docente por asignar",
+        "grado_nombre": carga.grado_nombre,
+        "seccion_nombre": carga.seccion_nombre,
+        "anio": carga.id_anio_escolar,
+        "num_alumnos": num_alumnos,
+        "tareas": lista_tareas,
+        "materiales": lista_materiales
+    }
+
+
+@router.post("/materiales/")
+async def crear_material(
+    id_carga_academica: int = Form(...),
+    titulo: str = Form(...),
+    descripcion: Optional[str] = Form(None),
+    bimestre: int = Form(...),
+    archivo: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+
+    carga = db.query(models_mn.CargaAcademica).filter(
+        models_mn.CargaAcademica.id_carga_academica == id_carga_academica
+    ).first()
+    if not carga:
+        raise HTTPException(status_code=404, detail="La carga académica no existe.")
+
+    url_adjunto = None
+    if archivo and archivo.filename:
+        ext = os.path.splitext(archivo.filename)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
+
+        rel_folder = os.path.join("media", "materiales_clase", f"carga_{id_carga_academica}")
+        abs_folder = os.path.join(BASE_DIR, rel_folder)
+        os.makedirs(abs_folder, exist_ok=True)
+
+        filename = f"mat_{uuid.uuid4().hex[:6]}{ext}"
+        file_path = os.path.join(abs_folder, filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(archivo.file, buffer)
+        url_adjunto = f"/{rel_folder}/{filename}".replace("\\", "/")
+
+    nuevo = models.MaterialClase(
+        id_carga_academica=id_carga_academica,
+        titulo=titulo,
+        descripcion=descripcion,
+        bimestre=bimestre,
+        archivo_url=url_adjunto,
+        fecha_publicacion=datetime.now()
+    )
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return {
+        "message": "Material publicado con éxito",
+        "material": {
+            "id_material": nuevo.id_material,
+            "titulo": nuevo.titulo,
+            "descripcion": nuevo.descripcion,
+            "archivo_url": nuevo.archivo_url,
+            "bimestre": nuevo.bimestre
+        }
+    }
+
+
+@router.delete("/materiales/{id_material}")
+def eliminar_material(id_material: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+
+    material = db.get(models.MaterialClase, id_material)
+    if not material:
+        raise HTTPException(status_code=404, detail="Material no encontrado")
+
+    if material.archivo_url:
+        full_path = os.path.join(BASE_DIR, material.archivo_url.lstrip("/"))
+        if os.path.exists(full_path):
+            try:
+                os.remove(full_path)
+            except Exception as e:
+                print(f"Error al borrar material: {e}")
+
+    db.delete(material)
+    db.commit()
+    return {"message": "Material eliminado con éxito"}
+
 
 @router.get("/sabana-notas/{id_carga}/{bimestre}", response_model=schemas.SabanaNotasResponse)
 def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
@@ -624,10 +789,10 @@ async def editar_tarea(
     id_tarea: int,
     titulo: str = Form(...),
     descripcion: Optional[str] = Form(None),
-    fecha_entrega: datetime = Form(...),
+    fecha_entrega: Optional[datetime] = Form(None),
     tipo_evaluacion: str = Form(...),
     bimestre: int = Form(...),
-    peso: int = Form(...),
+    peso: int = Form(0),
     archivo: Optional[UploadFile] = File(None), # Nuevo archivo opcional
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)

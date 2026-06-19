@@ -10,13 +10,24 @@ class Tarea(Base):
     titulo = Column(String(150), nullable=False)
     descripcion = Column(Text)
     fecha_publicacion = Column(DateTime, server_default=func.now())
-    fecha_entrega = Column(DateTime, nullable=False)
+    fecha_entrega = Column(DateTime, nullable=True)
     archivo_adjunto_url = Column(String(255), nullable=True)
     estado = Column(String(20), default='ACTIVO')
     tipo_evaluacion = Column(String(30), default='TAREA') # 'TAREA', 'EXAMEN_PARCIAL', 'EXAMEN_BIMESTRAL'
     bimestre = Column(Integer, nullable=False) # 1, 2, 3 o 4
     peso = Column(Integer, default=0)
     entregas = relationship("EntregaTarea", back_populates="tarea", cascade="all, delete-orphan")
+
+class MaterialClase(Base):
+    __tablename__ = "material_clase"
+    id_material = Column(Integer, primary_key=True)
+    id_carga_academica = Column(Integer, ForeignKey("carga_academica.id_carga_academica"))
+    titulo = Column(String(150), nullable=False)
+    descripcion = Column(Text)
+    archivo_url = Column(String(255), nullable=True)
+    bimestre = Column(Integer, nullable=False)  # 1, 2, 3 o 4
+    fecha_publicacion = Column(DateTime, server_default=func.now())
+
 
 class EntregaTarea(Base):
     __tablename__ = "entrega_tarea"

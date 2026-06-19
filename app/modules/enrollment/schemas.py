@@ -46,6 +46,10 @@ class SolicitudMatriculaResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+class DecisionRenovacion(BaseModel):
+    aprobado: bool
+    respuesta_admin: Optional[str] = None
+
 
 class MatriculaBase(BaseModel):
     id_anio_escolar: str

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
+from datetime import date
 from app.db.database import get_db
 from . import models, schemas
 from app.core.util.security import get_current_user
@@ -163,6 +164,31 @@ def _info_renovacion(db: Session, id_usuario: int):
         for s in solicitudes
     )
 
+    # --- VENTANA DE INSCRIPCIÓN DEL AÑO DESTINO ---
+    # La renovación solo se habilita cuando el admin ha abierto las inscripciones
+    # del próximo año: debe existir el año destino con fechas configuradas y hoy
+    # debe estar dentro de ese rango.
+    hoy = date.today()
+    anio_destino_obj = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.id_anio_escolar == anio_destino
+    ).first()
+
+    inscripcion_estado = "NO_CONFIGURADO"  # NO_CONFIGURADO / PROXIMAMENTE / ABIERTA / CERRADA
+    inscripciones_abiertas = False
+    fecha_inicio_insc = None
+    fecha_fin_insc = None
+
+    if anio_destino_obj and anio_destino_obj.inicio_inscripcion and anio_destino_obj.fin_inscripcion:
+        fecha_inicio_insc = anio_destino_obj.inicio_inscripcion
+        fecha_fin_insc = anio_destino_obj.fin_inscripcion
+        if hoy < fecha_inicio_insc:
+            inscripcion_estado = "PROXIMAMENTE"
+        elif hoy > fecha_fin_insc:
+            inscripcion_estado = "CERRADA"
+        else:
+            inscripcion_estado = "ABIERTA"
+            inscripciones_abiertas = True
+
     return {
         "alumno": alumno,
         "anio_activo": anio_activo,
@@ -172,7 +198,15 @@ def _info_renovacion(db: Session, id_usuario: int):
         "egresa": egresa,
         "ya_matriculado_destino": ya_matriculado_destino,
         "solicitudes": solicitudes,
-        "puede_solicitar": bool(matricula) and not egresa and not ya_matriculado_destino and not solicitud_en_curso
+        "solicitud_en_curso": solicitud_en_curso,
+        "inscripcion_estado": inscripcion_estado,
+        "inscripciones_abiertas": inscripciones_abiertas,
+        "inscripcion_inicio": fecha_inicio_insc.isoformat() if fecha_inicio_insc else None,
+        "inscripcion_fin": fecha_fin_insc.isoformat() if fecha_fin_insc else None,
+        "puede_solicitar": (
+            bool(matricula) and not egresa and not ya_matriculado_destino
+            and not solicitud_en_curso and inscripciones_abiertas
+        )
     }
 
 
@@ -205,6 +239,10 @@ def obtener_info_renovacion(id_usuario: int, db: Session = Depends(get_db), curr
         "egresa": info["egresa"],
         "ya_matriculado_destino": info["ya_matriculado_destino"],
         "puede_solicitar": info["puede_solicitar"],
+        "inscripcion_estado": info["inscripcion_estado"],
+        "inscripciones_abiertas": info["inscripciones_abiertas"],
+        "inscripcion_inicio": info["inscripcion_inicio"],
+        "inscripcion_fin": info["inscripcion_fin"],
         "solicitudes": [
             schemas.SolicitudMatriculaResponse.model_validate(s) for s in info["solicitudes"]
         ]
@@ -224,8 +262,17 @@ def solicitar_renovacion(data: schemas.SolicitudMatriculaCreate, db: Session = D
         raise HTTPException(status_code=400, detail="Estás culminando el último grado, no aplica renovación de matrícula")
     if info["ya_matriculado_destino"]:
         raise HTTPException(status_code=400, detail=f"Ya tienes matrícula registrada para el año {info['anio_destino']}")
-    if not info["puede_solicitar"]:
+    if info["solicitud_en_curso"]:
         raise HTTPException(status_code=400, detail="Ya tienes una solicitud de renovación en curso para el próximo año")
+    if not info["inscripciones_abiertas"]:
+        if info["inscripcion_estado"] == "PROXIMAMENTE":
+            raise HTTPException(status_code=400, detail="Las inscripciones para el próximo año aún no están abiertas")
+        elif info["inscripcion_estado"] == "CERRADA":
+            raise HTTPException(status_code=400, detail="El periodo de inscripciones para el próximo año ya cerró")
+        else:
+            raise HTTPException(status_code=400, detail="Las inscripciones del próximo año aún no han sido habilitadas por el colegio")
+    if not info["puede_solicitar"]:
+        raise HTTPException(status_code=400, detail="No es posible registrar tu solicitud de renovación en este momento")
 
     nueva = models.SolicitudMatricula(
         id_alumno=info["alumno"].id_alumno,
@@ -239,6 +286,148 @@ def solicitar_renovacion(data: schemas.SolicitudMatriculaCreate, db: Session = D
     db.commit()
     db.refresh(nueva)
     return nueva
+
+
+# --- GESTIÓN DE RENOVACIONES (ADMIN) ---
+
+@router.get("/renovacion-solicitudes/")
+def listar_solicitudes_renovacion(
+    estado: Optional[str] = None,
+    anio_destino: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Lista todas las solicitudes de renovación de matrícula para el panel de administración."""
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver esta información")
+
+    query = db.query(models.SolicitudMatricula).options(
+        joinedload(models.SolicitudMatricula.alumno)
+    )
+    if estado:
+        query = query.filter(models.SolicitudMatricula.estado == estado)
+    if anio_destino:
+        query = query.filter(models.SolicitudMatricula.anio_destino == anio_destino)
+
+    solicitudes = query.order_by(models.SolicitudMatricula.fecha_solicitud.desc()).all()
+
+    resultado = []
+    for s in solicitudes:
+        alumno = s.alumno
+        # Grado y sección actuales (del año de origen)
+        grado_actual = None
+        if s.id_anio_escolar_origen and alumno:
+            mat_origen = db.query(models.Matricula).options(
+                joinedload(models.Matricula.grado)
+            ).filter(
+                models.Matricula.id_alumno == alumno.id_alumno,
+                models.Matricula.id_anio_escolar == s.id_anio_escolar_origen
+            ).first()
+            if mat_origen and mat_origen.grado:
+                grado_actual = mat_origen.grado.nombre
+
+        resultado.append({
+            "id_solicitud_matricula": s.id_solicitud_matricula,
+            "id_alumno": s.id_alumno,
+            "alumno_nombre": f"{alumno.nombres} {alumno.apellidos}" if alumno else "—",
+            "alumno_dni": alumno.dni if alumno else None,
+            "anio_origen": s.id_anio_escolar_origen,
+            "anio_destino": s.anio_destino,
+            "grado_actual": grado_actual,
+            "grado_destino": s.grado_destino,
+            "comentario": s.comentario,
+            "estado": s.estado,
+            "respuesta_admin": s.respuesta_admin,
+            "fecha_solicitud": s.fecha_solicitud.isoformat() if s.fecha_solicitud else None
+        })
+    return resultado
+
+
+@router.patch("/renovacion-solicitudes/{id_solicitud}/decidir")
+def decidir_solicitud_renovacion(
+    id_solicitud: int,
+    decision: schemas.DecisionRenovacion,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """El administrador aprueba o rechaza una solicitud de renovación.
+    Al aprobar, se crea automáticamente la matrícula del año destino (sin sección,
+    para que luego se asigne en 'Asignar Estudiante')."""
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos para esta acción")
+
+    solicitud = db.query(models.SolicitudMatricula).filter(
+        models.SolicitudMatricula.id_solicitud_matricula == id_solicitud
+    ).first()
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    if solicitud.estado != "PENDIENTE":
+        raise HTTPException(status_code=400, detail=f"La solicitud ya fue {solicitud.estado.lower()}")
+
+    if not decision.aprobado:
+        solicitud.estado = "RECHAZADA"
+        solicitud.respuesta_admin = decision.respuesta_admin or "Solicitud rechazada por la administración."
+        db.commit()
+        db.refresh(solicitud)
+        return {"mensaje": "Solicitud rechazada", "estado": solicitud.estado}
+
+    # --- APROBAR: crear matrícula en el año destino ---
+    # 1. Verificar que el año destino exista (debe existir si se abrió la inscripción)
+    anio_destino_obj = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.id_anio_escolar == solicitud.anio_destino
+    ).first()
+    if not anio_destino_obj:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El año escolar {solicitud.anio_destino} no existe. Créalo antes de aprobar la renovación."
+        )
+
+    # 2. Evitar duplicar matrícula
+    ya_existe = db.query(models.Matricula).filter(
+        models.Matricula.id_alumno == solicitud.id_alumno,
+        models.Matricula.id_anio_escolar == solicitud.anio_destino
+    ).first()
+
+    if not ya_existe:
+        # 3. Calcular el grado destino a partir de la matrícula de origen
+        mat_origen = db.query(models.Matricula).options(
+            joinedload(models.Matricula.grado)
+        ).filter(
+            models.Matricula.id_alumno == solicitud.id_alumno,
+            models.Matricula.id_anio_escolar == solicitud.id_anio_escolar_origen
+        ).first()
+
+        id_grado_destino = None
+        tipo_matricula = "REGULAR"
+        if mat_origen:
+            tipo_matricula = mat_origen.tipo_matricula or "REGULAR"
+            if mat_origen.grado:
+                siguiente = _calcular_siguiente_grado(db, mat_origen.grado)
+                if siguiente:
+                    id_grado_destino = siguiente.id_grado
+
+        if not id_grado_destino:
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo determinar el grado destino del alumno."
+            )
+
+        nueva_matricula = models.Matricula(
+            id_anio_escolar=solicitud.anio_destino,
+            id_alumno=solicitud.id_alumno,
+            id_seccion=None,  # El admin asigna la sección luego en 'Asignar Estudiante'
+            id_grado=id_grado_destino,
+            estado="MATRICULADO",
+            tipo_matricula=tipo_matricula
+        )
+        db.add(nueva_matricula)
+
+    solicitud.estado = "APROBADA"
+    solicitud.respuesta_admin = decision.respuesta_admin or "Renovación aprobada. Tu matrícula para el próximo año fue registrada."
+    db.commit()
+    db.refresh(solicitud)
+    return {"mensaje": "Solicitud aprobada y matrícula registrada", "estado": solicitud.estado}
 
 
 # --- EXONERACIONES ---

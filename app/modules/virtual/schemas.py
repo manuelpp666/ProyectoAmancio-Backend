@@ -6,16 +6,16 @@ class TareaCreate(BaseModel):
     id_carga_academica: int
     titulo: str = Field(..., min_length=3, max_length=100)
     descripcion: Optional[str] = Field(None, max_length=500)
-    fecha_entrega: datetime
+    fecha_entrega: Optional[datetime] = None
     tipo_evaluacion: Literal["TAREA", "EXAMEN_PARCIAL", "EXAMEN_BIMESTRAL"] = "TAREA" # TAREA, EXAMEN_PARCIAL o EXAMEN_BIMESTRAL
     bimestre: int = Field(..., ge=1, le=4)
-    peso: int = Field(default=1, ge=1, le=100)
+    peso: int = Field(default=0, ge=0, le=100)
 
 class TareaResponse(TareaCreate):
     id_tarea: int
     titulo: str
-    descripcion: Optional[str] 
-    fecha_entrega: datetime
+    descripcion: Optional[str]
+    fecha_entrega: Optional[datetime] = None
     tipo_evaluacion: str
     bimestre: int
     estado: str
@@ -29,7 +29,7 @@ class EvaluacionInfo(BaseModel):
     titulo: str
     tipo: str
     descripcion: Optional[str]
-    fecha_entrega: datetime
+    fecha_entrega: Optional[datetime] = None
     bimestre: int
     peso: int
     total_entregas: int  # Para mostrar cuántos archivos se han subido

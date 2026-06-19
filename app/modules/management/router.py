@@ -192,6 +192,13 @@ def obtener_detalle_curso_estudiante(
             (models_vr.EntregaTarea.id_alumno == alumno.id_alumno)
         ).filter(models_vr.Tarea.id_carga_academica == carga.id_carga_academica).all()
 
+    # 5. Materiales / contenido de clase
+    materiales_query = []
+    if carga:
+        materiales_query = db.query(models_vr.MaterialClase).filter(
+            models_vr.MaterialClase.id_carga_academica == carga.id_carga_academica
+        ).order_by(models_vr.MaterialClase.bimestre, models_vr.MaterialClase.fecha_publicacion).all()
+
     return {
         "curso_info": {"id": id_curso, "anio": anio},
         "curso_nombre": curso.nombre,
@@ -207,6 +214,15 @@ def obtener_detalle_curso_estudiante(
                 "peso": t.Tarea.peso,
                 "bimestre": t.Tarea.bimestre
             } for t in tareas_query
+        ],
+        "materiales": [
+            {
+                "id_material": m.id_material,
+                "titulo": m.titulo,
+                "descripcion": m.descripcion,
+                "archivo_url": m.archivo_url,
+                "bimestre": m.bimestre
+            } for m in materiales_query
         ]
     }
 

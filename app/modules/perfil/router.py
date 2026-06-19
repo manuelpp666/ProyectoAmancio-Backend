@@ -8,9 +8,14 @@ from app.modules.users.docente.models import Docente
 from app.modules.personal.models import Administrador 
 from app.modules.personal.models import Auxiliar 
 from app.modules.personal.models import Psicologo
+from app.modules.users.alumno.models import Alumno
+from app.modules.users.familiar.models import Familiar
+from app.modules.users.relacion_familiar.models import RelacionFamiliar
 from app.core.util.security import get_current_user
-from .schemas import ChangePasswordSchema, ActualizarPerfilAdminSchema
-# from app.modules.users.familiar.models import Familiar # Descomenta si lo usas
+from .schemas import (
+    ChangePasswordSchema, ActualizarPerfilAdminSchema,
+    ActualizarDireccionSchema, ActualizarMedicosSchema, FamiliarCreateSchema
+)
 
 router = APIRouter(prefix="/perfil", tags=["Perfil"])
 
@@ -36,10 +41,12 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), curr
             for rel in alumno.familiares_rel:
                 fam = rel.familiar
                 familiares_data.append({
+                    "id_familiar": fam.id_familiar,
                     "nombre": f"{fam.nombres} {fam.apellidos}",
                     "parentesco": rel.tipo_parentesco,
                     "dni": fam.dni,
-                    "telefono": fam.telefono
+                    "telefono": fam.telefono,
+                    "email": fam.email
                 })
 
         return {"rol": user.rol, "datos": alumno, "familiares": familiares_data}
@@ -103,6 +110,103 @@ def actualizar_perfil_admin(
         "email": admin.email,
         "url_perfil": admin.url_perfil
     }}
+
+
+# --- PERFIL DEL ALUMNO ---
+
+def _get_alumno_propio(username: str, current_user: dict, db: Session) -> Alumno:
+    """Obtiene el alumno asociado al username, validando que sea el propio usuario."""
+    user = db.query(Usuario).filter(Usuario.username == username).first()
+    if not user or user.rol != "ALUMNO":
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+    if current_user.get("id") != user.id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes editar un perfil ajeno")
+    alumno = db.query(Alumno).filter(Alumno.id_usuario == user.id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Datos de alumno no encontrados")
+    return alumno
+
+
+@router.patch("/alumno/{username}/direccion")
+def actualizar_direccion_alumno(
+    username: str,
+    data: ActualizarDireccionSchema,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    alumno = _get_alumno_propio(username, current_user, db)
+    alumno.direccion = data.direccion.strip()
+    db.commit()
+    db.refresh(alumno)
+    return {"message": "Dirección actualizada con éxito", "direccion": alumno.direccion}
+
+
+@router.patch("/alumno/{username}/medicos")
+def actualizar_datos_medicos_alumno(
+    username: str,
+    data: ActualizarMedicosSchema,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    alumno = _get_alumno_propio(username, current_user, db)
+    valor = (data.enfermedad or "").strip()
+    alumno.enfermedad = valor or None
+    db.commit()
+    db.refresh(alumno)
+    return {"message": "Datos médicos actualizados", "enfermedad": alumno.enfermedad}
+
+
+@router.post("/alumno/{username}/familiares")
+def agregar_familiar_alumno(
+    username: str,
+    data: FamiliarCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    alumno = _get_alumno_propio(username, current_user, db)
+
+    # Reutilizar el familiar si ya existe por DNI, o crearlo
+    familiar = db.query(Familiar).filter(Familiar.dni == data.dni).first()
+    if not familiar:
+        familiar = Familiar(
+            dni=data.dni,
+            nombres=data.nombres.strip(),
+            apellidos=data.apellidos.strip(),
+            telefono=data.telefono,
+            email=data.email,
+            direccion=data.direccion,
+            tipo_parentesco=data.tipo_parentesco
+        )
+        db.add(familiar)
+        db.flush()  # Para obtener id_familiar
+
+    # Evitar duplicar la relación con este alumno
+    existe = db.query(RelacionFamiliar).filter(
+        RelacionFamiliar.id_alumno == alumno.id_alumno,
+        RelacionFamiliar.id_familiar == familiar.id_familiar
+    ).first()
+    if existe:
+        raise HTTPException(status_code=400, detail="Este familiar ya está registrado para ti")
+
+    rel = RelacionFamiliar(
+        id_alumno=alumno.id_alumno,
+        id_familiar=familiar.id_familiar,
+        tipo_parentesco=data.tipo_parentesco
+    )
+    db.add(rel)
+    db.commit()
+
+    return {
+        "message": "Familiar agregado con éxito",
+        "familiar": {
+            "id_familiar": familiar.id_familiar,
+            "nombre": f"{familiar.nombres} {familiar.apellidos}",
+            "parentesco": data.tipo_parentesco,
+            "dni": familiar.dni,
+            "telefono": familiar.telefono,
+            "email": familiar.email
+        }
+    }
 
 
 @router.post("/auth/change-password")
