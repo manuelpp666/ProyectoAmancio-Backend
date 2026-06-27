@@ -125,18 +125,29 @@ def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Sessio
         
     if not perfil:
         raise HTTPException(status_code=404, detail="Personal no encontrado")
-        
+
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == perfil.id_usuario).first()
+
+    # Si cambia el DNI, el nombre de usuario debe seguir al nuevo DNI (la convención del sistema)
+    if usuario and data.dni and data.dni != perfil.dni:
+        existe = db.query(Usuario).filter(
+            Usuario.username == data.dni,
+            Usuario.id_usuario != usuario.id_usuario
+        ).first()
+        if existe:
+            raise HTTPException(status_code=400, detail="Ya existe un usuario con ese DNI.")
+        usuario.username = data.dni
+
     perfil.nombres = data.nombres
     perfil.apellidos = data.apellidos
     perfil.dni = data.dni
     perfil.email = data.email
     perfil.telefono = data.telefono
     perfil.sueldo = data.sueldo
-    
-    if data.password:
-        usuario = db.query(Usuario).filter(Usuario.id_usuario == perfil.id_usuario).first()
+
+    if data.password and usuario:
         usuario.password_hash = get_password_hash(data.password)
-        
+
     db.commit()
     db.refresh(perfil)
     return to_response(perfil, tipo)
