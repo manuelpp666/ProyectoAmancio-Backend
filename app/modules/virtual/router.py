@@ -18,7 +18,7 @@ from app.modules.management import models as models_mn
 from app.modules.users.alumno import models as models_al
 from app.modules.users.docente import models as models_doc
 from app.modules.personal import models as models_psi
-from app.core.util.security import get_current_user
+from app.core.util.security import get_current_user, ensure_owner_or_roles
 from . import models, schemas
 
 
@@ -32,8 +32,6 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(FILE_DIR)))
 # 3. Configuramos UPLOAD_DIR (esto ahora apuntará a Backend/media/entregas_tareas)
 UPLOAD_DIR = os.path.join(BASE_DIR, "media", "entregas_tareas")
 DOCS_TAREAS_DIR = os.path.join(BASE_DIR, "media", "recursos_tareas")
-# --- DEBUG: Añade este print temporal para estar 100% seguro ---
-print(f"📂 Router configurado para guardar en: {UPLOAD_DIR}")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(DOCS_TAREAS_DIR, exist_ok=True)
@@ -50,14 +48,18 @@ router = APIRouter(prefix="/virtual", tags=["Aula Virtual"])
 @router.post("/chat/mensaje/")
 async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
-    # Permitir el acceso a ADMIN, DOCENTE y ahora PSICOLOGO
-    roles_permitidos = ["ADMIN", "DOCENTE", "PSICOLOGO"]
-    if current_user.get("rol") not in roles_permitidos and current_user.get("id") != mensaje.remitente_id:
+    # El remitente SIEMPRE debe ser el usuario autenticado: impide enviar
+    # mensajes suplantando a otra persona (spoofing de remitente_id).
+    if current_user.get("id") != mensaje.remitente_id:
         raise HTTPException(status_code=403, detail="No autorizado para enviar este mensaje")
 
     conv = db.query(models.Conversacion).filter(models.Conversacion.id_conversacion == mensaje.id_conversacion).first()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
+
+    # El remitente debe ser uno de los dos participantes de la conversación
+    if mensaje.remitente_id not in (conv.usuario1_id, conv.usuario2_id):
+        raise HTTPException(status_code=403, detail="No perteneces a esta conversación")
 
     receptor_id = conv.usuario2_id if mensaje.remitente_id == conv.usuario1_id else conv.usuario1_id
     
@@ -273,8 +275,7 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
 @router.get("/chat/conversaciones/{id_usuario}")
 def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
-    if current_user.get("rol") != "ADMIN" and current_user.get("rol") != "DOCENTE" and current_user.get("id") != id_usuario:
-        raise HTTPException(status_code=403, detail="No puedes ver perfiles ajenos")
+    ensure_owner_or_roles(current_user, id_usuario, "ADMIN")
 
     # 1. Busca conversaciones donde el usuario participa
     convs = db.query(models.Conversacion).filter(
@@ -762,8 +763,11 @@ def calificar_entrega(id_entrega: int, calificacion: float, retroalimentacion: s
 @router.get("/mis-notas/{id_carga}/{id_alumno}")
 def obtener_mis_notas(id_carga: int, id_alumno: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
-    if current_user.get("rol") != "ALUMNO":
-        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+    # Solo el propio alumno (o un ADMIN) puede consultar estas notas
+    if current_user.get("rol") != "ADMIN":
+        alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_alumno == id_alumno).first()
+        if not alumno or alumno.id_usuario != current_user.get("id"):
+            raise HTTPException(status_code=403, detail="No puedes ver las notas de otro alumno")
     # Trae todas las tareas del curso
     tareas = db.query(models.Tarea).filter(models.Tarea.id_carga_academica == id_carga).all()
     
@@ -1038,9 +1042,8 @@ def obtener_detalle_tarea_estudiante(id_tarea: int, id_usuario: int, db: Session
 @router.get("/api/dashboard/estudiante/{id_usuario}")
 def obtener_dashboard_estudiante(id_usuario: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
-    # VALIDACIÓN DE ROL
-    if current_user.get("rol") != "ALUMNO" and current_user.get("id") != id_usuario:
-        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    # VALIDACIÓN DE ROL: solo el propio alumno (o un ADMIN) ve su dashboard
+    ensure_owner_or_roles(current_user, id_usuario, "ADMIN")
     # --- NUEVO: Buscar el año escolar activo ---
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
     

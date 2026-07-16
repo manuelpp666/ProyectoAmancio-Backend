@@ -13,7 +13,7 @@ from app.modules.academic import models as academic_models
 from app.modules.users.alumno import models as user_models
 from app.modules.enrollment import models as er_models
 from .service import FinanceService
-from app.core.util.security import get_current_user
+from app.core.util.security import get_current_user, require_roles, require_service_key
 
 
 router = APIRouter(prefix="/finance", tags=["Finanzas"])
@@ -234,7 +234,7 @@ def listar_mis_solicitudes(id_alumno: int, db: Session = Depends(get_db), curren
 # ==========================================
 
 @router.post("/pagos/", response_model=schemas.PagoResponse)
-def crear_pago(pago: schemas.PagoCreate, db: Session = Depends(get_db)):
+def crear_pago(pago: schemas.PagoCreate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     nuevo = models.Pago(**pago.model_dump())
     db.add(nuevo)
     db.commit()
@@ -242,9 +242,10 @@ def crear_pago(pago: schemas.PagoCreate, db: Session = Depends(get_db)):
     return nuevo
 
 @router.get("/bcp/consulta/{dni}", response_model=List[schemas.PagoResponse])
-def consulta_deuda_bcp(dni: str, db: Session = Depends(get_db)):
+def consulta_deuda_bcp(dni: str, db: Session = Depends(get_db), _svc: bool = Depends(require_service_key("BCP_API_KEY"))):
     """
     Endpoint que consumirá el BCP para consultar deudas pendientes por DNI.
+    Requiere la credencial de servicio del banco (header X-Service-Key).
     """
     # Buscamos al alumno por DNI
     alumno = db.query(user_models.Alumno).filter(user_models.Alumno.dni == dni).first()
@@ -260,14 +261,17 @@ def consulta_deuda_bcp(dni: str, db: Session = Depends(get_db)):
     return pagos_pendientes
 
 @router.post("/bcp/notificar-pago")
-def notificar_pago_bcp(payload: schemas.BCPWebhookPayload, db: Session = Depends(get_db)):
+def notificar_pago_bcp(payload: schemas.BCPWebhookPayload, db: Session = Depends(get_db), _svc: bool = Depends(require_service_key("BCP_API_KEY"))):
     """
     Recibe la confirmación de pago del banco y actualiza el sistema.
+    Requiere la credencial de servicio del banco (header X-Service-Key).
     """
     # 1. Buscar el pago en la base de datos (puedes buscar por ID o por concepto/alumno)
     # Aquí usamos una lógica simplificada: buscar el pago pendiente más antiguo del alumno
     alumno = db.query(user_models.Alumno).filter(user_models.Alumno.dni == payload.dni_alumno).first()
-    
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
     pago = db.query(models.Pago).filter(
         models.Pago.id_alumno == alumno.id_alumno,
         models.Pago.estado == "PENDIENTE",
@@ -296,7 +300,7 @@ def notificar_pago_bcp(payload: schemas.BCPWebhookPayload, db: Session = Depends
 
 
 @router.patch("/admin/actualizar-precios-masivo")
-def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: Session = Depends(get_db)):
+def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     """
     Actualiza el costo de las pensiones restantes del año escolar activo.
     """
@@ -327,7 +331,7 @@ def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: S
     return {"message": f"Se actualizaron {count} registros de pago para el ciclo {anio_id}"}
 
 @router.get("/solicitudes/pendientes-revision", response_model=List[schemas.SolicitudTramiteResponse])
-def listar_solicitudes_pendientes(db: Session = Depends(get_db)):
+def listar_solicitudes_pendientes(db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     """Lista las solicitudes que ya fueron pagadas pero aún no tienen dictamen administrativo."""
     return db.query(models.SolicitudTramite)\
              .options(joinedload(models.SolicitudTramite.tipo),
@@ -341,7 +345,8 @@ def listar_pagos_filtrados(
     tipo: str = None,
     anio: int = None,
     criterio_fecha: str = "pago",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_roles("ADMIN"))
 ):
     # Aplicar moras antes de devolver resultados para que los montos estén siempre actualizados
     FinanceService.aplicar_moras_pagos_vencidos(db)
@@ -377,7 +382,7 @@ def listar_pagos_filtrados(
     return query.order_by(orden).all()
 
 @router.patch("/solicitudes/{id}/dictamen")
-def dar_dictamen_solicitud(id: int, payload: schemas.DictamenSolicitud, db: Session = Depends(get_db)):
+def dar_dictamen_solicitud(id: int, payload: schemas.DictamenSolicitud, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     solicitud = db.query(models.SolicitudTramite).filter(models.SolicitudTramite.id_solicitud_tramite == id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
@@ -402,7 +407,7 @@ NOMBRES_MES = ["", "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
                "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"]
 
 @router.patch("/pagos/{id_pago}/confirmar-manual")
-def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
+def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
 
     if not pago:
@@ -509,7 +514,7 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db)):
     return {"message": "Pago confirmado y pagos del año generados."}
 
 @router.put("/pagos/{id_pago}", response_model=schemas.PagoResponse)
-def editar_pago(id_pago: int, pago_data: schemas.PagoUpdate, db: Session = Depends(get_db)):
+def editar_pago(id_pago: int, pago_data: schemas.PagoUpdate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     if not pago:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
@@ -520,7 +525,7 @@ def editar_pago(id_pago: int, pago_data: schemas.PagoUpdate, db: Session = Depen
     return pago
 
 @router.delete("/pagos/{id_pago}")
-def eliminar_pago(id_pago: int, db: Session = Depends(get_db)):
+def eliminar_pago(id_pago: int, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     if not pago:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
@@ -529,8 +534,18 @@ def eliminar_pago(id_pago: int, db: Session = Depends(get_db)):
     return {"message": "Pago eliminado correctamente"}
 
 
+def _validar_acceso_pagos_alumno(id_alumno: int, current_user: dict, db: Session):
+    """ADMIN puede ver los pagos de cualquier alumno; un ALUMNO solo los suyos."""
+    if current_user.get("rol") == "ADMIN":
+        return
+    alumno = db.query(user_models.Alumno).filter(user_models.Alumno.id_alumno == id_alumno).first()
+    if not alumno or alumno.id_usuario != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="No puedes ver los pagos de otro alumno")
+
+
 @router.get("/alumnos/{id_alumno}/deudas")
-def obtener_deudas_alumno(id_alumno: int, db: Session = Depends(get_db)):
+def obtener_deudas_alumno(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    _validar_acceso_pagos_alumno(id_alumno, current_user, db)
     deudas = db.query(models.Pago).filter(
         models.Pago.id_alumno == id_alumno,
         models.Pago.estado == "PENDIENTE"
@@ -539,7 +554,8 @@ def obtener_deudas_alumno(id_alumno: int, db: Session = Depends(get_db)):
 
 # Para el historial (Pagados)
 @router.get("/pagos/historial/{id_alumno}")
-def obtener_historial_alumno(id_alumno: int, db: Session = Depends(get_db)):
+def obtener_historial_alumno(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    _validar_acceso_pagos_alumno(id_alumno, current_user, db)
     return db.query(models.Pago).filter(
         models.Pago.id_alumno == id_alumno,
         models.Pago.estado == "PAGADO" # Asumo que cambias el estado a 'PAGADO' tras el pago
@@ -547,7 +563,7 @@ def obtener_historial_alumno(id_alumno: int, db: Session = Depends(get_db)):
 
 #-- Estos deberiamos ajustarlos en el cron pero nse como hacerlo :C
 @router.post("/tareas/generar-pensiones-mes")
-def ejecutar_generacion_mensual(db: Session = Depends(get_db)):
+def ejecutar_generacion_mensual(db: Session = Depends(get_db), _svc: bool = Depends(require_service_key("CRON_SECRET"))):
     """
     Endpoint diseñado para ser llamado por un Cron Job el día 1 de cada mes.
     """
@@ -585,7 +601,7 @@ def ejecutar_generacion_mensual(db: Session = Depends(get_db)):
     return {"message": f"Proceso completado. Se revisaron {total_generados} alumnos."}
 
 @router.post("/tareas/actualizar-moras")
-def actualizar_moras_diarias(db: Session = Depends(get_db)):
+def actualizar_moras_diarias(db: Session = Depends(get_db), _svc: bool = Depends(require_service_key("CRON_SECRET"))):
     """
     Endpoint para ser llamado por un Cron Job diariamente a medianoche.
     """
@@ -596,11 +612,11 @@ def actualizar_moras_diarias(db: Session = Depends(get_db)):
 # 5. TIPOS DE PAGO (Pensiones, Matriculas, etc)
 # ==========================================
 @router.get("/tipos-pago", response_model=List[schemas.TipoPagoResponse])
-def listar_tipos_pago(db: Session = Depends(get_db)):
+def listar_tipos_pago(db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     return db.query(models.TipoPago).all()
 
 @router.post("/tipos-pago", response_model=schemas.TipoPagoResponse)
-def crear_tipo_pago(tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db)):
+def crear_tipo_pago(tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     nuevo_tipo = models.TipoPago(**tipo.model_dump())
     db.add(nuevo_tipo)
     db.commit()
@@ -608,7 +624,7 @@ def crear_tipo_pago(tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db))
     return nuevo_tipo
 
 @router.put("/tipos-pago/{id}", response_model=schemas.TipoPagoResponse)
-def editar_tipo_pago(id: int, tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db)):
+def editar_tipo_pago(id: int, tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     db_tipo = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == id).first()
     if not db_tipo:
         raise HTTPException(status_code=404, detail="Tipo de pago no encontrado")
@@ -621,7 +637,7 @@ def editar_tipo_pago(id: int, tipo: schemas.TipoPagoCreate, db: Session = Depend
     return db_tipo
 
 @router.delete("/tipos-pago/{id}")
-def eliminar_tipo_pago(id: int, db: Session = Depends(get_db)):
+def eliminar_tipo_pago(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     db_tipo = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == id).first()
     if not db_tipo:
         raise HTTPException(status_code=404, detail="No encontrado")

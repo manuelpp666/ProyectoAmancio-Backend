@@ -5,12 +5,17 @@ from . import models, schemas
 from app.core.util.jwt import create_access_token
 from app.core.util.password import get_password_hash
 from app.core.util.password import verify_password
+from app.core.util.security import require_roles
 from app.modules.personal.models import Administrador
 
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
 
 @router.post("/", response_model=schemas.UsuarioResponse)
-def crear_usuario(usuario: schemas.UsuarioCreate, db: Session = Depends(get_db)):
+def crear_usuario(
+    usuario: schemas.UsuarioCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
     db_user = models.Usuario(
         username=usuario.username,
         password_hash=get_password_hash(usuario.password), # Hashear password

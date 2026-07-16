@@ -32,10 +32,6 @@ def postular_alumno(datos: schemas.AdmisionPostulante, db: Session = Depends(get
         db.flush() # Para obtener nuevo_familiar.id_familiar
 
         # 3. Relación y Parentesco
-        # Si te sale NULL, asegúrate que 'datos.tipo_parentesco' sea lo que viene del Front
-        # Imprimimos para depurar en tu consola de VS Code/Terminal
-        print(f"DEBUG PARENTESCO RECIBIDO: {datos.tipo_parentesco}")
-
         # Normalizamos a Mayúsculas
         val_parentesco = (datos.tipo_parentesco or "OTRO").upper()
         
@@ -56,9 +52,6 @@ def postular_alumno(datos: schemas.AdmisionPostulante, db: Session = Depends(get
 
     except Exception as e:
         db.rollback()
-        # Loguea el error real en consola para ti
-        print(f"DEBUG ERROR: {e}") 
-        
         # Mensaje amigable para el usuario
         mensaje = "Error interno del servidor"
         if "Duplicate entry" in str(e):

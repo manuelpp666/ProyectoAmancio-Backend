@@ -216,6 +216,10 @@ async def change_password(data: ChangePasswordSchema, db: Session = Depends(get_
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
+    # 1b. Solo puedes cambiar TU propia contraseña (evita cambiar la de otro usuario)
+    if user.id_usuario != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="No puedes cambiar la contraseña de otro usuario")
+
     # 2. Verificar si la contraseña actual es correcta
     if not verify_password(data.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")

@@ -416,7 +416,9 @@ def buscar_alumnos(
     return alumnos
 
 @router.get("/alumno/{id_alumno}/familiares")
-def obtener_familiares_alumno(id_alumno: int, db: Session = Depends(get_db)):
+def obtener_familiares_alumno(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") not in ("AUXILIAR", "PSICOLOGO", "ADMIN"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver esta información")
     """Devuelve los familiares vinculados a un alumno específico."""
     # Nota: Asegúrate de tener importado RelacionFamiliar y Familiar
     relaciones = db.query(RelacionFamiliar).filter(

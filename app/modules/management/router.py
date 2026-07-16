@@ -13,7 +13,7 @@ from app.modules.management import models as models_mn
 from app.modules.finance import models as models_fi
 from app.modules.web import models as models_web
 from app.modules.behavior import models as models_psi
-from app.core.util.security import get_current_user
+from app.core.util.security import get_current_user, ensure_owner_or_roles
 from . import models, schemas
 
 
@@ -62,6 +62,8 @@ def registrar_nota(nota: schemas.NotaCreate, db: Session = Depends(get_db), curr
 # --- Asistencia ---
 @router.post("/asistencia/", response_model=schemas.AsistenciaResponse)
 def registrar_asistencia(asistencia: schemas.AsistenciaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") not in ("AUXILIAR", "DOCENTE", "ADMIN"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para registrar asistencia")
     nueva = models.Asistencia(**asistencia.model_dump())
     db.add(nueva)
     db.commit()
@@ -77,11 +79,10 @@ def obtener_cursos_estudiante(
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     
-    if current_user.get("rol") != "ALUMNO" and current_user.get("id") != id_usuario:
-        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    ensure_owner_or_roles(current_user, id_usuario, "ADMIN")
     # 1. Buscar al alumno
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
-    
+
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
 
@@ -484,11 +485,10 @@ def obtener_cursos_docente(
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     
-    if current_user.get("rol") != "DOCENTE" and current_user.get("id") != id_usuario:
-        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    ensure_owner_or_roles(current_user, id_usuario, "ADMIN")
     # 1. Buscar al docente asociado al usuario
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
-    
+
     if not docente:
         raise HTTPException(status_code=404, detail="Docente no encontrado")
 
@@ -540,8 +540,7 @@ def obtener_cursos_docente(
 @router.get("/mis-cursos-docente-dashboard/{id_usuario}")
 def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
-    if current_user.get("rol") != "DOCENTE" and current_user.get("id") != id_usuario:
-        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    ensure_owner_or_roles(current_user, id_usuario, "ADMIN")
     # 1. Buscar año activo automáticamente
     anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
     if not anio_activo:
@@ -582,8 +581,7 @@ def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_
 @router.get("/resumen-docente/{id_usuario}")
 def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
-    if current_user.get("rol") != "DOCENTE" and current_user.get("id") != id_usuario:
-        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    ensure_owner_or_roles(current_user, id_usuario, "ADMIN")
     # 1. Obtener ID del docente
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
     if not docente:
