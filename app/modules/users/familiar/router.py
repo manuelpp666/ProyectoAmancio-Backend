@@ -9,6 +9,14 @@ router = APIRouter(prefix="/familiares", tags=["Familiares"])
 @router.post("/", response_model=schemas.FamiliarResponse)
 def crear_familiar(familiar: schemas.FamiliarCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) ):
+
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos para registrar familiares")
+
+    existente = db.query(models.Familiar).filter(models.Familiar.dni == familiar.dni).first()
+    if existente:
+        raise HTTPException(status_code=400, detail="Ya existe un familiar registrado con ese DNI.")
+
     nuevo = models.Familiar(**familiar.model_dump())
     db.add(nuevo)
     db.commit()

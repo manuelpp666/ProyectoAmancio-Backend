@@ -1,28 +1,129 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import extract,func
+from sqlalchemy import extract, func, or_
 from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
-from app.modules.users.familiar.models import Familiar
-from app.modules.users.relacion_familiar.models import RelacionFamiliar
 from app.core.util.security import get_current_user
 from . import models, schemas
+from .constants import PUNTAJE_MAXIMO, UMBRAL_OBSERVACION, UMBRAL_CRITICO, calcular_puntaje, estado_visual
 from typing import Optional
 from datetime import datetime
 
 router = APIRouter(prefix="/conducta", tags=["Conducta y Psicología"])
 
+def _puntos_perdidos_anio(db: Session, id_alumno: int, anio: int) -> int:
+    """Suma de puntos descontados al alumno en el año indicado."""
+    total = db.query(func.coalesce(func.sum(models.NivelConducta.puntos), 0)).select_from(
+        models.ReporteConducta
+    ).join(models.NivelConducta).filter(
+        models.ReporteConducta.id_alumno == id_alumno,
+        extract('year', models.ReporteConducta.fecha_reporte) == anio
+    ).scalar()
+    return int(total or 0)
+
+def _serializar_reporte(r: "models.ReporteConducta") -> dict:
+    """Forma común de un reporte para las bandejas del auxiliar y del psicólogo."""
+    return {
+        "id_reporte": r.id_reporte,
+        "fecha": r.fecha_reporte.strftime("%d/%m/%Y %H:%M"),
+        "alumno": f"{r.alumno.nombres} {r.alumno.apellidos}" if r.alumno else "Alumno no disponible",
+        "dni": r.alumno.dni if r.alumno else None,
+        "falta": r.nivel.nombre if r.nivel else "Falta registrada",
+        "tipo_falta": r.nivel.tipo.nombre if r.nivel and r.nivel.tipo else None,
+        "puntos": r.nivel.puntos if r.nivel else 0,
+        "medida": r.nivel.medida if r.nivel else None,
+        "cambio_ie": bool(r.nivel.cambio_ie) if r.nivel else False,
+        "descripcion": r.descripcion_suceso,
+    }
+
+def _tiene_cambio_ie(db: Session, id_alumno: int, anio: int) -> bool:
+    """True si el alumno tiene registrada en el año una falta que amerita cambio de I.E."""
+    return db.query(models.ReporteConducta.id_reporte).join(models.NivelConducta).filter(
+        models.ReporteConducta.id_alumno == id_alumno,
+        extract('year', models.ReporteConducta.fecha_reporte) == anio,
+        models.NivelConducta.cambio_ie.is_(True)
+    ).first() is not None
+
 @router.post("/reportes/")
 def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "AUXILIAR":
-        raise HTTPException(status_code=403, detail="No puedes ver esta información")
-    nuevo_reporte = models.ReporteConducta(**reporte.model_dump())
+        raise HTTPException(status_code=403, detail="No tienes permisos para registrar reportes")
+
+    alumno = db.query(alumno_models.Alumno).filter(
+        alumno_models.Alumno.id_alumno == reporte.id_alumno
+    ).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
+    nivel = db.query(models.NivelConducta).filter(
+        models.NivelConducta.id_nivel_conducta == reporte.id_nivel_conducta
+    ).first()
+    if not nivel:
+        raise HTTPException(status_code=404, detail="El tipo de falta seleccionado no existe")
+
+    nuevo_reporte = models.ReporteConducta(
+        id_alumno=reporte.id_alumno,
+        id_nivel_conducta=reporte.id_nivel_conducta,
+        descripcion_suceso=reporte.descripcion_suceso,
+    )
     db.add(nuevo_reporte)
     db.commit()
     db.refresh(nuevo_reporte)
-    
-    # Opcional: Podrías devolver un mensaje si el alumno bajó de cierto puntaje
-    return {"mensaje": "Reporte registrado con éxito", "data": nuevo_reporte}
+
+    # Estado resultante del alumno, para que el auxiliar vea el impacto de inmediato
+    anio_actual = datetime.now().year
+    puntaje = calcular_puntaje(_puntos_perdidos_anio(db, reporte.id_alumno, anio_actual))
+    requiere_cambio_ie = bool(nivel.cambio_ie) or _tiene_cambio_ie(db, reporte.id_alumno, anio_actual)
+
+    return {
+        "mensaje": "Reporte registrado con éxito",
+        "id_reporte": nuevo_reporte.id_reporte,
+        "falta": nivel.nombre,
+        "puntos_descontados": nivel.puntos,
+        "medida": nivel.medida,
+        "alumno": f"{alumno.nombres} {alumno.apellidos}",
+        "puntaje_actual": puntaje,
+        "estado_color": estado_visual(puntaje, requiere_cambio_ie),
+        "requiere_cambio_ie": requiere_cambio_ie,
+    }
+
+@router.get("/reportes/")
+def listar_reportes(
+    q: Optional[str] = Query(None, max_length=60),
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Reportes de conducta, del más reciente al más antiguo.
+    Sirve tanto a la bandeja del auxiliar (limit bajo) como al historial
+    completo, que filtra por alumno con `q` y pagina con `offset`.
+    """
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver los reportes")
+
+    consulta = db.query(models.ReporteConducta).join(
+        alumno_models.Alumno, models.ReporteConducta.id_alumno == alumno_models.Alumno.id_alumno
+    )
+
+    # Búsqueda por alumno (nombre, apellido o DNI)
+    termino = (q or "").strip()
+    if len(termino) >= 3:
+        patron = f"%{termino}%"
+        consulta = consulta.filter(or_(
+            alumno_models.Alumno.nombres.ilike(patron),
+            alumno_models.Alumno.apellidos.ilike(patron),
+            alumno_models.Alumno.dni.ilike(patron),
+        ))
+
+    total = consulta.count()
+    reportes = consulta.order_by(
+        models.ReporteConducta.fecha_reporte.desc(),
+        models.ReporteConducta.id_reporte.desc()
+    ).offset(offset).limit(limit).all()
+
+    return {"total": total, "items": [_serializar_reporte(r) for r in reportes]}
 
 
 @router.get("/usuario/{id_usuario}/estado-conducta")
@@ -52,15 +153,10 @@ def obtener_estado_por_usuario(
         extract('year', models.ReporteConducta.fecha_reporte) == anio
     ).order_by(models.ReporteConducta.fecha_reporte.desc()).all()
 
-    # 4. Cálculo de puntos
-    # Usamos r.nivel.puntos porque en tus inserts pusiste valores positivos (3, 2, 8, etc.)
+    # 4. Cálculo de puntos (los niveles guardan el descuento en positivo)
     total_penalizacion = sum(r.nivel.puntos for r in reportes if r.nivel)
-    puntaje_actual = max(0, 100 - total_penalizacion)
-
-    # 5. Lógica de colores (Semáforo)
-    estado_visual = "Verde"
-    if puntaje_actual < 40: estado_visual = "Rojo"
-    elif puntaje_actual < 75: estado_visual = "Amarillo"
+    puntaje_actual = calcular_puntaje(total_penalizacion)
+    requiere_cambio_ie = any(r.nivel.cambio_ie for r in reportes if r.nivel)
 
     return {
         "id_usuario": id_usuario,
@@ -68,8 +164,12 @@ def obtener_estado_por_usuario(
         "nombre_alumno": f"{alumno.nombres} {alumno.apellidos}",
         "anio_consultado": anio, # Es bueno devolver qué año se calculó
         "puntaje_actual": puntaje_actual,
-        "porcentaje_progreso": f"{puntaje_actual}%",
-        "estado_color": estado_visual,
+        "puntaje_maximo": PUNTAJE_MAXIMO,
+        "umbral_observacion": UMBRAL_OBSERVACION,
+        "umbral_critico": UMBRAL_CRITICO,
+        "porcentaje_progreso": f"{round(puntaje_actual * 100 / PUNTAJE_MAXIMO)}%",
+        "estado_color": estado_visual(puntaje_actual, requiere_cambio_ie),
+        "requiere_cambio_ie": requiere_cambio_ie,
         "total_reportes": len(reportes),
         "historial": [
             {
@@ -77,6 +177,8 @@ def obtener_estado_por_usuario(
                 "fecha": r.fecha_reporte.strftime("%d/%m/%Y"),
                 "motivo": r.nivel.nombre if r.nivel else "Falta registrada",
                 "puntos_restados": r.nivel.puntos if r.nivel else 0,
+                "medida": r.nivel.medida if r.nivel else None,
+                "cambio_ie": bool(r.nivel.cambio_ie) if r.nivel else False,
                 "nota_reglamento": r.descripcion_suceso or (r.nivel.descripcion if r.nivel else "")
             } for r in reportes
         ]
@@ -108,8 +210,23 @@ def obtener_anios_con_reportes(id_usuario: int, db: Session = Depends(get_db), c
 
 @router.get("/niveles-conducta")
 def listar_niveles_disponibles(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    # Esto servirá para llenar el select/dropdown en la interfaz del auxiliar
-    return db.query(models.NivelConducta).all()
+    # Llena el selector de faltas en la interfaz del auxiliar, agrupado por el
+    # tipo de falta (criterio del Reglamento Interno).
+    niveles = db.query(models.NivelConducta).join(models.TipoFalta).order_by(
+        models.TipoFalta.id_tipo_falta, models.NivelConducta.id_nivel_conducta
+    ).all()
+    return [
+        {
+            "id_nivel_conducta": n.id_nivel_conducta,
+            "nombre": n.nombre,
+            "id_tipo_falta": n.id_tipo_falta,
+            "tipo_falta": n.tipo.nombre,
+            "puntos": n.puntos,
+            "medida": n.medida,
+            "cambio_ie": bool(n.cambio_ie),
+            "descripcion": n.descripcion,
+        } for n in niveles
+    ]
 
 # --- ENDPOINTS DE CITAS PSICOLÓGICAS ---
 
@@ -284,8 +401,8 @@ def reprogramar_cita(
     cita = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_cita == id_cita).first()
     if not cita:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
-    
-    if cita.estado != "PROGRAMADA":
+
+    if cita.estado not in ("PROGRAMADA", "REPROGRAMADA"):
         raise HTTPException(status_code=400, detail="Solo se pueden reprogramar citas pendientes")
 
     # Validación 1: Fecha en el futuro
@@ -336,7 +453,11 @@ def obtener_agenda_dia(fecha: Optional[datetime] = None, db: Session = Depends(g
         models.CitaPsicologia.estado,
         (alumno_models.Alumno.nombres + " " + alumno_models.Alumno.apellidos).label("alumno_nombre")
     ).join(alumno_models.Alumno, models.CitaPsicologia.id_alumno == alumno_models.Alumno.id_alumno)\
-     .filter(func.date(models.CitaPsicologia.fecha_cita) == fecha.date())\
+     .filter(
+        func.date(models.CitaPsicologia.fecha_cita) == fecha.date(),
+        models.CitaPsicologia.estado != "CANCELADA"
+     )\
+     .order_by(models.CitaPsicologia.fecha_cita.asc())\
      .all()
 
     return [
@@ -350,21 +471,92 @@ def obtener_agenda_dia(fecha: Optional[datetime] = None, db: Session = Depends(g
         } for c in citas
     ]
 
+@router.get("/citas/alumnos-recientes")
+def obtener_alumnos_citas_recientes(
+    limit: int = Query(8, ge=1, le=50),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Alumnos con los que se ha tenido una cita recientemente (más reciente primero).
+    Alimenta la lista por defecto del apartado de Seguimiento de Alumnos."""
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="Acceso denegado")
+
+    # Última fecha de cita por alumno
+    ultimas = db.query(
+        models.CitaPsicologia.id_alumno.label("id_alumno"),
+        func.max(models.CitaPsicologia.fecha_cita).label("ultima_cita")
+    ).group_by(models.CitaPsicologia.id_alumno).subquery()
+
+    filas = db.query(
+        alumno_models.Alumno.id_alumno,
+        alumno_models.Alumno.nombres,
+        alumno_models.Alumno.apellidos,
+        alumno_models.Alumno.dni,
+        ultimas.c.ultima_cita
+    ).join(ultimas, alumno_models.Alumno.id_alumno == ultimas.c.id_alumno)\
+     .order_by(ultimas.c.ultima_cita.desc())\
+     .limit(limit).all()
+
+    return [
+        {
+            "id_alumno": f.id_alumno,
+            "nombres": f.nombres,
+            "apellidos": f.apellidos,
+            "dni": f.dni,
+            "ultima_cita": f.ultima_cita,
+        }
+        for f in filas
+    ]
+
+
 @router.get("/seguimiento/{id_alumno}")
 def obtener_seguimiento_detallado(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Vista integral para el psicólogo: Reportes de conducta + Citas pasadas."""
     if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
         raise HTTPException(status_code=403, detail="Acceso denegado")
 
-    reportes = db.query(models.ReporteConducta).filter(models.ReporteConducta.id_alumno == id_alumno).all()
-    citas = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_alumno == id_alumno).all()
+    reportes = db.query(models.ReporteConducta)\
+        .filter(models.ReporteConducta.id_alumno == id_alumno)\
+        .order_by(models.ReporteConducta.fecha_reporte.desc()).all()
+    citas = db.query(models.CitaPsicologia)\
+        .filter(models.CitaPsicologia.id_alumno == id_alumno)\
+        .order_by(models.CitaPsicologia.fecha_cita.desc()).all()
+
+    # Resolvemos el nivel de conducta para que el front muestre información
+    # legible (nombre de la falta, tipo, puntos y medida) en vez del id crudo.
+    historial_conducta = [
+        {
+            "id_reporte": r.id_reporte,
+            "fecha_reporte": r.fecha_reporte,
+            "descripcion": r.descripcion_suceso,
+            "id_nivel_conducta": r.id_nivel_conducta,
+            "nivel_nombre": r.nivel.nombre if r.nivel else None,
+            "tipo_falta": r.nivel.tipo.nombre if r.nivel and r.nivel.tipo else None,
+            "puntos": r.nivel.puntos if r.nivel else None,
+            "medida": r.nivel.medida if r.nivel else None,
+            "cambio_ie": bool(r.nivel.cambio_ie) if r.nivel else False,
+        }
+        for r in reportes
+    ]
+
+    historial_psicologico = [
+        {
+            "id_cita": c.id_cita,
+            "motivo": c.motivo,
+            "fecha_cita": c.fecha_cita,
+            "estado": c.estado,
+            "resultado_reunion": c.resultado_reunion,
+        }
+        for c in citas
+    ]
 
     return {
         "id_alumno": id_alumno,
         "total_incidentes": len(reportes),
         "total_citas": len(citas),
-        "historial_conducta": reportes,
-        "historial_psicologico": citas
+        "historial_conducta": historial_conducta,
+        "historial_psicologico": historial_psicologico
     }
 
 @router.get("/resumen-psicologo")
@@ -374,7 +566,7 @@ def obtener_resumen_dashboard(db: Session = Depends(get_db), current_user: dict 
     
     anio_actual = datetime.now().year
 
-    # Lógica para contar alumnos en riesgo (< 75 puntos)
+    # Lógica para contar alumnos en riesgo (bajo el umbral de observación)
     # 1. Obtener puntos perdidos por cada alumno en el año actual
     subquery = db.query(
         models.ReporteConducta.id_alumno,
@@ -383,10 +575,15 @@ def obtener_resumen_dashboard(db: Session = Depends(get_db), current_user: dict 
         extract('year', models.ReporteConducta.fecha_reporte) == anio_actual
     ).group_by(models.ReporteConducta.id_alumno).subquery()
 
-    # 2. Contar cuántos tienen un puntaje (100 - perdido) menor a 75
-    conteo_riesgo = db.query(subquery).filter(
-        (100 - subquery.c.total_perdido) < 75
-    ).count()
+    # 2. Contar en riesgo: bajo el umbral de observación o con falta de cambio de I.E.
+    bajo_umbral = db.query(subquery.c.id_alumno).filter(
+        (PUNTAJE_MAXIMO - subquery.c.total_perdido) < UMBRAL_OBSERVACION
+    ).all()
+    con_cambio_ie = db.query(models.ReporteConducta.id_alumno).join(models.NivelConducta).filter(
+        extract('year', models.ReporteConducta.fecha_reporte) == anio_actual,
+        models.NivelConducta.cambio_ie.is_(True)
+    ).distinct().all()
+    conteo_riesgo = len({fila[0] for fila in bajo_umbral} | {fila[0] for fila in con_cambio_ie})
     atenciones_mes = db.query(models.CitaPsicologia).filter(
         extract('month', models.CitaPsicologia.fecha_cita) == datetime.now().month,
         models.CitaPsicologia.estado == "COMPLETADA"
@@ -401,11 +598,13 @@ def obtener_resumen_dashboard(db: Session = Depends(get_db), current_user: dict 
 #Búsqueda de alumnos
 @router.get("/buscar-alumnos")
 def buscar_alumnos(
-    q: str = Query(..., min_length=3), 
+    q: str = Query(..., min_length=3),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
     """Busca alumnos matriculados por nombre o DNI (Escalable)."""
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO", "ADMIN"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para buscar alumnos")
     # Filtramos solo alumnos con matrícula activa (asumiendo que existe la tabla matricula)
     alumnos = db.query(alumno_models.Alumno).filter(
         (alumno_models.Alumno.nombres.ilike(f"%{q}%")) | 
@@ -415,27 +614,9 @@ def buscar_alumnos(
     
     return alumnos
 
-@router.get("/alumno/{id_alumno}/familiares")
-def obtener_familiares_alumno(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    if current_user.get("rol") not in ("AUXILIAR", "PSICOLOGO", "ADMIN"):
-        raise HTTPException(status_code=403, detail="No tienes permisos para ver esta información")
-    """Devuelve los familiares vinculados a un alumno específico."""
-    # Nota: Asegúrate de tener importado RelacionFamiliar y Familiar
-    relaciones = db.query(RelacionFamiliar).filter(
-        RelacionFamiliar.id_alumno == id_alumno
-    ).all()
-    
-    return [
-        {
-            "id_familiar": r.familiar.id_familiar,
-            "nombre": f"{r.familiar.nombres} {r.familiar.apellidos}",
-            "parentesco": r.tipo_parentesco
-        } for r in relaciones
-    ]
-
 @router.get("/alumnos-en-riesgo")
 def obtener_alumnos_riesgo(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Devuelve la lista de alumnos que requieren atención psicológica por baja conducta (< 75 pts)."""
+    """Devuelve la lista de alumnos que requieren atención psicológica por baja conducta."""
     if current_user.get("rol") not in ["PSICOLOGO", "AUXILIAR"]:
         raise HTTPException(status_code=403, detail="No autorizado")
 
@@ -450,25 +631,30 @@ def obtener_alumnos_riesgo(db: Session = Depends(get_db), current_user: dict = D
         extract('year', models.ReporteConducta.fecha_reporte) == anio_actual
     ).all()
 
-    # 2. Agrupar puntos por alumno
+    # 2. Agrupar puntos por alumno y detectar faltas con cambio de I.E.
     puntajes_alumnos = {}
+    alumnos_cambio_ie = set()
     for r in reportes:
         if r.alumno not in puntajes_alumnos:
             puntajes_alumnos[r.alumno] = 0
         if r.nivel:
             puntajes_alumnos[r.alumno] += r.nivel.puntos
+            if r.nivel.cambio_ie:
+                alumnos_cambio_ie.add(r.alumno.id_alumno)
 
-    # 3. Filtrar los que están en riesgo
+    # 3. Filtrar los que están en riesgo (bajo umbral o con falta de cambio de I.E.)
     alumnos_riesgo = []
     for alumno, puntos_perdidos in puntajes_alumnos.items():
-        puntaje_actual = max(0, 100 - puntos_perdidos)
-        if puntaje_actual < 75:
+        puntaje_actual = calcular_puntaje(puntos_perdidos)
+        cambio_ie = alumno.id_alumno in alumnos_cambio_ie
+        if puntaje_actual < UMBRAL_OBSERVACION or cambio_ie:
             alumnos_riesgo.append({
                 "id_alumno": alumno.id_alumno,
                 "nombre_completo": f"{alumno.nombres} {alumno.apellidos}",
                 "dni": alumno.dni,
                 "puntaje": puntaje_actual,
-                "estado": "Rojo" if puntaje_actual < 40 else "Amarillo"
+                "estado": estado_visual(puntaje_actual, cambio_ie),
+                "requiere_cambio_ie": cambio_ie
             })
 
     # Ordenar priorizando los casos más críticos (menor puntaje)

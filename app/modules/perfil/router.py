@@ -9,8 +9,7 @@ from app.modules.personal.models import Administrador
 from app.modules.personal.models import Auxiliar 
 from app.modules.personal.models import Psicologo
 from app.modules.users.alumno.models import Alumno
-from app.modules.users.familiar.models import Familiar
-from app.modules.users.relacion_familiar.models import RelacionFamiliar
+from app.modules.users.familiar import services as familiar_services
 from app.core.util.security import get_current_user
 from .schemas import (
     ChangePasswordSchema, ActualizarPerfilAdminSchema,
@@ -36,18 +35,7 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), curr
         if not alumno:
             raise HTTPException(status_code=404, detail="Datos de alumno no encontrados")
         
-        familiares_data = []
-        if hasattr(alumno, 'familiares_rel') and alumno.familiares_rel:
-            for rel in alumno.familiares_rel:
-                fam = rel.familiar
-                familiares_data.append({
-                    "id_familiar": fam.id_familiar,
-                    "nombre": f"{fam.nombres} {fam.apellidos}",
-                    "parentesco": rel.tipo_parentesco,
-                    "dni": fam.dni,
-                    "telefono": fam.telefono,
-                    "email": fam.email
-                })
+        familiares_data = familiar_services.listar_familiares_de_alumno(db, alumno.id_alumno)
 
         return {"rol": user.rol, "datos": alumno, "familiares": familiares_data}
 
@@ -165,47 +153,13 @@ def agregar_familiar_alumno(
 ):
     alumno = _get_alumno_propio(username, current_user, db)
 
-    # Reutilizar el familiar si ya existe por DNI, o crearlo
-    familiar = db.query(Familiar).filter(Familiar.dni == data.dni).first()
-    if not familiar:
-        familiar = Familiar(
-            dni=data.dni,
-            nombres=data.nombres.strip(),
-            apellidos=data.apellidos.strip(),
-            telefono=data.telefono,
-            email=data.email,
-            direccion=data.direccion,
-            tipo_parentesco=data.tipo_parentesco
-        )
-        db.add(familiar)
-        db.flush()  # Para obtener id_familiar
-
-    # Evitar duplicar la relación con este alumno
-    existe = db.query(RelacionFamiliar).filter(
-        RelacionFamiliar.id_alumno == alumno.id_alumno,
-        RelacionFamiliar.id_familiar == familiar.id_familiar
-    ).first()
-    if existe:
-        raise HTTPException(status_code=400, detail="Este familiar ya está registrado para ti")
-
-    rel = RelacionFamiliar(
-        id_alumno=alumno.id_alumno,
-        id_familiar=familiar.id_familiar,
-        tipo_parentesco=data.tipo_parentesco
-    )
-    db.add(rel)
+    familiar = familiar_services.vincular_familiar(db, alumno.id_alumno, data)
     db.commit()
+    db.refresh(familiar)
 
     return {
         "message": "Familiar agregado con éxito",
-        "familiar": {
-            "id_familiar": familiar.id_familiar,
-            "nombre": f"{familiar.nombres} {familiar.apellidos}",
-            "parentesco": data.tipo_parentesco,
-            "dni": familiar.dni,
-            "telefono": familiar.telefono,
-            "email": familiar.email
-        }
+        "familiar": familiar_services.serializar_familiar(familiar, data.tipo_parentesco),
     }
 
 

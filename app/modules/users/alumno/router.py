@@ -6,12 +6,26 @@ from app.db.database import get_db
 from app.modules.users.models import Usuario 
 from app.modules.users.relacion_familiar.models import RelacionFamiliar
 from app.modules.users import models as al_models
+from app.modules.users.familiar.models import Familiar
+from app.modules.users.familiar import schemas as familiar_schemas
+from app.modules.users.familiar import services as familiar_services
+from app.modules.academic.models import Grado
 from app.modules.finance import models as finance_models
 from app.core.util.security import get_current_user
 from app.core.util.password import get_password_hash
 from . import models, schemas # Asegúrate de importar los modelos correctos
 
 router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
+
+def _solo_admin(current_user: dict):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos para esta operación")
+
+def _obtener_alumno(db: Session, id_alumno: int) -> models.Alumno:
+    alumno = db.query(models.Alumno).filter(models.Alumno.id_alumno == id_alumno).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+    return alumno
 
 #---- Sacar id_usuario de id_alumno
 # En tu router de alumnos o académico
@@ -35,6 +49,56 @@ def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db),
     db.commit()
     db.refresh(db_alumno)
     return db_alumno
+
+@router.post("/con-familiar", status_code=status.HTTP_201_CREATED)
+def crear_alumno_con_familiar(
+    datos: schemas.AlumnoConFamiliarCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Alta de un estudiante junto a su apoderado, en una sola transacción.
+    Si falla cualquier paso no se guarda nada: evita dejar al alumno sin
+    apoderado o al apoderado sin vincular.
+    """
+    _solo_admin(current_user)
+
+    dni_ocupado = db.query(models.Alumno).filter(models.Alumno.dni == datos.alumno.dni).first()
+    if dni_ocupado:
+        raise HTTPException(status_code=400, detail="Ya existe un alumno registrado con ese DNI.")
+
+    if datos.alumno.id_grado_ingreso is not None:
+        grado = db.query(Grado).filter(Grado.id_grado == datos.alumno.id_grado_ingreso).first()
+        if not grado:
+            raise HTTPException(status_code=400, detail="El grado seleccionado no existe.")
+
+    try:
+        nuevo_alumno = models.Alumno(**datos.alumno.model_dump())
+        db.add(nuevo_alumno)
+        db.flush()  # Para obtener id_alumno
+
+        # Si el apoderado no indicó dirección, hereda la del alumno (regla de admisión)
+        familiar_data = datos.familiar.model_copy()
+        if not (familiar_data.direccion or "").strip():
+            familiar_data.direccion = datos.alumno.direccion
+
+        # vincular_familiar reutiliza el apoderado si ya existe por DNI (caso hermanos)
+        familiar = familiar_services.vincular_familiar(db, nuevo_alumno.id_alumno, familiar_data)
+        db.commit()
+        db.refresh(nuevo_alumno)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error en crear_alumno_con_familiar: {e}")
+        raise HTTPException(status_code=400, detail="No se pudo registrar al estudiante. Verifique los datos.")
+
+    return {
+        "message": "Estudiante y apoderado registrados correctamente",
+        "id_alumno": nuevo_alumno.id_alumno,
+        "familiar": familiar_services.serializar_familiar(familiar, datos.familiar.tipo_parentesco),
+    }
 
 @router.get("/", response_model=List[schemas.AlumnoResponse])
 def listar_alumnos(dni: str = None, db: Session = Depends(get_db),
@@ -197,18 +261,7 @@ def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db), cu
     if alumno.grado_ingreso:
         nombre_grado = f"{alumno.grado_ingreso.nombre} ({alumno.grado_ingreso.nivel.nombre})"
 
-    familiares_data = []
-    for rel in alumno.familiares_rel:
-        fam = rel.familiar
-        familiares_data.append({
-            "id_familiar": fam.id_familiar,
-            "nombre": f"{fam.nombres} {fam.apellidos}",
-            "dni": fam.dni,
-            "parentesco": rel.tipo_parentesco,
-            "telefono": fam.telefono,
-            "email": fam.email,
-            "direccion": fam.direccion
-        })
+    familiares_data = familiar_services.listar_familiares_de_alumno(db, alumno.id_alumno)
 
     return {
         "alumno": {
@@ -227,3 +280,151 @@ def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db), cu
         },
         "familiares": familiares_data
     }
+
+
+# ---------- EDICIÓN DEL ALUMNO Y SU USUARIO (PANEL DEL ADMINISTRADOR) ----------
+
+@router.put("/{id_alumno}")
+def editar_alumno(
+    id_alumno: int,
+    data: schemas.AlumnoUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Actualiza los datos del alumno y las credenciales de su usuario."""
+    _solo_admin(current_user)
+    alumno = _obtener_alumno(db, id_alumno)
+
+    usuario = None
+    if alumno.id_usuario:
+        usuario = db.query(Usuario).filter(Usuario.id_usuario == alumno.id_usuario).first()
+
+    if data.dni != alumno.dni:
+        # El DNI identifica al alumno y es además su nombre de usuario
+        dni_ocupado = db.query(models.Alumno).filter(
+            models.Alumno.dni == data.dni,
+            models.Alumno.id_alumno != id_alumno
+        ).first()
+        if dni_ocupado:
+            raise HTTPException(status_code=400, detail="Ya existe otro alumno con ese DNI.")
+
+        if usuario:
+            # El nombre de usuario sigue al DNI (la convención del sistema)
+            username_ocupado = db.query(Usuario).filter(
+                Usuario.username == data.dni,
+                Usuario.id_usuario != usuario.id_usuario
+            ).first()
+            if username_ocupado:
+                raise HTTPException(status_code=400, detail="Ya existe un usuario con ese DNI.")
+            usuario.username = data.dni
+
+    if data.id_grado_ingreso is not None:
+        grado = db.query(Grado).filter(Grado.id_grado == data.id_grado_ingreso).first()
+        if not grado:
+            raise HTTPException(status_code=400, detail="El grado seleccionado no existe.")
+
+    # Campos propios del alumno (estado_ingreso y credenciales quedan fuera)
+    campos_alumno = data.model_dump(exclude={"password", "activo", "estado_ingreso"})
+    for campo, valor in campos_alumno.items():
+        setattr(alumno, campo, valor)
+
+    if usuario:
+        if data.password:
+            usuario.password_hash = get_password_hash(data.password)
+        if data.activo is not None:
+            usuario.activo = data.activo
+
+    db.commit()
+    db.refresh(alumno)
+
+    return {
+        "message": "Estudiante actualizado con éxito",
+        "id_alumno": alumno.id_alumno,
+        "username": usuario.username if usuario else None,
+        "activo": usuario.activo if usuario else None,
+    }
+
+
+# ---------- FAMILIARES DEL ALUMNO ----------
+
+@router.get("/{id_alumno}/familiares")
+def listar_familiares_alumno(
+    id_alumno: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Familiares vinculados a un alumno. Lo consultan admisión, psicología y auxiliares."""
+    if current_user.get("rol") not in ("ADMIN", "PSICOLOGO", "AUXILIAR"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver esta información")
+    _obtener_alumno(db, id_alumno)
+    return familiar_services.listar_familiares_de_alumno(db, id_alumno)
+
+
+@router.post("/{id_alumno}/familiares")
+def agregar_familiar_alumno(
+    id_alumno: int,
+    data: familiar_schemas.FamiliarAlumnoCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _solo_admin(current_user)
+    _obtener_alumno(db, id_alumno)
+
+    familiar = familiar_services.vincular_familiar(db, id_alumno, data)
+    db.commit()
+    db.refresh(familiar)
+    return {
+        "message": "Familiar agregado con éxito",
+        "familiar": familiar_services.serializar_familiar(familiar, data.tipo_parentesco),
+    }
+
+
+@router.put("/{id_alumno}/familiares/{id_familiar}")
+def editar_familiar_alumno(
+    id_alumno: int,
+    id_familiar: int,
+    data: familiar_schemas.FamiliarUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _solo_admin(current_user)
+    relacion = familiar_services.obtener_relacion(db, id_alumno, id_familiar)
+    familiar = relacion.familiar
+
+    if data.dni != familiar.dni:
+        dni_ocupado = db.query(Familiar).filter(
+            Familiar.dni == data.dni,
+            Familiar.id_familiar != id_familiar
+        ).first()
+        if dni_ocupado:
+            raise HTTPException(status_code=400, detail="Ya existe otro familiar con ese DNI.")
+
+    familiar.dni = data.dni
+    familiar.nombres = data.nombres.strip()
+    familiar.apellidos = data.apellidos.strip()
+    familiar.telefono = data.telefono
+    familiar.email = data.email
+    familiar.direccion = data.direccion
+    familiar.tipo_parentesco = data.tipo_parentesco
+    # El parentesco vive en la relación: es lo que leen los demás módulos
+    relacion.tipo_parentesco = data.tipo_parentesco
+
+    db.commit()
+    db.refresh(familiar)
+    return {
+        "message": "Familiar actualizado con éxito",
+        "familiar": familiar_services.serializar_familiar(familiar, relacion.tipo_parentesco),
+    }
+
+
+@router.delete("/{id_alumno}/familiares/{id_familiar}")
+def eliminar_familiar_alumno(
+    id_alumno: int,
+    id_familiar: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _solo_admin(current_user)
+    mensaje = familiar_services.desvincular_familiar(db, id_alumno, id_familiar)
+    db.commit()
+    return {"message": mensaje}

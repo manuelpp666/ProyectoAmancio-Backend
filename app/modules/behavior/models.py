@@ -1,14 +1,23 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, Boolean
 from sqlalchemy.sql import func
 from app.db.database import Base
 from sqlalchemy.orm import relationship
 
+class TipoFalta(Base):
+    __tablename__ = "tipo_falta"
+    id_tipo_falta = Column(Integer, primary_key=True)
+    nombre = Column(String(60), nullable=False, unique=True)
+
 class NivelConducta(Base):
     __tablename__ = "nivel_conducta"
     id_nivel_conducta = Column(Integer, primary_key=True)
-    nombre = Column(String(50), nullable=False)
+    nombre = Column(String(120), nullable=False)
+    id_tipo_falta = Column(Integer, ForeignKey("tipo_falta.id_tipo_falta"), nullable=False)
     puntos = Column(Integer, nullable=False)
+    medida = Column(String(60))  # sanción del reglamento (p. ej. "Acto reflexivo por 3 días")
+    cambio_ie = Column(Boolean, nullable=False, default=False)  # la falta amerita cambio de I.E.
     descripcion = Column(Text)
+    tipo = relationship("TipoFalta")
 
 class ReporteConducta(Base):
     __tablename__ = "reporte_conducta"
@@ -20,6 +29,7 @@ class ReporteConducta(Base):
     descripcion_suceso = Column(Text, nullable=False)
     estado = Column(String(20), default='REGISTRADO')
     nivel = relationship("NivelConducta")
+    alumno = relationship("Alumno")
 
 class CitaPsicologia(Base):
     __tablename__ = "cita_psicologia"
