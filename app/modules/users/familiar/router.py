@@ -17,7 +17,9 @@ def crear_familiar(familiar: schemas.FamiliarCreate, db: Session = Depends(get_d
     if existente:
         raise HTTPException(status_code=400, detail="Ya existe un familiar registrado con ese DNI.")
 
-    nuevo = models.Familiar(**familiar.model_dump())
+    datos = familiar.model_dump()
+    datos.pop("tipo_parentesco", None)  # el parentesco vive en relacion_familiar
+    nuevo = models.Familiar(**datos)
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)

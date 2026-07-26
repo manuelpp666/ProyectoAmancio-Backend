@@ -38,6 +38,21 @@ class AsistenciaResponse(AsistenciaCreate):
     id_asistencia: int
     model_config = ConfigDict(from_attributes=True)
 
+# --- Registro de asistencia por lotes (toda una sección de una vez) ---
+class AsistenciaLoteItem(BaseModel):
+    id_matricula: int
+    estado: Literal["P", "T", "F", "J"]
+    observacion: Optional[str] = Field(None, max_length=255)
+
+class AsistenciaLoteCreate(BaseModel):
+    fecha: date
+    registros: list[AsistenciaLoteItem]
+
+class AsistenciaLoteResponse(BaseModel):
+    guardados: int
+    correos_encolados: int
+    notificar: bool = True
+
 
 class CursoEstudianteResponse(BaseModel):
     id_curso: int

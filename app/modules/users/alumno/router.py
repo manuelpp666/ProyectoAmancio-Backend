@@ -405,7 +405,6 @@ def editar_familiar_alumno(
     familiar.telefono = data.telefono
     familiar.email = data.email
     familiar.direccion = data.direccion
-    familiar.tipo_parentesco = data.tipo_parentesco
     # El parentesco vive en la relación: es lo que leen los demás módulos
     relacion.tipo_parentesco = data.tipo_parentesco
 

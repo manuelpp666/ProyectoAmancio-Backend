@@ -20,7 +20,7 @@ def serializar_familiar(familiar: Familiar, parentesco: str | None = None) -> di
         "nombres": familiar.nombres,
         "apellidos": familiar.apellidos,
         "dni": familiar.dni,
-        "parentesco": parentesco if parentesco is not None else familiar.tipo_parentesco,
+        "parentesco": parentesco or "",
         "telefono": familiar.telefono,
         "email": familiar.email,
         "direccion": familiar.direccion,
@@ -59,7 +59,6 @@ def vincular_familiar(db: Session, id_alumno: int, data) -> Familiar:
             telefono=data.telefono,
             email=data.email,
             direccion=data.direccion,
-            tipo_parentesco=data.tipo_parentesco,
         )
         db.add(familiar)
         db.flush()  # Para obtener id_familiar

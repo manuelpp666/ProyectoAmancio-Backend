@@ -12,6 +12,7 @@ class Familiar(Base):
     telefono = Column(String(9))
     email = Column(String(150))
     direccion = Column(String(300))
-    tipo_parentesco = Column(String(50))
-     
+    # Nota: el parentesco vive en relacion_familiar (una persona puede tener
+    # distinto parentesco con cada alumno). Aquí se eliminó por redundancia.
+
     alumnos_rel = relationship("RelacionFamiliar", back_populates="familiar")

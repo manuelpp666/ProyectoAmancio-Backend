@@ -7,11 +7,13 @@ class FamiliarBase(BaseModel):
     apellidos: str = Field(..., max_length=250)
     email: Optional[EmailStr] = None
     direccion: Optional[str] = Field(None, max_length=300)
-    tipo_parentesco: Optional[str] = Field(None, max_length=50)
 
 class FamiliarCreate(FamiliarBase):
     dni: DniStr
     telefono: TelefonoStr
+    # El parentesco es un dato de entrada que se guarda en relacion_familiar,
+    # no en la tabla familiar (ver models.Familiar).
+    tipo_parentesco: Optional[str] = Field(None, max_length=50)
 
 class FamiliarAlumnoCreate(FamiliarCreate):
     """Familiar vinculado a un alumno: el parentesco es obligatorio."""

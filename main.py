@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text  # Para escribir SQL puro
@@ -47,6 +48,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Compresión GZip para respuestas JSON grandes (listas de matrículas, noticias, etc.)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # 1. Esto detecta la carpeta 'Backend' (donde está main.py)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

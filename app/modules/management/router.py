@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import List
@@ -13,7 +13,9 @@ from app.modules.management import models as models_mn
 from app.modules.finance import models as models_fi
 from app.modules.web import models as models_web
 from app.modules.behavior import models as models_psi
+from app.modules.users.relacion_familiar import models as models_rel
 from app.core.util.security import get_current_user, ensure_owner_or_roles
+from .service import enviar_notificaciones_asistencia
 from . import models, schemas
 
 
@@ -70,6 +72,98 @@ def registrar_asistencia(asistencia: schemas.AsistenciaCreate, db: Session = Dep
     db.refresh(nueva)
     return nueva
 
+
+@router.post("/asistencia/lote", response_model=schemas.AsistenciaLoteResponse)
+def registrar_asistencia_lote(
+    payload: schemas.AsistenciaLoteCreate,
+    background_tasks: BackgroundTasks,
+    notificar: bool = True,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Registra la asistencia de toda una sección en una sola operación y, de forma
+    opcional (notificar=True), envía en segundo plano un correo de confirmación
+    a cada apoderado de cada alumno.
+    """
+    if current_user.get("rol") not in ("AUXILIAR", "DOCENTE", "ADMIN"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para registrar asistencia")
+
+    if not payload.registros:
+        return schemas.AsistenciaLoteResponse(guardados=0, correos_encolados=0, notificar=notificar)
+
+    ids = [r.id_matricula for r in payload.registros]
+
+    # UPSERT: si ya existe un registro para esa matrícula+fecha, se actualiza;
+    # así reguardar la asistencia del día no genera duplicados.
+    existentes = (
+        db.query(models.Asistencia)
+        .filter(models.Asistencia.id_matricula.in_(ids), models.Asistencia.fecha == payload.fecha)
+        .all()
+    )
+    mapa_existentes = {a.id_matricula: a for a in existentes}
+
+    for r in payload.registros:
+        actual = mapa_existentes.get(r.id_matricula)
+        if actual:
+            actual.estado = r.estado
+            actual.observacion = r.observacion or ""
+        else:
+            db.add(models.Asistencia(
+                id_matricula=r.id_matricula,
+                fecha=payload.fecha,
+                estado=r.estado,
+                observacion=r.observacion or "",
+            ))
+    db.commit()
+
+    # --- Preparar notificaciones a los apoderados ---
+    notificaciones: list[dict] = []
+    if notificar:
+        matriculas = (
+            db.query(models_en.Matricula)
+            .options(joinedload(models_en.Matricula.alumno))
+            .filter(models_en.Matricula.id_matricula.in_(ids))
+            .all()
+        )
+        mapa_matriculas = {m.id_matricula: m for m in matriculas}
+        alumno_ids = [m.alumno.id_alumno for m in matriculas if m.alumno]
+
+        # Correos de los apoderados agrupados por alumno
+        emails_por_alumno: dict[int, list[str]] = {}
+        if alumno_ids:
+            relaciones = (
+                db.query(models_rel.RelacionFamiliar)
+                .options(joinedload(models_rel.RelacionFamiliar.familiar))
+                .filter(models_rel.RelacionFamiliar.id_alumno.in_(alumno_ids))
+                .all()
+            )
+            for rel in relaciones:
+                email = rel.familiar.email if rel.familiar else None
+                if email:
+                    emails_por_alumno.setdefault(rel.id_alumno, []).append(email)
+
+        for r in payload.registros:
+            m = mapa_matriculas.get(r.id_matricula)
+            if not m or not m.alumno:
+                continue
+            nombre = f"{m.alumno.nombres} {m.alumno.apellidos}"
+            for email in emails_por_alumno.get(m.alumno.id_alumno, []):
+                notificaciones.append({
+                    "email": email,
+                    "alumno_nombre": nombre,
+                    "estado": r.estado,
+                    "fecha": payload.fecha,
+                })
+
+        if notificaciones:
+            background_tasks.add_task(enviar_notificaciones_asistencia, notificaciones)
+
+    return schemas.AsistenciaLoteResponse(
+        guardados=len(payload.registros),
+        correos_encolados=len(notificaciones),
+        notificar=notificar,
+    )
 
 
 @router.get("/mis-cursos/{id_usuario}", response_model=List[schemas.CursoEstudianteResponse])
@@ -635,6 +729,7 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
     if docente:
         entregas = db.query(models_vr.EntregaTarea).join(models_vr.Tarea).join(models_mn.CargaAcademica)\
+            .options(joinedload(models_vr.EntregaTarea.alumno), joinedload(models_vr.EntregaTarea.tarea))\
             .filter(
                 models_mn.CargaAcademica.id_docente == docente.id_docente,
                 models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
@@ -651,6 +746,7 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
     alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
     if alumno:
         calificaciones = db.query(models_vr.EntregaTarea)\
+            .options(joinedload(models_vr.EntregaTarea.tarea))\
             .filter(models_vr.EntregaTarea.id_alumno == alumno.id_alumno, models_vr.EntregaTarea.calificacion != None)\
             .order_by(models_vr.EntregaTarea.fecha_envio.desc()).limit(3).all()
         
@@ -737,6 +833,77 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
     notificaciones.sort(key=lambda n: n.get("fecha") or "", reverse=True)
 
     return {"notificaciones": notificaciones}
+
+
+@router.get("/notificaciones/{id_usuario}/contador")
+def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """
+    Versión ligera de las notificaciones: devuelve solo el total, usando COUNT()
+    en vez de cargar los objetos y construir los mensajes. Pensada para el polling
+    del header (cada 60s por usuario). Respeta los mismos topes que la lista
+    completa para que el badge quede consistente.
+    """
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes ver perfiles ajenos")
+
+    anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
+    if not anio_activo:
+        return {"total": 0}
+
+    total = 0
+    rol = current_user.get("rol")
+
+    # --- A. DOCENTE: entregas (tope 5) ---
+    docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
+    if docente:
+        c = db.query(models_vr.EntregaTarea).join(models_vr.Tarea).join(models_mn.CargaAcademica).filter(
+            models_mn.CargaAcademica.id_docente == docente.id_docente,
+            models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
+        ).count()
+        total += min(c, 5)
+
+    # --- B. ALUMNO: notas (tope 3), deudas, citas de hoy ---
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if alumno:
+        total += min(db.query(models_vr.EntregaTarea).filter(
+            models_vr.EntregaTarea.id_alumno == alumno.id_alumno,
+            models_vr.EntregaTarea.calificacion != None
+        ).count(), 3)
+
+        total += db.query(models_fi.Pago).join(models_en.Matricula).filter(
+            models_fi.Pago.id_alumno == alumno.id_alumno,
+            models_fi.Pago.estado == "PENDIENTE",
+            models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
+        ).count()
+
+        inicio_hoy = datetime.combine(date.today(), datetime.min.time())
+        fin_hoy = datetime.combine(date.today(), datetime.max.time())
+        total += db.query(models_psi.CitaPsicologia).filter(
+            models_psi.CitaPsicologia.id_alumno == alumno.id_alumno,
+            models_psi.CitaPsicologia.estado == "PROGRAMADA",
+            models_psi.CitaPsicologia.fecha_cita >= inicio_hoy,
+            models_psi.CitaPsicologia.fecha_cita <= fin_hoy
+        ).count()
+
+    # --- C. EVENTOS (todos para ADMIN, próximos 3 para el resto) ---
+    q_eventos = db.query(models_web.Evento).filter(models_web.Evento.activo == True)
+    if rol == "ADMIN":
+        total += q_eventos.count()
+    else:
+        total += min(q_eventos.filter(models_web.Evento.fecha_inicio >= date.today()).count(), 3)
+
+    # --- D. MENSAJES NO LEÍDOS (tope 10) ---
+    total += min(db.query(models_vr.Mensaje).join(
+        models_vr.Conversacion,
+        models_vr.Mensaje.id_conversacion == models_vr.Conversacion.id_conversacion
+    ).filter(
+        models_vr.Mensaje.remitente_id != id_usuario,
+        models_vr.Mensaje.leido == False,
+        (models_vr.Conversacion.usuario1_id == id_usuario) |
+        (models_vr.Conversacion.usuario2_id == id_usuario)
+    ).count(), 10)
+
+    return {"total": total}
 
 
 # --- NUEVO: GESTIÓN DE TUTORES DE SECCIÓN ---

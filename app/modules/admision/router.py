@@ -26,7 +26,8 @@ def postular_alumno(datos: schemas.AdmisionPostulante, db: Session = Depends(get
         if not datos_fam.get("direccion") or datos_fam["direccion"].strip() == "":
             datos_fam["direccion"] = datos.alumno.direccion
             
-        datos_fam["tipo_parentesco"] = datos.tipo_parentesco
+        # El parentesco vive en la relación (relacion_familiar), no en el familiar.
+        datos_fam.pop("tipo_parentesco", None)
         nuevo_familiar = Familiar(**datos_fam)
         db.add(nuevo_familiar)
         db.flush() # Para obtener nuevo_familiar.id_familiar
