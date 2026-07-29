@@ -27,10 +27,12 @@ class TipoTramite(Base):
     alcance = Column(String(20), default="TODOS") # E.g., 'PRIMARIA', 'SECUNDARIA'
     grados_permitidos = Column(String(255), nullable=True)
     periodo_academico = Column(
-            Enum(PeriodoAcademico), 
+            Enum(PeriodoAcademico),
             default=PeriodoAcademico.REGULAR,
             nullable=False
         )
+    # Días que tiene el alumno para pagar el trámite desde que lo solicita.
+    dias_vencimiento = Column(Integer, nullable=False, server_default="15")
     # Relación: Un tipo de trámite puede estar en muchas solicitudes
     solicitudes = relationship("SolicitudTramite", back_populates="tipo")
 

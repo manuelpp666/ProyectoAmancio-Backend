@@ -4,7 +4,7 @@ import shutil
 import calendar
 from fastapi import APIRouter, Depends, HTTPException, status,File, UploadFile, Form
 from sqlalchemy.orm import Session, joinedload
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List,Optional
 from sqlalchemy import func, extract
 from app.db.database import get_db
@@ -198,20 +198,27 @@ async def solicitar_tramite(
     db.commit()
     db.refresh(nueva_solicitud)
 
-    # 5. Lógica de Pago (Se mantiene igual)
+    # 5. Lógica de Pago: genera el pago pendiente del trámite
     if tipo_tramite.costo > 0:
         alumno = db.query(user_models.Alumno).filter(user_models.Alumno.id_alumno == id_alumno).first()
         id_usuario_responsable = alumno.id_usuario if alumno else None
+
+        # El período puede ser un Enum; usamos su .value para el concepto legible
+        periodo = getattr(tipo_tramite.periodo_academico, "value", tipo_tramite.periodo_academico)
 
         nuevo_pago = models.Pago(
             id_usuario=id_usuario_responsable,
             id_alumno=id_alumno,
             id_solicitud_tramite=nueva_solicitud.id_solicitud_tramite,
-            concepto=f"TRAMITE: {tipo_tramite.nombre} ({tipo_tramite.periodo_academico})",
+            concepto=f"TRAMITE: {tipo_tramite.nombre} ({periodo})",
             monto=tipo_tramite.costo,
             monto_total=tipo_tramite.costo,
             estado="PENDIENTE",
-            mora=0
+            mora=0,
+            # Fecha de vencimiento para que el pago sea visible en Recaudación
+            # y pueda confirmarse (además del pago vía BCP). El plazo lo define
+            # el tipo de trámite (dias_vencimiento).
+            fecha_vencimiento=date.today() + timedelta(days=(tipo_tramite.dias_vencimiento or 15)),
         )
         db.add(nuevo_pago)
         db.commit()

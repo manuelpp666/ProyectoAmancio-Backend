@@ -20,6 +20,8 @@ class TipoTramiteBase(BaseModel):
     grados_permitidos: Optional[str] = None
     activo: bool = True
     periodo_academico: PeriodoAcademicoSchema = PeriodoAcademicoSchema.REGULAR
+    # Días que tiene el alumno para pagar el trámite desde que lo solicita
+    dias_vencimiento: int = Field(default=15, ge=1, le=365)
 
 class TipoTramiteCreate(TipoTramiteBase):
     pass
@@ -43,6 +45,7 @@ class SolicitudTramiteCreate(SolicitudTramiteBase):
 class AlumnoSimpleResponse(BaseModel):
     id_alumno: int
     nombres: str
+    apellidos: str
     dni: str
     model_config = ConfigDict(from_attributes=True)
 
