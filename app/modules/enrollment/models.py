@@ -15,6 +15,8 @@ class Matricula(Base):
     fecha_matricula = Column(DateTime, default=func.now())
     estado = Column(String(20), default="MATRICULADO")
     tipo_matricula = Column(String(20), default="REGULAR")
+    # NORMAL / CONDICIONADA / REPITE — resultado de la evaluación de fin de año
+    condicion = Column(String(20), nullable=True, default="NORMAL")
 
     # --- RELACIONES ---
     alumno = relationship("app.modules.users.alumno.models.Alumno")

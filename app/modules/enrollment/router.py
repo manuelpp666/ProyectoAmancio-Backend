@@ -141,14 +141,24 @@ def _info_renovacion(db: Session, id_usuario: int):
     except ValueError:
         raise HTTPException(status_code=400, detail="No se pudo calcular el próximo año escolar")
 
+    # --- Situación académica del año de origen (repite / requiere nivelación) ---
+    from app.modules.verano import service as verano_service
+    evaluacion = verano_service.ultima_evaluacion(db, alumno.id_alumno, anio_activo.id_anio_escolar)
+    condicion_academica = evaluacion.resultado if evaluacion else None
+    repite = bool(evaluacion and evaluacion.resultado == "REPITE")
+
     grado_destino = None
     egresa = False
     if matricula and matricula.grado:
-        siguiente = _calcular_siguiente_grado(db, matricula.grado)
-        if siguiente:
-            grado_destino = siguiente.nombre
+        if repite:
+            # Repite el año: se queda en el mismo grado
+            grado_destino = matricula.grado.nombre
         else:
-            egresa = True
+            siguiente = _calcular_siguiente_grado(db, matricula.grado)
+            if siguiente:
+                grado_destino = siguiente.nombre
+            else:
+                egresa = True
 
     ya_matriculado_destino = db.query(models.Matricula).filter(
         models.Matricula.id_alumno == alumno.id_alumno,
@@ -196,6 +206,8 @@ def _info_renovacion(db: Session, id_usuario: int):
         "anio_destino": anio_destino,
         "grado_destino": grado_destino,
         "egresa": egresa,
+        "repite": repite,
+        "condicion_academica": condicion_academica,
         "ya_matriculado_destino": ya_matriculado_destino,
         "solicitudes": solicitudes,
         "solicitud_en_curso": solicitud_en_curso,
@@ -237,6 +249,8 @@ def obtener_info_renovacion(id_usuario: int, db: Session = Depends(get_db), curr
         "anio_destino": info["anio_destino"],
         "grado_destino": info["grado_destino"],
         "egresa": info["egresa"],
+        "repite": info["repite"],
+        "condicion_academica": info["condicion_academica"],
         "ya_matriculado_destino": info["ya_matriculado_destino"],
         "puede_solicitar": info["puede_solicitar"],
         "inscripcion_estado": info["inscripcion_estado"],
@@ -398,14 +412,28 @@ def decidir_solicitud_renovacion(
             models.Matricula.id_anio_escolar == solicitud.id_anio_escolar_origen
         ).first()
 
+        # Situación académica: repite (mismo grado) o requiere nivelación (condicionada)
+        from app.modules.verano import service as verano_service
+        evaluacion = verano_service.ultima_evaluacion(db, solicitud.id_alumno, solicitud.id_anio_escolar_origen)
+        repite = bool(evaluacion and evaluacion.resultado == "REPITE")
+
         id_grado_destino = None
         tipo_matricula = "REGULAR"
+        condicion_nueva = "NORMAL"
         if mat_origen:
             tipo_matricula = mat_origen.tipo_matricula or "REGULAR"
             if mat_origen.grado:
-                siguiente = _calcular_siguiente_grado(db, mat_origen.grado)
-                if siguiente:
-                    id_grado_destino = siguiente.id_grado
+                if repite:
+                    id_grado_destino = mat_origen.grado.id_grado  # se queda en el mismo grado
+                    condicion_nueva = "REPITE"
+                else:
+                    siguiente = _calcular_siguiente_grado(db, mat_origen.grado)
+                    if siguiente:
+                        id_grado_destino = siguiente.id_grado
+                    # Si no se niveló (aún tiene cursos desaprobados pendientes),
+                    # pasa de año con matrícula condicionada (apoyo adicional).
+                    if verano_service.tiene_desaprobados_pendientes(db, solicitud.id_alumno):
+                        condicion_nueva = "CONDICIONADA"
 
         if not id_grado_destino:
             raise HTTPException(
@@ -419,7 +447,8 @@ def decidir_solicitud_renovacion(
             id_seccion=None,  # El admin asigna la sección luego en 'Asignar Estudiante'
             id_grado=id_grado_destino,
             estado="MATRICULADO",
-            tipo_matricula=tipo_matricula
+            tipo_matricula=tipo_matricula,
+            condicion=condicion_nueva
         )
         db.add(nueva_matricula)
 

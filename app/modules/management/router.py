@@ -771,6 +771,26 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
                 "fecha": d.fecha_vencimiento.isoformat() if d.fecha_vencimiento else None
             })
 
+        # --- Situación académica (nivelación / repitencia) ---
+        from app.modules.verano import models as models_verano
+        evals = db.query(models_verano.EvaluacionFinal).filter(
+            models_verano.EvaluacionFinal.id_alumno == alumno.id_alumno,
+            models_verano.EvaluacionFinal.resultado != "PROMOVIDO"
+        ).order_by(models_verano.EvaluacionFinal.fecha.desc()).limit(2).all()
+        for ev in evals:
+            if ev.resultado == "REPITE":
+                msg = "Repetirás el año académico por desaprobar 4 o más cursos."
+            elif ev.resultado == "REQUIERE_NIVELACION":
+                msg = (f"Tienes {ev.total_desaprobados} curso(s) desaprobado(s). "
+                       "Puedes nivelarlos en el verano desde el apartado de Matrícula.")
+            else:
+                continue
+            notificaciones.append({
+                "tipo": "academico",
+                "mensaje": msg,
+                "fecha": ev.fecha.isoformat() if ev.fecha else None
+            })
+
         # Filtramos por el alumno, estado programado y que la fecha sea hoy
         inicio_hoy = datetime.combine(date.today(), datetime.min.time())
         fin_hoy = datetime.combine(date.today(), datetime.max.time())
@@ -884,6 +904,13 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
             models_psi.CitaPsicologia.fecha_cita >= inicio_hoy,
             models_psi.CitaPsicologia.fecha_cita <= fin_hoy
         ).count()
+
+        # Situación académica (nivelación / repitencia), tope 2
+        from app.modules.verano import models as models_verano
+        total += min(db.query(models_verano.EvaluacionFinal).filter(
+            models_verano.EvaluacionFinal.id_alumno == alumno.id_alumno,
+            models_verano.EvaluacionFinal.resultado != "PROMOVIDO"
+        ).count(), 2)
 
     # --- C. EVENTOS (todos para ADMIN, próximos 3 para el resto) ---
     q_eventos = db.query(models_web.Evento).filter(models_web.Evento.activo == True)

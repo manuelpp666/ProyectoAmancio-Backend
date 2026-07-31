@@ -45,13 +45,27 @@ def listar_tipos_tramite_alumnos(db: Session = Depends(get_db), current_user: di
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
     """
     Lista los tipos de trámite visibles para los alumnos.
-    Filtra automáticamente procesos de Matrícula y Vacante para evitar confusiones.
+    - Filtra automáticamente procesos de Matrícula y Vacante para evitar confusiones.
+    - Filtra por el periodo académico vigente (REGULAR/VERANO) según el año escolar
+      activo; los trámites marcados como 'AMBOS' se muestran siempre. Así, en el ciclo
+      de Verano el alumno solo ve trámites de VERANO (y AMBOS), y viceversa.
     """
-    return db.query(models.TipoTramite).filter(
+    query = db.query(models.TipoTramite).filter(
         models.TipoTramite.activo == True,
         ~models.TipoTramite.nombre.ilike("%VACANTE%"),
         ~models.TipoTramite.nombre.ilike("%MATRICULA%")
-    ).all()
+    )
+
+    # Periodo vigente según el año escolar activo. Si no hay año activo, no filtramos
+    # por periodo para no ocultar todos los trámites entre ciclos.
+    anio_activo = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.activo == True
+    ).first()
+    if anio_activo:
+        periodo_actual = anio_activo.tipo or "REGULAR"
+        query = query.filter(models.TipoTramite.periodo_academico.in_([periodo_actual, "AMBOS"]))
+
+    return query.all()
 
 @router.post("/tramites-tipos/", response_model=schemas.TipoTramiteResponse)
 def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
@@ -302,6 +316,13 @@ def notificar_pago_bcp(payload: schemas.BCPWebhookPayload, db: Session = Depends
         if solicitud:
             solicitud.estado = "PAGADO_PENDIENTE_REV"
 
+    # Admisión a verano si el pago corresponde a una inscripción de verano
+    try:
+        from app.modules.verano import service as verano_service
+        verano_service.procesar_pago_verano(db, pago)
+    except Exception as e:
+        print(f"Error procesando pago de verano {pago.id_pago}: {e}")
+
     db.commit()
     return {"status": "SUCCESS", "message": "Sistema actualizado"}
 
@@ -313,7 +334,7 @@ def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: S
     """
     # 1. Obtener el año escolar actual dinámicamente
     # Suponiendo que tienes un modelo AnioEscolar
-    anio_activo = db.query(academic_models.AnioEscolar).filter(academic_models.AnioEscolar.estado == 'ACTIVO').first()
+    anio_activo = db.query(academic_models.AnioEscolar).filter(academic_models.AnioEscolar.activo == True).first()
     
     if not anio_activo:
         # Fallback al año actual si no hay uno marcado como activo
@@ -516,6 +537,14 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db), current_u
                     estado="PENDIENTE",
                     fecha_vencimiento=fecha_venc_real
                 ))
+
+    # Admisión a verano: si este pago corresponde a una inscripción de verano,
+    # se admite al alumno y se crea su matrícula de verano.
+    try:
+        from app.modules.verano import service as verano_service
+        verano_service.procesar_pago_verano(db, pago)
+    except Exception as e:
+        print(f"Error procesando pago de verano {pago.id_pago}: {e}")
 
     db.commit()
     return {"message": "Pago confirmado y pagos del año generados."}

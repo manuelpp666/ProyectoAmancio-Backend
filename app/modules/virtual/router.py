@@ -635,6 +635,123 @@ def eliminar_material(id_material: int, db: Session = Depends(get_db), current_u
     return {"message": "Material eliminado con éxito"}
 
 
+# =========================================================
+# CLASES VIRTUALES
+# =========================================================
+
+def _drive_url_de_carga(db: Session, id_carga: int) -> str:
+    row = db.query(models.DriveClases).filter(
+        models.DriveClases.id_carga_academica == id_carga
+    ).first()
+    return row.url if row else ""
+
+
+def _serializar_clase(c: "models.ClaseVirtual") -> dict:
+    return {
+        "id_clase_virtual": c.id_clase_virtual,
+        "tema": c.tema,
+        "fecha": c.fecha,
+        "enlace": c.enlace,
+    }
+
+
+@router.get("/clases-virtuales/{id_carga}")
+def listar_clases_virtuales_docente(id_carga: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    clases = db.query(models.ClaseVirtual).filter(
+        models.ClaseVirtual.id_carga_academica == id_carga
+    ).order_by(models.ClaseVirtual.fecha.desc()).all()
+    return {
+        "drive_url": _drive_url_de_carga(db, id_carga),
+        "clases": [_serializar_clase(c) for c in clases],
+    }
+
+
+@router.post("/clases-virtuales", response_model=schemas.ClaseVirtualResponse)
+def crear_clase_virtual(payload: schemas.ClaseVirtualCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+    carga = db.query(models_mn.CargaAcademica).filter(
+        models_mn.CargaAcademica.id_carga_academica == payload.id_carga_academica
+    ).first()
+    if not carga:
+        raise HTTPException(status_code=404, detail="La carga académica no existe.")
+    nueva = models.ClaseVirtual(
+        id_carga_academica=payload.id_carga_academica,
+        tema=(payload.tema or None),
+        fecha=payload.fecha,
+        enlace=payload.enlace,
+    )
+    db.add(nueva)
+    db.commit()
+    db.refresh(nueva)
+    return nueva
+
+
+@router.delete("/clases-virtuales/{id_clase}")
+def eliminar_clase_virtual(id_clase: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+    clase = db.get(models.ClaseVirtual, id_clase)
+    if not clase:
+        raise HTTPException(status_code=404, detail="Clase no encontrada")
+    db.delete(clase)
+    db.commit()
+    return {"message": "Clase eliminada"}
+
+
+@router.put("/clases-virtuales/drive")
+def actualizar_drive_clases(payload: schemas.DriveClasesUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") != "DOCENTE":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+    url = (payload.url or "").strip()
+    row = db.query(models.DriveClases).filter(
+        models.DriveClases.id_carga_academica == payload.id_carga_academica
+    ).first()
+    if not url:
+        if row:
+            db.delete(row)
+            db.commit()
+        return {"drive_url": ""}
+    if row:
+        row.url = url
+    else:
+        row = models.DriveClases(id_carga_academica=payload.id_carga_academica, url=url)
+        db.add(row)
+    db.commit()
+    return {"drive_url": url}
+
+
+@router.get("/clases-virtuales-alumno/{id_curso}/{id_usuario}")
+def listar_clases_virtuales_alumno(id_curso: int, id_usuario: int, anio: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+    matricula = db.query(models_en.Matricula).filter(
+        models_en.Matricula.id_alumno == alumno.id_alumno,
+        models_en.Matricula.id_anio_escolar == anio
+    ).first()
+    if not matricula:
+        return {"drive_url": "", "clases": []}
+    carga = db.query(models_mn.CargaAcademica).filter(
+        models_mn.CargaAcademica.id_curso == id_curso,
+        models_mn.CargaAcademica.id_seccion == matricula.id_seccion,
+        models_mn.CargaAcademica.id_anio_escolar == anio
+    ).first()
+    if not carga:
+        return {"drive_url": "", "clases": []}
+    clases = db.query(models.ClaseVirtual).filter(
+        models.ClaseVirtual.id_carga_academica == carga.id_carga_academica
+    ).order_by(models.ClaseVirtual.fecha.desc()).all()
+    return {
+        "drive_url": _drive_url_de_carga(db, carga.id_carga_academica),
+        "clases": [_serializar_clase(c) for c in clases],
+    }
+
+
 @router.get("/sabana-notas/{id_carga}/{bimestre}", response_model=schemas.SabanaNotasResponse)
 def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "DOCENTE":
@@ -651,6 +768,15 @@ def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get
         models_en.Matricula.id_seccion == carga.id_seccion,
         models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
     ).order_by(models_al.Alumno.apellidos).all()
+
+    # Condición de matrícula por alumno (NORMAL / CONDICIONADA / REPITE)
+    condiciones = {
+        m.id_alumno: m.condicion
+        for m in db.query(models_en.Matricula).filter(
+            models_en.Matricula.id_seccion == carga.id_seccion,
+            models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
+        ).all()
+    }
 
     # 3. Obtener tareas
     tareas = db.query(models.Tarea).filter(
@@ -702,7 +828,8 @@ def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get
             "id_alumno": alumno.id_alumno,
             "nombres_completos": f"{alumno.apellidos}, {alumno.nombres}",
             "notas": dict_notas,
-            "promedio": round(promedio_final, 2)
+            "promedio": round(promedio_final, 2),
+            "condicion": condiciones.get(alumno.id_alumno)
         })
 
     return {

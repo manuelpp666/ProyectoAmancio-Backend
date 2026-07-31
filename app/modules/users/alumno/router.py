@@ -276,7 +276,11 @@ def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db), cu
             "direccion": alumno.direccion,
             "fecha_nacimiento": alumno.fecha_nacimiento.isoformat() if alumno.fecha_nacimiento else None,
             "genero": alumno.genero,
-            "talla_polo": alumno.talla_polo
+            "talla_polo": alumno.talla_polo,
+            "doc_dni_menor": alumno.doc_dni_menor,
+            "doc_dni_apoderado": alumno.doc_dni_apoderado,
+            "doc_fum": alumno.doc_fum,
+            "doc_certificado_estudios": alumno.doc_certificado_estudios,
         },
         "familiares": familiares_data
     }
@@ -323,8 +327,12 @@ def editar_alumno(
         if not grado:
             raise HTTPException(status_code=400, detail="El grado seleccionado no existe.")
 
-    # Campos propios del alumno (estado_ingreso y credenciales quedan fuera)
-    campos_alumno = data.model_dump(exclude={"password", "activo", "estado_ingreso"})
+    # Campos propios del alumno (estado_ingreso, credenciales y documentos de
+    # admisión quedan fuera: la edición del admin no debe borrar los documentos).
+    campos_alumno = data.model_dump(exclude={
+        "password", "activo", "estado_ingreso",
+        "doc_dni_menor", "doc_dni_apoderado", "doc_fum", "doc_certificado_estudios",
+    })
     for campo, valor in campos_alumno.items():
         setattr(alumno, campo, valor)
 

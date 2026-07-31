@@ -56,7 +56,7 @@ class MatriculaBase(BaseModel):
     id_alumno: int
     id_grado: int
     id_seccion: Optional[int] = None
-    tipo_matricula: Literal["REGULAR", "BECADO"] = "REGULAR"
+    tipo_matricula: str = "REGULAR"
 
 class MatriculaCreate(MatriculaBase):
     pass
@@ -64,8 +64,9 @@ class MatriculaCreate(MatriculaBase):
 class MatriculaResponse(MatriculaBase):
     id_matricula: int
     fecha_matricula: datetime
-    estado: Literal["MATRICULADO", "RETIRADO"] = "MATRICULADO"
-    
+    estado: str = "MATRICULADO"
+    condicion: Optional[str] = None  # NORMAL / CONDICIONADA / REPITE
+
     # --- IMPORTANTE: Estos campos anidados son los que faltaban ---
     alumno: Optional[AlumnoResponse] = None
     grado: Optional[GradoResponse] = None

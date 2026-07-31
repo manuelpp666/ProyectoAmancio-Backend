@@ -20,6 +20,11 @@ class Alumno(Base):
     relacion_fraternal = Column(Boolean, default=False)
     estado_ingreso = Column(String(20), default='POSTULANTE')
     motivo_rechazo = Column(Text, nullable=True)
+    # Documentos de admisión (año regular) — URLs de los archivos subidos
+    doc_dni_menor = Column(String(500), nullable=True)
+    doc_dni_apoderado = Column(String(500), nullable=True)
+    doc_fum = Column(String(500), nullable=True)            # Ficha Única de Matrícula
+    doc_certificado_estudios = Column(String(500), nullable=True)
     # Relaciones
     usuario = relationship("Usuario")
     grado_ingreso = relationship("Grado")

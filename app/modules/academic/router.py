@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from app.db.database import get_db
@@ -20,25 +20,62 @@ class EditarAnioRequest(BaseModel):
     tipo: str
 
 # --- AÑO ESCOLAR ---
+def _procesar_cierre_automatico(db: Session, anio_id: str):
+    """Cierre automático de un año que acaba de terminar (por fecha):
+    inhabilita a los docentes del año y ejecuta la evaluación de fin de año
+    (desaprobados / nivelación / repitencia) enviando los correos a los padres."""
+    # 1. Inhabilitar docentes del año
+    docentes_ids = [d[0] for d in db.query(CargaAcademica.id_docente).filter(
+        CargaAcademica.id_anio_escolar == anio_id
+    ).distinct().all()]
+    if docentes_ids:
+        subquery_usuarios = db.query(Docente.id_usuario).filter(Docente.id_docente.in_(docentes_ids))
+        db.query(Usuario).filter(
+            Usuario.id_usuario.in_(subquery_usuarios),
+            Usuario.rol == RolEnum.DOCENTE
+        ).update({Usuario.activo: False}, synchronize_session=False)
+        db.commit()
+
+    # 2. Evaluación de fin de año + correos a los padres
+    from app.modules.verano import service as verano_service
+    resultado = verano_service.evaluar_cierre_anio(db, anio_id)
+    correos = resultado.get("correos", [])
+    if correos:
+        from app.core.util.email import enviar_correos
+        enviar_correos(correos)
+
+
 def actualizar_estado_anios(db: Session):
     """
-    Recorre todos los años y actualiza su estado 'activo'
-    basándose en la fecha actual.
+    Recorre todos los años y actualiza su estado 'activo' según la fecha actual.
+    Cuando un año pasa de activo a inactivo (terminó su periodo), se ejecuta el
+    cierre automático (inhabilitar docentes + evaluación de fin de año).
     """
     hoy = date.today()
     anios = db.query(models.AnioEscolar).all()
     cambios = False
+    recien_cerrados = []
 
     for anio in anios:
         # Lógica: Está activo SI hoy es >= inicio Y hoy <= fin
         deberia_estar_activo = anio.fecha_inicio <= hoy <= anio.fecha_fin
-        
+
         if anio.activo != deberia_estar_activo:
+            # Transición activo -> inactivo = el año acaba de terminar
+            if anio.activo and not deberia_estar_activo:
+                recien_cerrados.append(anio.id_anio_escolar)
             anio.activo = deberia_estar_activo
             cambios = True
-    
+
     if cambios:
         db.commit()
+
+    # Cierre automático de los años que acaban de terminar (idempotente)
+    for anio_id in recien_cerrados:
+        try:
+            _procesar_cierre_automatico(db, anio_id)
+        except Exception as e:
+            print(f"Error en cierre automático del año {anio_id}: {e}")
 
 @router.get("/anios/ultimo", response_model=schemas.AnioEscolarResponse)
 def obtener_ultimo_anio_creado(db: Session = Depends(get_db),
@@ -50,6 +87,51 @@ def obtener_ultimo_anio_creado(db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="No hay años escolares registrados")
         
     return anio
+
+def _generar_estructura_para_anio(db: Session, anio_id: str) -> int:
+    """Crea automáticamente las secciones de un año nuevo.
+    - Si ya tiene secciones, no hace nada.
+    - Si existe un año previo con secciones, replica su estructura (grados + secciones).
+    - Si no hay ningún año previo con secciones, crea una sección 'A' por cada grado.
+    Devuelve cuántas secciones se crearon."""
+    ya_tiene = db.query(models.Seccion).filter_by(id_anio_escolar=anio_id).count()
+    if ya_tiene:
+        return 0
+
+    # Buscar el año más reciente (distinto de este) que tenga secciones, como plantilla
+    plantilla = None
+    otros = db.query(models.AnioEscolar).filter(
+        models.AnioEscolar.id_anio_escolar != anio_id
+    ).order_by(models.AnioEscolar.fecha_inicio.desc()).all()
+    for a in otros:
+        if db.query(models.Seccion).filter_by(id_anio_escolar=a.id_anio_escolar).count() > 0:
+            plantilla = a.id_anio_escolar
+            break
+
+    count = 0
+    if plantilla:
+        for sec in db.query(models.Seccion).filter_by(id_anio_escolar=plantilla).all():
+            db.add(models.Seccion(
+                id_grado=sec.id_grado,
+                id_anio_escolar=anio_id,
+                nombre=sec.nombre,
+                vacantes=sec.vacantes,
+            ))
+            count += 1
+    else:
+        # Sin plantilla: una sección "A" por cada grado existente
+        for grado in db.query(models.Grado).all():
+            db.add(models.Seccion(
+                id_grado=grado.id_grado,
+                id_anio_escolar=anio_id,
+                nombre="A",
+                vacantes=30,
+            ))
+            count += 1
+
+    db.commit()
+    return count
+
 
 @router.post("/anios/", response_model=schemas.AnioEscolarResponse, status_code=status.HTTP_201_CREATED)
 def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
@@ -78,10 +160,16 @@ def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
         db.add(nuevo)
         db.commit()
         db.refresh(nuevo)
-        
+
         # Ejecutamos la revisión general por si hay solapamientos (opcional)
         actualizar_estado_anios(db)
-        
+
+        # Generar automáticamente los grados/secciones del nuevo año
+        try:
+            _generar_estructura_para_anio(db, nuevo.id_anio_escolar)
+        except Exception as e:
+            print(f"Error generando estructura para el año {nuevo.id_anio_escolar}: {e}")
+
         return nuevo
 
     except IntegrityError:
@@ -117,7 +205,20 @@ def editar_anio(anio_id: str, datos: EditarAnioRequest, db: Session = Depends(ge
 
     db.commit()
     actualizar_estado_anios(db)
-    return {"message": "Año académico actualizado correctamente"}
+
+    # Al cambiar las fechas, las pensiones pendientes que quedaron fuera del nuevo
+    # rango de meses ya no tienen sentido: se limpian automáticamente para los
+    # alumnos matriculados en este año (respeta verano y no toca pensiones pagadas).
+    from app.modules.enrollment import models as er_models
+    from app.modules.finance.service import FinanceService
+    ids_alumnos = [row[0] for row in db.query(er_models.Matricula.id_alumno).filter(
+        er_models.Matricula.id_anio_escolar == anio_id
+    ).distinct().all()]
+    eliminadas = 0
+    if ids_alumnos:
+        eliminadas = FinanceService.limpiar_pensiones_fuera_de_rango(db, ids_alumnos=ids_alumnos)
+
+    return {"message": "Año académico actualizado correctamente", "pensiones_fuera_de_rango_eliminadas": eliminadas}
 
 @router.patch("/anios/{anio_id}/inscripciones")
 def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db),
@@ -141,38 +242,9 @@ def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db
     db.commit()
     return {"message": "Fechas de inscripción actualizadas correctamente"}
 
-@router.patch("/anios/{anio_id}/cerrar")
-def cerrar_anio(anio_id: str, db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)):
-    # Esta función ahora sirve para un cierre MANUAL FORZADO antes de tiempo
-    if current_user.get("rol") != "ADMIN":
-        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
-
-    db_anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
-    if not db_anio:
-        raise HTTPException(status_code=404, detail="Año no encontrado")
-    
-    if not db_anio.activo:
-        return {"message": "El año ya estaba cerrado"}
-
-    db_anio.activo = False
-
-    # Lógica de inhabilitar docentes (se mantiene igual)
-    docentes_ids = db.query(CargaAcademica.id_docente).filter(
-        CargaAcademica.id_anio_escolar == anio_id
-    ).distinct().all()
-    
-    ids = [d[0] for d in docentes_ids]
-
-    if ids:
-        subquery_usuarios = db.query(Docente.id_usuario).filter(Docente.id_docente.in_(ids))
-        db.query(Usuario).filter(
-            Usuario.id_usuario.in_(subquery_usuarios),
-            Usuario.rol == RolEnum.DOCENTE 
-        ).update({Usuario.activo: False}, synchronize_session=False)
-
-    db.commit()
-    return {"message": f"Año {anio_id} cerrado manualmente."}
+# NOTA: el cierre de año ya NO es manual. Ocurre automáticamente cuando pasa la
+# fecha de fin del año (ver `actualizar_estado_anios` -> `_procesar_cierre_automatico`),
+# que inhabilita a los docentes y ejecuta la evaluación de fin de año + correos.
 
 @router.post("/anios/copiar-estructura")
 def copiar_estructura(data: schemas.CopiarEstructuraRequest, db: Session = Depends(get_db),
@@ -492,6 +564,46 @@ def listar_cursos(db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     # Puedes agregar joinedload(models.Curso.area) si quieres ver el nombre del área
     return db.query(models.Curso).all()
+
+# Grupos de verano (clave -> etiqueta), en el orden en que se muestran
+GRUPOS_VERANO = [
+    ("PRIM_1_2", "1ro y 2do de Primaria"),
+    ("PRIM_3_4", "3ro y 4to de Primaria"),
+    ("PRIM_5_6", "5to y 6to de Primaria"),
+    ("SEC_1", "1ro de Secundaria"),
+    ("SEC_2", "2do de Secundaria"),
+    ("SEC_3", "3ro de Secundaria"),
+    ("PRE_ACADEMIA", "Pre Academia"),
+]
+
+@router.get("/cursos-verano/")
+def listar_cursos_verano(db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
+    """Cursos de verano organizados por grupo (fijos) + talleres."""
+    fijos = db.query(models.Curso).filter(
+        models.Curso.es_verano == True,          # noqa: E712
+        models.Curso.tipo_verano == "FIJO",
+    ).all()
+    talleres = db.query(models.Curso).filter(
+        models.Curso.es_verano == True,          # noqa: E712
+        models.Curso.tipo_verano == "TALLER",
+    ).all()
+
+    grupos = []
+    for clave, etiqueta in GRUPOS_VERANO:
+        cursos = [
+            {"id_curso": c.id_curso, "nombre": c.nombre, "id_area": c.id_area, "minutos_semanales": c.minutos_semanales}
+            for c in fijos if c.grupo_verano == clave
+        ]
+        grupos.append({"clave": clave, "etiqueta": etiqueta, "cursos": cursos})
+
+    return {
+        "grupos": grupos,
+        "talleres": [
+            {"id_curso": c.id_curso, "nombre": c.nombre, "id_area": c.id_area, "minutos_semanales": c.minutos_semanales}
+            for c in talleres
+        ],
+    }
 
 @router.put("/cursos/{curso_id}", response_model=schemas.CursoResponse)
 def actualizar_curso(curso_id: int, curso_data: schemas.CursoCreate, db: Session = Depends(get_db),

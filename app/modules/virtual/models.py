@@ -29,6 +29,23 @@ class MaterialClase(Base):
     fecha_publicacion = Column(DateTime, server_default=func.now())
 
 
+class ClaseVirtual(Base):
+    __tablename__ = "clase_virtual"
+    id_clase_virtual = Column(Integer, primary_key=True)
+    id_carga_academica = Column(Integer, ForeignKey("carga_academica.id_carga_academica"))
+    tema = Column(String(150), nullable=True)          # Tema/título opcional de la clase
+    fecha = Column(DateTime, nullable=False)           # Fecha (y hora) de la clase
+    enlace = Column(String(500), nullable=False)       # Link de la clase virtual (Meet, Zoom, etc.)
+    fecha_creacion = Column(DateTime, server_default=func.now())
+
+
+class DriveClases(Base):
+    # Un único enlace de Drive por curso (carga académica) con las clases grabadas
+    __tablename__ = "drive_clases"
+    id_carga_academica = Column(Integer, ForeignKey("carga_academica.id_carga_academica"), primary_key=True)
+    url = Column(String(500), nullable=False)
+
+
 class EntregaTarea(Base):
     __tablename__ = "entrega_tarea"
     id_entrega = Column(Integer, primary_key=True)

@@ -134,6 +134,7 @@ class TipoPagoBase(BaseModel):
     mora: Decimal = Decimal('0.00')
     accion_vencimiento: str
     activo: bool = True
+    periodo_academico: PeriodoAcademicoSchema = PeriodoAcademicoSchema.REGULAR
 
     @field_validator('fecha_vencimiento')
     @classmethod

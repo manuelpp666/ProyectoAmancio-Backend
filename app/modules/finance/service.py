@@ -86,6 +86,50 @@ class FinanceService:
     
 
     @staticmethod
+    def limpiar_pensiones_fuera_de_rango(db: Session, ids_alumnos=None):
+        """
+        Elimina las pensiones PENDIENTES cuyo mes cae fuera del rango
+        [mes de inicio, mes de fin] de TODOS los años en los que el alumno está
+        matriculado. Respeta verano (usa la unión de rangos de sus matrículas) y
+        NO toca pensiones ya pagadas. Devuelve la cantidad eliminada.
+        """
+        # Rango de meses (1er día de mes) por año escolar
+        rango_anio = {}
+        for a in db.query(academic_models.AnioEscolar).all():
+            if a.fecha_inicio and a.fecha_fin:
+                rango_anio[a.id_anio_escolar] = (a.fecha_inicio.replace(day=1), a.fecha_fin.replace(day=1))
+
+        # Rango(s) válidos por alumno = unión de sus años matriculados
+        mq = db.query(enrollment_models.Matricula)
+        if ids_alumnos:
+            mq = mq.filter(enrollment_models.Matricula.id_alumno.in_(ids_alumnos))
+        rangos_alumno = {}
+        for m in mq.all():
+            rng = rango_anio.get(m.id_anio_escolar)
+            if rng:
+                rangos_alumno.setdefault(m.id_alumno, []).append(rng)
+
+        pq = db.query(models.Pago).filter(
+            models.Pago.estado == "PENDIENTE",
+            models.Pago.concepto.like("PENSION %")
+        )
+        if ids_alumnos:
+            pq = pq.filter(models.Pago.id_alumno.in_(ids_alumnos))
+
+        eliminadas = 0
+        for p in pq.all():
+            if not p.fecha_vencimiento:
+                continue
+            primero = p.fecha_vencimiento.replace(day=1)
+            rangos = rangos_alumno.get(p.id_alumno, [])
+            if not any(ini <= primero <= fin for (ini, fin) in rangos):
+                db.delete(p)
+                eliminadas += 1
+        if eliminadas:
+            db.commit()
+        return eliminadas
+
+    @staticmethod
     def aplicar_moras_pagos_vencidos(db):
         hoy = date.today()
         # Calculamos la fecha límite (10 días después del vencimiento)

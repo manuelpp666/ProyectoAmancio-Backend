@@ -36,6 +36,22 @@ def smtp_configurado() -> bool:
     return bool(SMTP_USER and SMTP_PASSWORD)
 
 
+def plantilla_institucional(titulo: str, cuerpo_html: str) -> str:
+    """Envuelve un cuerpo HTML en la plantilla institucional (cabecera guinda)."""
+    return f"""
+    <div style="font-family:Arial,sans-serif;color:#333;max-width:600px;margin:auto;border:1px solid #eee;border-radius:12px;overflow:hidden">
+      <div style="background:#701C32;color:#fff;padding:20px 24px">
+        <h2 style="margin:0;font-size:18px">Colegio Amancio Varona</h2>
+      </div>
+      <div style="padding:24px">
+        <h3 style="color:#701C32;margin-top:0">{titulo}</h3>
+        {cuerpo_html}
+        <p style="margin-top:24px;color:#999;font-size:12px">Este es un mensaje automático, por favor no responda a este correo.</p>
+      </div>
+    </div>
+    """
+
+
 def _crear_mensaje(destinatario: str, asunto: str, html: str, texto_plano: str | None) -> EmailMessage:
     mensaje = EmailMessage()
     mensaje["Subject"] = asunto

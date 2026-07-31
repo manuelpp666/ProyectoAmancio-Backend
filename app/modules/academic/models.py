@@ -62,7 +62,13 @@ class Curso(Base):
     id_curso = Column(Integer, primary_key=True)
     id_area = Column(Integer, ForeignKey("area.id_area"))
     nombre = Column(String(100), nullable=False)
-    minutos_semanales = Column(Integer, default=0) # <--- ÚNICO CAMBIO AQUÍ
+    minutos_semanales = Column(Integer, default=0)
+    # Marca para el año académico de verano
+    es_verano = Column(Boolean, default=False)
+    tipo_verano = Column(String(20), nullable=True)  # FIJO / TALLER (solo si es_verano)
+    # Grupo/aula de verano al que pertenece un curso FIJO
+    # (PRIM_1_2, PRIM_3_4, PRIM_5_6, SEC_1, SEC_2, SEC_3, PRE_ACADEMIA)
+    grupo_verano = Column(String(20), nullable=True)
 
 class PlanEstudio(Base):
     __tablename__ = "plan_estudio"

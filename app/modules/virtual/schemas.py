@@ -22,6 +22,24 @@ class TareaResponse(TareaCreate):
     archivo_adjunto_url: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
+# --- Clases Virtuales ---
+class ClaseVirtualCreate(BaseModel):
+    id_carga_academica: int
+    tema: Optional[str] = Field(None, max_length=150)
+    fecha: datetime
+    enlace: str = Field(..., min_length=3, max_length=500)
+
+class ClaseVirtualResponse(BaseModel):
+    id_clase_virtual: int
+    tema: Optional[str] = None
+    fecha: datetime
+    enlace: str
+    model_config = ConfigDict(from_attributes=True)
+
+class DriveClasesUpdate(BaseModel):
+    id_carga_academica: int
+    url: str = Field("", max_length=500)  # vacío = quitar el enlace de Drive
+
 # --- Esquemas de Sábana de Notas (Modificados) ---
 
 class EvaluacionInfo(BaseModel):
@@ -41,6 +59,7 @@ class NotaAlumnoResponse(BaseModel):
     nombres_completos: str
     notas: Dict[str, float]  # Cambiado a Dict[str, float] para mayor precisión
     promedio: float
+    condicion: Optional[str] = None  # NORMAL / CONDICIONADA / REPITE
 
 class SabanaNotasResponse(BaseModel):
     evaluaciones: List[EvaluacionInfo] # Ahora usamos el modelo detallado

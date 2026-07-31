@@ -32,6 +32,11 @@ class AlumnoBase(BaseModel):
     id_grado_ingreso: Optional[int] = None
     relacion_fraternal: Optional[bool] = False
     estado_ingreso: Optional[str] = 'POSTULANTE'
+    # Documentos de admisión (año regular)
+    doc_dni_menor: Optional[str] = None
+    doc_dni_apoderado: Optional[str] = None
+    doc_fum: Optional[str] = None
+    doc_certificado_estudios: Optional[str] = None
 
 # 2. CREATE: Estricto SOLO cuando se registra un alumno nuevo desde la web
 class AlumnoCreate(AlumnoBase):

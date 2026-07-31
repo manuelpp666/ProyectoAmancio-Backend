@@ -93,3 +93,8 @@ class TipoPago(Base):
     mora = Column(Numeric(10, 2), default=0.00)
     accion_vencimiento = Column(Enum('DESHABILITAR', 'APLICAR_MORA'), default='APLICAR_MORA')
     activo = Column(Boolean, default=True)
+    periodo_academico = Column(
+        Enum(PeriodoAcademico),
+        default=PeriodoAcademico.REGULAR,
+        nullable=False
+    )
