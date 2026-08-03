@@ -15,7 +15,7 @@ from app.modules.web import models as models_web
 from app.modules.behavior import models as models_psi
 from app.modules.users.relacion_familiar import models as models_rel
 from app.core.util.security import get_current_user, ensure_owner_or_roles
-from .service import enviar_notificaciones_asistencia
+from .service import enviar_notificaciones_asistencia, ESTADOS_NOTIFICABLES
 from . import models, schemas
 
 
@@ -120,41 +120,52 @@ def registrar_asistencia_lote(
     # --- Preparar notificaciones a los apoderados ---
     notificaciones: list[dict] = []
     if notificar:
-        matriculas = (
-            db.query(models_en.Matricula)
-            .options(joinedload(models_en.Matricula.alumno))
-            .filter(models_en.Matricula.id_matricula.in_(ids))
-            .all()
-        )
-        mapa_matriculas = {m.id_matricula: m for m in matriculas}
-        alumno_ids = [m.alumno.id_alumno for m in matriculas if m.alumno]
+        # Solo notificamos los estados relevantes (tardanza/falta/justificado).
+        # Filtramos ANTES de consultar apoderados: en un aula de 30 alumnos se
+        # pasa de 30 correos diarios a 2 o 3, y la consulta a la BD se reduce igual.
+        registros_notificables = [
+            r for r in payload.registros if r.estado in ESTADOS_NOTIFICABLES
+        ]
 
-        # Correos de los apoderados agrupados por alumno
-        emails_por_alumno: dict[int, list[str]] = {}
-        if alumno_ids:
-            relaciones = (
-                db.query(models_rel.RelacionFamiliar)
-                .options(joinedload(models_rel.RelacionFamiliar.familiar))
-                .filter(models_rel.RelacionFamiliar.id_alumno.in_(alumno_ids))
+        if registros_notificables:
+            ids_notificables = [r.id_matricula for r in registros_notificables]
+            matriculas = (
+                db.query(models_en.Matricula)
+                .options(joinedload(models_en.Matricula.alumno))
+                .filter(models_en.Matricula.id_matricula.in_(ids_notificables))
                 .all()
             )
-            for rel in relaciones:
-                email = rel.familiar.email if rel.familiar else None
-                if email:
-                    emails_por_alumno.setdefault(rel.id_alumno, []).append(email)
+            mapa_matriculas = {m.id_matricula: m for m in matriculas}
+            alumno_ids = [m.alumno.id_alumno for m in matriculas if m.alumno]
 
-        for r in payload.registros:
-            m = mapa_matriculas.get(r.id_matricula)
-            if not m or not m.alumno:
-                continue
-            nombre = f"{m.alumno.nombres} {m.alumno.apellidos}"
-            for email in emails_por_alumno.get(m.alumno.id_alumno, []):
-                notificaciones.append({
-                    "email": email,
-                    "alumno_nombre": nombre,
-                    "estado": r.estado,
-                    "fecha": payload.fecha,
-                })
+            # Correos de los apoderados agrupados por alumno
+            emails_por_alumno: dict[int, list[str]] = {}
+            if alumno_ids:
+                relaciones = (
+                    db.query(models_rel.RelacionFamiliar)
+                    .options(joinedload(models_rel.RelacionFamiliar.familiar))
+                    .filter(models_rel.RelacionFamiliar.id_alumno.in_(alumno_ids))
+                    .all()
+                )
+                for rel in relaciones:
+                    email = rel.familiar.email if rel.familiar else None
+                    if email and "@" in email:
+                        emails_por_alumno.setdefault(rel.id_alumno, []).append(email)
+
+            for r in registros_notificables:
+                m = mapa_matriculas.get(r.id_matricula)
+                if not m or not m.alumno:
+                    continue
+                nombre = f"{m.alumno.nombres} {m.alumno.apellidos}"
+                # dict.fromkeys: si un apoderado figura dos veces en las relaciones
+                # del mismo alumno, recibe un solo correo
+                for email in dict.fromkeys(emails_por_alumno.get(m.alumno.id_alumno, [])):
+                    notificaciones.append({
+                        "email": email,
+                        "alumno_nombre": nombre,
+                        "estado": r.estado,
+                        "fecha": payload.fecha,
+                    })
 
         if notificaciones:
             background_tasks.add_task(enviar_notificaciones_asistencia, notificaciones)

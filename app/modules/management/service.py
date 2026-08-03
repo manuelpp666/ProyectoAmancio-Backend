@@ -4,6 +4,7 @@ Servicios del módulo de gestión.
 Incluye la notificación por correo a los apoderados cuando se registra la
 asistencia diaria de una sección.
 """
+import os
 import logging
 from datetime import date
 
@@ -17,6 +18,17 @@ ESTADOS_ASISTENCIA = {
     "T": {"label": "Tardanza", "color": "#d97706"},
     "F": {"label": "Falta", "color": "#dc2626"},
     "J": {"label": "Justificado", "color": "#475569"},
+}
+
+# Estados que sí ameritan avisar al apoderado. La asistencia normal ("P") queda
+# fuera a propósito: un correo diario diciendo "su hijo asistió" satura al padre
+# y termina marcado como spam, y una tasa de quejas alta hunde la reputación de
+# envío del dominio (Gmail exige mantenerla por debajo del 0.3%).
+# Ajustable sin tocar código con ASISTENCIA_ESTADOS_NOTIFICABLES en el .env.
+ESTADOS_NOTIFICABLES = {
+    e.strip().upper()
+    for e in os.getenv("ASISTENCIA_ESTADOS_NOTIFICABLES", "T,F,J").split(",")
+    if e.strip()
 }
 
 GUINDA = "#701C32"

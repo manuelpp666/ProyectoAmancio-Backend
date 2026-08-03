@@ -20,7 +20,23 @@ class EditarAnioRequest(BaseModel):
     tipo: str
 
 # --- AÑO ESCOLAR ---
-def _procesar_cierre_automatico(db: Session, anio_id: str):
+def _encolar_correos(correos: list, background: Optional[BackgroundTasks] = None):
+    """Envía el lote fuera de la petición: nunca debe bloquear la respuesta HTTP.
+
+    Usa BackgroundTasks si el endpoint lo proporcionó; si no (el cierre puede
+    dispararse desde un GET que no lo declara), cae a un hilo suelto.
+    """
+    from app.core.util.email import enviar_correos
+
+    if background is not None:
+        background.add_task(enviar_correos, correos)
+        return
+
+    import threading
+    threading.Thread(target=enviar_correos, args=(correos,), daemon=True).start()
+
+
+def _procesar_cierre_automatico(db: Session, anio_id: str, background: Optional[BackgroundTasks] = None):
     """Cierre automático de un año que acaba de terminar (por fecha):
     inhabilita a los docentes del año y ejecuta la evaluación de fin de año
     (desaprobados / nivelación / repitencia) enviando los correos a los padres."""
@@ -41,11 +57,10 @@ def _procesar_cierre_automatico(db: Session, anio_id: str):
     resultado = verano_service.evaluar_cierre_anio(db, anio_id)
     correos = resultado.get("correos", [])
     if correos:
-        from app.core.util.email import enviar_correos
-        enviar_correos(correos)
+        _encolar_correos(correos, background)
 
 
-def actualizar_estado_anios(db: Session):
+def actualizar_estado_anios(db: Session, background: Optional[BackgroundTasks] = None):
     """
     Recorre todos los años y actualiza su estado 'activo' según la fecha actual.
     Cuando un año pasa de activo a inactivo (terminó su periodo), se ejecuta el
@@ -73,7 +88,7 @@ def actualizar_estado_anios(db: Session):
     # Cierre automático de los años que acaban de terminar (idempotente)
     for anio_id in recien_cerrados:
         try:
-            _procesar_cierre_automatico(db, anio_id)
+            _procesar_cierre_automatico(db, anio_id, background)
         except Exception as e:
             print(f"Error en cierre automático del año {anio_id}: {e}")
 
@@ -134,7 +149,8 @@ def _generar_estructura_para_anio(db: Session, anio_id: str) -> int:
 
 
 @router.post("/anios/", response_model=schemas.AnioEscolarResponse, status_code=status.HTTP_201_CREATED)
-def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
+def crear_anio(anio: schemas.AnioEscolarCreate, background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) ):
     
     if current_user.get("rol") != "ADMIN":
@@ -162,7 +178,7 @@ def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
         db.refresh(nuevo)
 
         # Ejecutamos la revisión general por si hay solapamientos (opcional)
-        actualizar_estado_anios(db)
+        actualizar_estado_anios(db, background_tasks)
 
         # Generar automáticamente los grados/secciones del nuevo año
         try:
@@ -185,7 +201,7 @@ def crear_anio(anio: schemas.AnioEscolarCreate, db: Session = Depends(get_db),
 
 # --- NUEVO ENDPOINT: Editar fechas de un año existente ---
 @router.patch("/anios/{anio_id}")
-def editar_anio(anio_id: str, datos: EditarAnioRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def editar_anio(anio_id: str, datos: EditarAnioRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
     
@@ -204,7 +220,7 @@ def editar_anio(anio_id: str, datos: EditarAnioRequest, db: Session = Depends(ge
     db_anio.activo = datos.fecha_inicio <= hoy <= datos.fecha_fin
 
     db.commit()
-    actualizar_estado_anios(db)
+    actualizar_estado_anios(db, background_tasks)
 
     # Al cambiar las fechas, las pensiones pendientes que quedaron fuera del nuevo
     # rango de meses ya no tienen sentido: se limpian automáticamente para los
@@ -286,11 +302,11 @@ def copiar_estructura(data: schemas.CopiarEstructuraRequest, db: Session = Depen
     return {"message": f"Se copiaron {count} secciones correctamente."}
 
 @router.get("/anios/", response_model=List[schemas.AnioEscolarResponse])
-def listar_anios(db: Session = Depends(get_db),
+def listar_anios(background_tasks: BackgroundTasks, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
-    # ¡MAGIA AQUÍ! 
+    # ¡MAGIA AQUÍ!
     # Antes de devolver la lista, actualizamos los estados automáticamente
-    actualizar_estado_anios(db)
+    actualizar_estado_anios(db, background_tasks)
     
     return db.query(models.AnioEscolar).all()
 
