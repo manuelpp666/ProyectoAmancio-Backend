@@ -43,7 +43,9 @@ class Seccion(Base):
     # NUEVO CAMPO: Conexión con el año escolar
     id_anio_escolar = Column(CHAR(6), ForeignKey("anio_escolar.id_anio_escolar"), nullable=False)
     
-    nombre = Column(String(5), nullable=False) # Ej: "A", "B", "Unica"
+    # 30 caracteres: primaria usa nombres de color ("Amarillo", "Azul") y no
+    # solo la letra, así que no cabían en el VARCHAR(5) original.
+    nombre = Column(String(30), nullable=False)  # Ej: "A", "B", "Amarillo", "Única"
     # BORRADO: aula = Column(String(20))
     vacantes = Column(Integer, default=30)
 

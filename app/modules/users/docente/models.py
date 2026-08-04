@@ -15,8 +15,6 @@ class Docente(Base):
     telefono = Column(String(9))
     email = Column(String(100))
     url_perfil = Column(String(255))
-    
-    sueldo = Column(DECIMAL(10, 2), default=0.00) # <--- NUEVA COLUMNA AGREGADA
 
     # Controla si el docente aparece en la página pública de Docentes
     visible_web = Column(Boolean, nullable=False, default=True)

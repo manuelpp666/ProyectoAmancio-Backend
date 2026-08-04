@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.core.util.password import get_password_hash, verify_password
+from app.core.util.usuarios import extraer_dni
 # Imports corregidos: asegúrate de que las rutas sean las correctas en tu proyecto
 from app.modules.users.models import Usuario
 from app.modules.users.docente.models import Docente
@@ -178,7 +179,16 @@ async def change_password(data: ChangePasswordSchema, db: Session = Depends(get_
     if not verify_password(data.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
 
-    # 3. Encriptar la nueva y guardar
+    # 3. La nueva no puede ser igual al DNI: es la clave inicial que se reparte
+    if data.new_password.strip() == extraer_dni(user.username):
+        raise HTTPException(
+            status_code=400,
+            detail="La nueva contraseña no puede ser tu DNI. Elige una distinta."
+        )
+
+    # 4. Encriptar la nueva y guardar. Al definir clave propia se levanta la
+    #    obligación de cambiarla en el primer ingreso.
     user.password_hash = get_password_hash(data.new_password)
+    user.debe_cambiar_password = False
     db.commit()
     return {"message": "Contraseña actualizada con éxito"}

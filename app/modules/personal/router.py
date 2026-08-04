@@ -7,6 +7,7 @@ from app.modules.users.models import Usuario
 from app.modules.users.docente.models import Docente
 from app.core.util.password import get_password_hash
 from app.core.util.security import get_current_user
+from app.core.util.usuarios import generar_username
 
 router = APIRouter(prefix="/personal", tags=["Gestión de Personal"])
 
@@ -21,7 +22,6 @@ def to_response(registro, tipo):
         "apellidos": registro.apellidos,
         "telefono": registro.telefono,
         "email": registro.email,
-        "sueldo": registro.sueldo,
         "usuario": registro.usuario,
         # Importante: Solo el administrador tiene permisos
         "permisos": getattr(registro, "permisos", None) 
@@ -65,8 +65,18 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
         raise HTTPException(status_code=400, detail="Tipo de personal inválido")
     
     # 2. Crear el Usuario base
+    # El username lleva el prefijo del rol (ej. AUX-16714260): así una misma
+    # persona puede tener cuenta como docente y como auxiliar sin chocar con
+    # la restricción UNIQUE de usuario.username.
+    username = generar_username(personal.dni, rol)
+    if db.query(Usuario).filter(Usuario.username == username).first():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ya existe un usuario {rol} con el DNI {personal.dni}."
+        )
+
     nuevo_usuario = Usuario(
-        username=personal.dni,
+        username=username,
         password_hash=get_password_hash(personal.password),
         rol=rol,
         activo=True
@@ -128,22 +138,25 @@ def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Sessio
 
     usuario = db.query(Usuario).filter(Usuario.id_usuario == perfil.id_usuario).first()
 
-    # Si cambia el DNI, el nombre de usuario debe seguir al nuevo DNI (la convención del sistema)
+    # Si cambia el DNI, el username debe seguirlo manteniendo el prefijo del rol
     if usuario and data.dni and data.dni != perfil.dni:
+        nuevo_username = generar_username(data.dni, usuario.rol)
         existe = db.query(Usuario).filter(
-            Usuario.username == data.dni,
+            Usuario.username == nuevo_username,
             Usuario.id_usuario != usuario.id_usuario
         ).first()
         if existe:
-            raise HTTPException(status_code=400, detail="Ya existe un usuario con ese DNI.")
-        usuario.username = data.dni
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ya existe un usuario {usuario.rol} con el DNI {data.dni}."
+            )
+        usuario.username = nuevo_username
 
     perfil.nombres = data.nombres
     perfil.apellidos = data.apellidos
     perfil.dni = data.dni
     perfil.email = data.email
     perfil.telefono = data.telefono
-    perfil.sueldo = data.sueldo
 
     if data.password and usuario:
         usuario.password_hash = get_password_hash(data.password)

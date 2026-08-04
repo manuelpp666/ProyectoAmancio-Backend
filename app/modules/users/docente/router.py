@@ -6,6 +6,7 @@ from .models import Docente
 from app.modules.users.models import Usuario
 from typing import List
 from app.core.util.password import get_password_hash
+from app.core.util.usuarios import generar_username
 from app.core.util.security import get_current_user
 from sqlalchemy.orm import joinedload
 from sqlalchemy import or_
@@ -28,10 +29,12 @@ def crear_docente(docente_in: DocenteCreate, db: Session = Depends(get_db), curr
 
     try:
         # 2. Crear el Usuario primero
+        # username con prefijo de rol (DOC-xxxxxxxx): permite que la misma
+        # persona tenga además cuenta de auxiliar o administrativo.
         nuevo_usuario = Usuario(
-            username=docente_in.dni,
+            username=generar_username(docente_in.dni, "DOCENTE"),
             # La contraseña inicial podría ser el mismo DNI o una enviada
-            password_hash=get_password_hash(docente_in.dni), 
+            password_hash=get_password_hash(docente_in.dni),
             rol="DOCENTE", # Forzamos el rol desde el backend por seguridad
             activo=True
         )

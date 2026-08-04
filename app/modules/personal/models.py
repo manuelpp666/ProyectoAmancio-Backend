@@ -12,7 +12,6 @@ class Administrador(Base):
     telefono = Column(String(9))
     email = Column(String(100))
     url_perfil = Column(String(255), nullable=True)
-    sueldo = Column(DECIMAL(10, 2), default=0.00)
     permisos = Column(JSON, nullable=True)
     usuario = relationship("Usuario")
 
@@ -25,7 +24,6 @@ class Auxiliar(Base):
     apellidos = Column(String(250), nullable=False)
     telefono = Column(String(9))
     email = Column(String(100))
-    sueldo = Column(DECIMAL(10, 2), default=0.00)
     usuario = relationship("Usuario")
 
 class Psicologo(Base):
@@ -37,5 +35,4 @@ class Psicologo(Base):
     apellidos = Column(String(250), nullable=False)
     telefono = Column(String(9))
     email = Column(String(100))
-    sueldo = Column(DECIMAL(10, 2), default=0.00)
     usuario = relationship("Usuario")

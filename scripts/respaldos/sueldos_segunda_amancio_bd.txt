@@ -1,0 +1,14 @@
+-- Sueldos de segunda_amancio_bd rescatados antes de eliminar la columna
+
+-- docente
+--   id=3  dni=72640066  Hernandez, Leonardo  sueldo=0.00
+--   id=4  dni=70111222  Mendoza Paredes, Lucia  sueldo=2500.00
+
+-- administrador
+--   id=2  dni=81246124  Principal, Admin  sueldo=0.00
+
+-- auxiliar
+--   id=1  dni=12131415  en proceso, Auxiliar  sueldo=0.00
+
+-- psicologo
+--   id=1  dni=60415217  Serquen, Gabriela  sueldo=0.00

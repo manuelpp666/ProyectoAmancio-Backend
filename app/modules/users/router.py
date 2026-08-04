@@ -7,8 +7,23 @@ from app.core.util.password import get_password_hash
 from app.core.util.password import verify_password
 from app.core.util.security import require_roles
 from app.modules.personal.models import Administrador
+from app.modules.pagina_principal.models import PaginaConfiguracion
 
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
+
+# Clave de pagina_configuracion que enciende o apaga la exigencia de cambiar la
+# contraseña en el primer ingreso. Se administra desde el panel de control.
+CLAVE_FORZAR_CAMBIO = "forzar_cambio_password_inicial"
+
+
+def _exigir_cambio_password(db: Session) -> bool:
+    """Lee el interruptor global. Si no está configurado, se asume activado."""
+    fila = db.query(PaginaConfiguracion).filter(
+        PaginaConfiguracion.clave == CLAVE_FORZAR_CAMBIO
+    ).first()
+    if not fila:
+        return True
+    return str(fila.valor).strip().lower() in ("1", "true", "si", "sí", "on")
 
 @router.post("/", response_model=schemas.UsuarioResponse)
 def crear_usuario(
@@ -76,6 +91,10 @@ def login(credentials: schemas.UsuarioLogin, response: Response, db: Session = D
         samesite="lax",
         path="/",
     )
+    # ¿Hay que obligarlo a cambiar la contraseña? Solo si el colegio tiene la
+    # exigencia activada Y este usuario todavía usa la clave inicial.
+    debe_cambiar = bool(user.debe_cambiar_password) and _exigir_cambio_password(db)
+
     # 6. Retornar los datos que el frontend necesita para el UseContext(aqui se usara JWT)
     return {
         "id_usuario": user.id_usuario,
@@ -84,7 +103,8 @@ def login(credentials: schemas.UsuarioLogin, response: Response, db: Session = D
         "access_token": access_token,
         "token_type": "bearer",
         "status": "success",
-        "permisos": permisos_data
+        "permisos": permisos_data,
+        "debe_cambiar_password": debe_cambiar,
     }
 
 @router.post("/logout")

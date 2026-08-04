@@ -24,6 +24,7 @@ from app.modules.users.alumno import models as al_models
 from app.modules.users.relacion_familiar import models as rel_models
 from app.modules.users import models as usuario_models
 from app.core.util.password import get_password_hash
+from app.core.util.usuarios import generar_username
 
 
 NOTA_MINIMA_DEFAULT = Decimal("11")
@@ -454,14 +455,15 @@ def procesar_pago_verano(db: Session, pago) -> bool:
 
     # Crear usuario si es externo y no tiene (login = dni)
     if not alumno.id_usuario:
+        username_alumno = generar_username(alumno.dni, "ALUMNO")
         user_existente = db.query(usuario_models.Usuario).filter(
-            usuario_models.Usuario.username == alumno.dni
+            usuario_models.Usuario.username == username_alumno
         ).first()
         if user_existente:
             alumno.id_usuario = user_existente.id_usuario
         else:
             nuevo = usuario_models.Usuario(
-                username=alumno.dni,
+                username=username_alumno,
                 password_hash=get_password_hash(alumno.dni),
                 rol="ALUMNO",
                 activo=True,

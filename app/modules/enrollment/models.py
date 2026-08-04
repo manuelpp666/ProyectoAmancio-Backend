@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DECIMAL, ForeignKey, DateTime, Boolean, CHAR
+from sqlalchemy import Column, Integer, String, Text, DECIMAL, ForeignKey, DateTime, Boolean, CHAR
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.database import Base
@@ -36,9 +36,11 @@ class SolicitudMatricula(Base):
     id_anio_escolar_origen = Column(String(6), nullable=True)
     anio_destino = Column(String(6), nullable=False)
     grado_destino = Column(String(50), nullable=True)
-    comentario = Column(String, nullable=True)
+    # Text (no String sin longitud): así coincide con la columna real de la BD
+    # y permite generar el esquema con create_all, que en MySQL exige longitud.
+    comentario = Column(Text, nullable=True)
     estado = Column(String(20), default="PENDIENTE")  # PENDIENTE / APROBADA / RECHAZADA
-    respuesta_admin = Column(String, nullable=True)
+    respuesta_admin = Column(Text, nullable=True)
     fecha_solicitud = Column(DateTime, default=func.now())
 
     alumno = relationship("app.modules.users.alumno.models.Alumno")

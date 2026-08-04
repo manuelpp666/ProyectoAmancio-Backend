@@ -13,6 +13,7 @@ from app.modules.academic.models import Grado
 from app.modules.finance import models as finance_models
 from app.core.util.security import get_current_user
 from app.core.util.password import get_password_hash
+from app.core.util.usuarios import generar_username
 from . import models, schemas # Asegúrate de importar los modelos correctos
 
 router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
@@ -153,13 +154,14 @@ def decidir_admision(
             # A. Crear Usuario para el ALUMNO (si no tiene uno asignado)
             if not alumno.id_usuario:
                 # Verificamos si ya existe un usuario con ese DNI para evitar errores de duplicidad
-                user_existente = db.query(al_models.Usuario).filter(al_models.Usuario.username == alumno.dni).first()
+                username_alumno = generar_username(alumno.dni, "ALUMNO")
+                user_existente = db.query(al_models.Usuario).filter(al_models.Usuario.username == username_alumno).first()
                 
                 if user_existente:
                     alumno.id_usuario = user_existente.id_usuario
                 else:
                     nuevo_user_alumno = al_models.Usuario( # Asegúrate de usar models.Usuario si así se llama en tu archivo
-                        username=alumno.dni,
+                        username=username_alumno,
                         password_hash=get_password_hash(alumno.dni),
                         rol="ALUMNO",
                         activo=True
@@ -313,14 +315,15 @@ def editar_alumno(
             raise HTTPException(status_code=400, detail="Ya existe otro alumno con ese DNI.")
 
         if usuario:
-            # El nombre de usuario sigue al DNI (la convención del sistema)
+            # El username sigue al DNI, conservando el prefijo del rol
+            nuevo_username = generar_username(data.dni, usuario.rol)
             username_ocupado = db.query(Usuario).filter(
-                Usuario.username == data.dni,
+                Usuario.username == nuevo_username,
                 Usuario.id_usuario != usuario.id_usuario
             ).first()
             if username_ocupado:
                 raise HTTPException(status_code=400, detail="Ya existe un usuario con ese DNI.")
-            usuario.username = data.dni
+            usuario.username = nuevo_username
 
     if data.id_grado_ingreso is not None:
         grado = db.query(Grado).filter(Grado.id_grado == data.id_grado_ingreso).first()

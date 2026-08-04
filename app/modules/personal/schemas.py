@@ -9,7 +9,6 @@ class PersonalBase(BaseModel):
     apellidos: str
     telefono: Optional[TelefonoStr] = None
     email: Optional[EmailStr] = None
-    sueldo: Decimal = Field(default=Decimal('0.00'), ge=0, decimal_places=2)
 
 class PersonalCreate(PersonalBase):
     password: str

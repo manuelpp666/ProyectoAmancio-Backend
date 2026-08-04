@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from sqlalchemy import func, extract
 from typing import List
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from app.db.database import get_db
 from app.modules.academic import models as models_ac
 from app.modules.users.alumno import models as models_al
@@ -997,7 +997,312 @@ def eliminar_tutor(id_tutor_seccion: int, db: Session = Depends(get_db), current
     tutor = db.query(models.TutorSeccion).filter(models.TutorSeccion.id_tutor_seccion == id_tutor_seccion).first()
     if not tutor:
         raise HTTPException(status_code=404, detail="Asignación de tutor no encontrada")
-    
+
     db.delete(tutor)
     db.commit()
     return None
+
+
+@router.get("/dashboard-admin")
+def dashboard_admin(
+    anio: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Resumen operativo del colegio para el panel del administrador.
+
+    Reúne en UNA sola petición lo que está repartido por los demás paneles
+    (finanzas, asistencia del auxiliar, conducta y citas del psicólogo), para
+    que el administrador vea de un vistazo qué necesita atención hoy.
+    """
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    hoy = date.today()
+    inicio_mes = hoy.replace(day=1)
+    mes_anterior_fin = inicio_mes - timedelta(days=1)
+    inicio_mes_anterior = mes_anterior_fin.replace(day=1)
+
+    # Matrículas del año consultado: base de casi todo lo demás
+    matriculas = (
+        db.query(models_en.Matricula)
+        .filter(models_en.Matricula.id_anio_escolar == anio)
+        .all()
+    )
+    ids_matricula = [m.id_matricula for m in matriculas]
+    ids_alumno = list({m.id_alumno for m in matriculas})
+
+    # ── FINANZAS ────────────────────────────────────────────────────────────
+    def suma(*filtros):
+        q = db.query(func.coalesce(func.sum(models_fi.Pago.monto_total), 0))
+        for f in filtros:
+            q = q.filter(f)
+        return float(q.scalar() or 0)
+
+    recaudado_mes = suma(
+        models_fi.Pago.estado == "PAGADO",
+        models_fi.Pago.fecha_pago >= inicio_mes,
+    )
+    recaudado_mes_anterior = suma(
+        models_fi.Pago.estado == "PAGADO",
+        models_fi.Pago.fecha_pago >= inicio_mes_anterior,
+        models_fi.Pago.fecha_pago <= mes_anterior_fin,
+    )
+    deuda_vencida = suma(models_fi.Pago.estado == "VENCIDO")
+    por_cobrar = suma(models_fi.Pago.estado == "PENDIENTE")
+
+    alumnos_con_deuda = (
+        db.query(func.count(func.distinct(models_fi.Pago.id_alumno)))
+        .filter(models_fi.Pago.estado == "VENCIDO")
+        .scalar() or 0
+    )
+
+    # Los 5 alumnos con mayor deuda vencida, con su grado y sección
+    top_deudores = []
+    filas = (
+        db.query(
+            models_al.Alumno.id_alumno,
+            models_al.Alumno.nombres,
+            models_al.Alumno.apellidos,
+            func.sum(models_fi.Pago.monto_total).label("deuda"),
+        )
+        .join(models_fi.Pago, models_fi.Pago.id_alumno == models_al.Alumno.id_alumno)
+        .filter(models_fi.Pago.estado == "VENCIDO")
+        .group_by(models_al.Alumno.id_alumno)
+        .order_by(func.sum(models_fi.Pago.monto_total).desc())
+        .limit(5)
+        .all()
+    )
+    ubicacion = {}
+    if filas:
+        for m in matriculas:
+            if m.id_alumno in {f[0] for f in filas}:
+                g = m.grado.nombre if m.grado else ""
+                s = m.seccion.nombre if m.seccion else ""
+                ubicacion[m.id_alumno] = f"{g} {s}".strip()
+    for id_al, nom, ape, deuda in filas:
+        top_deudores.append({
+            "id_alumno": id_al,
+            "nombre": f"{ape}, {nom}",
+            "aula": ubicacion.get(id_al, "—"),
+            "deuda": float(deuda or 0),
+        })
+
+    # ── ASISTENCIA DE HOY ───────────────────────────────────────────────────
+    conteo_hoy = {"P": 0, "T": 0, "F": 0, "J": 0}
+    secciones_registradas = 0
+    if ids_matricula:
+        filas_hoy = (
+            db.query(models.Asistencia.estado, func.count(models.Asistencia.id_asistencia))
+            .filter(
+                models.Asistencia.fecha == hoy,
+                models.Asistencia.id_matricula.in_(ids_matricula),
+            )
+            .group_by(models.Asistencia.estado)
+            .all()
+        )
+        for estado, n in filas_hoy:
+            if estado in conteo_hoy:
+                conteo_hoy[estado] = n
+
+        # Secciones que ya pasaron lista hoy
+        secciones_registradas = (
+            db.query(func.count(func.distinct(models_en.Matricula.id_seccion)))
+            .join(models.Asistencia, models.Asistencia.id_matricula == models_en.Matricula.id_matricula)
+            .filter(
+                models.Asistencia.fecha == hoy,
+                models_en.Matricula.id_anio_escolar == anio,
+            )
+            .scalar() or 0
+        )
+
+    secciones_total = (
+        db.query(func.count(models_ac.Seccion.id_seccion))
+        .filter(models_ac.Seccion.id_anio_escolar == anio)
+        .scalar() or 0
+    )
+
+    # ── CONDUCTA ────────────────────────────────────────────────────────────
+    # Se replica el criterio de behavior/constants: cada reporte descuenta
+    # puntos y por debajo del umbral el alumno entra en observación.
+    from app.modules.behavior.constants import calcular_puntaje, UMBRAL_OBSERVACION, UMBRAL_CRITICO
+
+    en_observacion = en_critico = 0
+    if ids_alumno:
+        reportes = (
+            db.query(models_psi.ReporteConducta)
+            .options(joinedload(models_psi.ReporteConducta.nivel))
+            .filter(
+                models_psi.ReporteConducta.id_alumno.in_(ids_alumno),
+                extract("year", models_psi.ReporteConducta.fecha_reporte) == hoy.year,
+            )
+            .all()
+        )
+        perdidos, cambio_ie = {}, set()
+        for r in reportes:
+            if not r.nivel:
+                continue
+            perdidos[r.id_alumno] = perdidos.get(r.id_alumno, 0) + r.nivel.puntos
+            if r.nivel.cambio_ie:
+                cambio_ie.add(r.id_alumno)
+        for id_al, pts in perdidos.items():
+            puntaje = calcular_puntaje(pts)
+            if puntaje < UMBRAL_CRITICO or id_al in cambio_ie:
+                en_critico += 1
+            elif puntaje < UMBRAL_OBSERVACION:
+                en_observacion += 1
+
+    reportes_semana = (
+        db.query(func.count(models_psi.ReporteConducta.id_reporte))
+        .filter(models_psi.ReporteConducta.fecha_reporte >= hoy - timedelta(days=7))
+        .scalar() or 0
+    )
+
+    # ── PSICOLOGÍA ──────────────────────────────────────────────────────────
+    citas_hoy = (
+        db.query(func.count(models_psi.CitaPsicologia.id_cita))
+        .filter(
+            func.date(models_psi.CitaPsicologia.fecha_cita) == hoy,
+            models_psi.CitaPsicologia.estado == "PROGRAMADA",
+        )
+        .scalar() or 0
+    )
+    citas_semana = (
+        db.query(func.count(models_psi.CitaPsicologia.id_cita))
+        .filter(
+            models_psi.CitaPsicologia.fecha_cita >= hoy,
+            models_psi.CitaPsicologia.fecha_cita <= hoy + timedelta(days=7),
+            models_psi.CitaPsicologia.estado == "PROGRAMADA",
+        )
+        .scalar() or 0
+    )
+
+    # ── TRÁMITES ────────────────────────────────────────────────────────────
+    tramites_pendientes = (
+        db.query(func.count(models_fi.SolicitudTramite.id_solicitud_tramite))
+        .filter(models_fi.SolicitudTramite.estado.in_(["PENDIENTE_REVISION", "EN_REVISION"]))
+        .scalar() or 0
+    )
+
+    # ── OCUPACIÓN DE AULAS ──────────────────────────────────────────────────
+    ocupacion = []
+    filas_oc = (
+        db.query(
+            models_ac.Seccion.id_seccion,
+            models_ac.Nivel.nombre,
+            models_ac.Grado.nombre,
+            models_ac.Seccion.nombre,
+            models_ac.Seccion.vacantes,
+            models_ac.Grado.orden,
+            models_ac.Nivel.id_nivel,
+        )
+        .join(models_ac.Grado, models_ac.Grado.id_grado == models_ac.Seccion.id_grado)
+        .join(models_ac.Nivel, models_ac.Nivel.id_nivel == models_ac.Grado.id_nivel)
+        .filter(models_ac.Seccion.id_anio_escolar == anio)
+        .order_by(models_ac.Nivel.id_nivel, models_ac.Grado.orden, models_ac.Seccion.nombre)
+        .all()
+    )
+    por_seccion = {}
+    for m in matriculas:
+        por_seccion[m.id_seccion] = por_seccion.get(m.id_seccion, 0) + 1
+    for id_sec, niv, gr, sec, vac, _orden, _idn in filas_oc:
+        ocupacion.append({
+            "id_seccion": id_sec,
+            "nivel": niv,
+            "grado": gr,
+            "seccion": sec,
+            "matriculados": por_seccion.get(id_sec, 0),
+            "vacantes": vac or 0,
+        })
+
+    return {
+        "finanzas": {
+            "recaudado_mes": recaudado_mes,
+            "recaudado_mes_anterior": recaudado_mes_anterior,
+            "deuda_vencida": deuda_vencida,
+            "por_cobrar": por_cobrar,
+            "alumnos_con_deuda": alumnos_con_deuda,
+            "top_deudores": top_deudores,
+        },
+        "asistencia_hoy": {
+            "presentes": conteo_hoy["P"],
+            "tardanzas": conteo_hoy["T"],
+            "faltas": conteo_hoy["F"],
+            "justificados": conteo_hoy["J"],
+            "secciones_registradas": secciones_registradas,
+            "secciones_total": secciones_total,
+        },
+        "conducta": {
+            "en_observacion": en_observacion,
+            "en_critico": en_critico,
+            "reportes_semana": reportes_semana,
+        },
+        "psicologia": {"citas_hoy": citas_hoy, "citas_semana": citas_semana},
+        "tramites": {"pendientes": tramites_pendientes},
+        "ocupacion": ocupacion,
+        "totales": {
+            "alumnos": len(ids_alumno),
+            "secciones": secciones_total,
+            "docentes": db.query(func.count(models_doc.Docente.id_docente)).scalar() or 0,
+        },
+    }
+
+
+@router.get("/mi-asistencia/{id_usuario}")
+def obtener_asistencia_estudiante(
+    id_usuario: int,
+    anio: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Historial de asistencia del alumno en un año escolar, con su resumen.
+
+    Solo el propio alumno puede consultarlo (mismo criterio que resumen-notas).
+    """
+    if current_user.get("id") != id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
+
+    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    if not alumno:
+        raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
+    matricula = db.query(models_en.Matricula).filter(
+        models_en.Matricula.id_alumno == alumno.id_alumno,
+        models_en.Matricula.id_anio_escolar == anio,
+    ).first()
+
+    # Sin matrícula en ese año no hay historial: se devuelve vacío, no un error
+    if not matricula:
+        return {"resumen": {"P": 0, "T": 0, "F": 0, "J": 0, "total": 0, "porcentaje": None}, "registros": []}
+
+    registros = (
+        db.query(models.Asistencia)
+        .filter(models.Asistencia.id_matricula == matricula.id_matricula)
+        .order_by(models.Asistencia.fecha.desc())
+        .all()
+    )
+
+    conteo = {"P": 0, "T": 0, "F": 0, "J": 0}
+    for r in registros:
+        if r.estado in conteo:
+            conteo[r.estado] += 1
+
+    total = sum(conteo.values())
+    # Asistencia efectiva: presentes y tardanzas cuentan como asistió;
+    # las faltas justificadas no penalizan el porcentaje.
+    computables = total - conteo["J"]
+    porcentaje = round((conteo["P"] + conteo["T"]) / computables * 100, 1) if computables else None
+
+    return {
+        "resumen": {**conteo, "total": total, "porcentaje": porcentaje},
+        "registros": [
+            {
+                "id_asistencia": r.id_asistencia,
+                "fecha": r.fecha.isoformat() if r.fecha else None,
+                "estado": r.estado,
+                "observacion": r.observacion or "",
+            }
+            for r in registros
+        ],
+    }

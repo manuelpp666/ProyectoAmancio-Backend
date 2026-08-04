@@ -30,3 +30,6 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     status: str = "success"
     permisos: Optional[dict] = None
+    # True cuando el usuario aún tiene la clave inicial y el colegio
+    # exige cambiarla antes de usar el campus.
+    debe_cambiar_password: bool = False
