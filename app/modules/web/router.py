@@ -35,19 +35,33 @@ def estado_admision_publico(db: Session = Depends(get_db)):
     """
     hoy = date.today()
 
-    # 1. ¿Hay un año con inscripciones abiertas hoy?
-    abierto = db.query(academic_models.AnioEscolar).filter(
+    # 1. Todos los años con inscripciones vigentes hoy.
+    #    Pueden ser DOS a la vez (el año regular y el de verano se solapan),
+    #    así que se devuelven todos y la web muestra un botón por cada uno.
+    abiertos = db.query(academic_models.AnioEscolar).filter(
         academic_models.AnioEscolar.inicio_inscripcion != None,
         academic_models.AnioEscolar.fin_inscripcion != None,
         academic_models.AnioEscolar.inicio_inscripcion <= hoy,
         academic_models.AnioEscolar.fin_inscripcion >= hoy
-    ).order_by(academic_models.AnioEscolar.inicio_inscripcion.asc()).first()
+    ).order_by(academic_models.AnioEscolar.inicio_inscripcion.asc()).all()
 
-    if abierto:
+    if abiertos:
+        inscripciones = [
+            {
+                "id_anio_escolar": a.id_anio_escolar,
+                "tipo": a.tipo,
+                "fin_inscripcion": a.fin_inscripcion,
+            }
+            for a in abiertos
+        ]
+        primero = abiertos[0]
         return {
             "abierto": True,
-            "tipo": abierto.tipo,
-            "fin_inscripcion": abierto.fin_inscripcion,
+            # Campos sueltos del primero: los mantiene el código que ya existía
+            "tipo": primero.tipo,
+            "fin_inscripcion": primero.fin_inscripcion,
+            # Lista completa: lo que usa el inicio para pintar uno o dos botones
+            "inscripciones": inscripciones,
         }
 
     # 2. Si no, ¿hay inscripciones futuras? -> la más próxima
