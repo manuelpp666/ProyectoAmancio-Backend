@@ -81,6 +81,20 @@ class Pago(Base):
     matricula = relationship("Matricula")
     tipo_pago = relationship("TipoPago")
 
+    # Datos del alumno aplanados para las tablas de caja y recaudación, donde
+    # hay que ver de quién es cada pago sin abrir la ficha.
+    # Los endpoints que devuelvan muchos pagos deben usar joinedload(Pago.alumno)
+    # para no disparar una consulta por fila.
+    @property
+    def alumno_nombre(self):
+        if not self.alumno:
+            return None
+        return f"{self.alumno.apellidos}, {self.alumno.nombres}".strip(", ")
+
+    @property
+    def dni_alumno(self):
+        return self.alumno.dni if self.alumno else None
+
 class TipoPago(Base):
     __tablename__ = "tipo_pago"
     

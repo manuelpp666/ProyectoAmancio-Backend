@@ -41,6 +41,9 @@ XLS_ALUMNOS = "2026 AV VACANTES Y MATRÍCULAS.xlsx"
 XLS_PAGOS = "PAGOS CUENTA RECAUDADORA BCP AV.xlsx"
 
 ANIO = "2026"
+# Diferencia máxima que se da por saldada al cruzar lo pagado con lo esperado.
+# Evita crear cargos residuales de pocos soles por descuentos o redondeos.
+TOLERANCIA_SALDO = Decimal("10.00")
 # bcrypt con coste 10: lo verifica igual `verify_password` (el coste va dentro
 # del propio hash) y hace viable generar ~630 usuarios en un tiempo razonable.
 COSTE_BCRYPT = 10
@@ -259,13 +262,22 @@ def leer_alumnos():
 # ══════════════════════════════════════════════════════════════════════════
 #  Lectura de pagos
 # ══════════════════════════════════════════════════════════════════════════
+# Tipos de pago tal como los tiene configurados el colegio.
+#
+# IMPORTANTE: fecha_vencimiento debe ser POSTERIOR a fecha_inicio comparando
+# las cadenas "MM-DD". El schema TipoPagoBase lo valida en cada respuesta, así
+# que un rango que cruce el fin de año (12-02 -> 01-31) hace fallar el endpoint
+# /finance/tipos-pago entero, no solo esa fila.
 CATEGORIAS_TIPO_PAGO = [
-    (1, "VACANTE", "Vacante", "100.00", "12-01", "12-31"),
-    (2, "MATRICULA", "Matrícula", "200.00", "12-02", "01-31"),
-    (3, "PENSION", "Pensión mensual", "250.00", "03-01", "03-31"),
-    (4, "MODULO", "Módulos", "150.00", "04-02", "04-10"),
-    (5, "OTRO", "Otros conceptos", "0.00", "01-01", "12-31"),
+    (9, "VACANTE", "Vacante", "100.00", "01-01", "10-10", "0.00", "DESHABILITAR"),
+    (10, "MATRICULA", "Matricula", "200.00", "01-01", "10-10", "0.00", "DESHABILITAR"),
+    (11, "PENSION", "Pensión regular", "250.00", "01-01", "01-30", "5.00", "APLICAR_MORA"),
+    (12, "MODULO", "Modulo 1", "150.00", "03-09", "03-30", "5.00", "APLICAR_MORA"),
+    (13, "MODULO", "Modulo 2", "150.00", "03-09", "07-30", "5.00", "APLICAR_MORA"),
 ]
+
+# Identificadores usados al clasificar cada pago
+ID_VACANTE, ID_MATRICULA, ID_PENSION, ID_MODULO_1, ID_MODULO_2 = 9, 10, 11, 12, 13
 
 
 MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
@@ -275,19 +287,19 @@ MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
 # Excel del BCP. Cada entrada: (clave, id_tipo_pago, concepto, monto, vencimiento)
 # El monto de las pensiones se toma de cada alumno (240 con hermanos, 250 sin).
 CALENDARIO_2026 = [
-    ("MATRICULA|2026", 2, "Matrícula 2026", Decimal("200.00"), dt.date(2026, 1, 31)),
-    ("PENSION|2026|3", 3, "Pensión marzo 2026", None, dt.date(2026, 3, 31)),
-    ("MODULO|2026|I", 4, "Módulos I 2026", Decimal("150.00"), dt.date(2026, 4, 10)),
-    ("PENSION|2026|4", 3, "Pensión abril 2026", None, dt.date(2026, 4, 30)),
-    ("PENSION|2026|5", 3, "Pensión mayo 2026", None, dt.date(2026, 5, 31)),
-    ("PENSION|2026|6", 3, "Pensión junio 2026", None, dt.date(2026, 6, 30)),
-    ("MODULO|2026|II", 4, "Módulos II 2026", Decimal("150.00"), dt.date(2026, 7, 10)),
-    ("PENSION|2026|7", 3, "Pensión julio 2026", None, dt.date(2026, 7, 31)),
-    ("PENSION|2026|8", 3, "Pensión agosto 2026", None, dt.date(2026, 8, 31)),
-    ("PENSION|2026|9", 3, "Pensión septiembre 2026", None, dt.date(2026, 9, 30)),
-    ("PENSION|2026|10", 3, "Pensión octubre 2026", None, dt.date(2026, 10, 31)),
-    ("PENSION|2026|11", 3, "Pensión noviembre 2026", None, dt.date(2026, 11, 30)),
-    ("PENSION|2026|12", 3, "Pensión diciembre 2026", None, dt.date(2026, 12, 25)),
+    ("MATRICULA|2026", ID_MATRICULA, "Matrícula 2026", Decimal("200.00"), dt.date(2026, 1, 31)),
+    ("PENSION|2026|3", ID_PENSION, "Pensión marzo 2026", None, dt.date(2026, 3, 31)),
+    ("MODULO|2026|I", ID_MODULO_1, "Módulos I 2026", Decimal("150.00"), dt.date(2026, 4, 10)),
+    ("PENSION|2026|4", ID_PENSION, "Pensión abril 2026", None, dt.date(2026, 4, 30)),
+    ("PENSION|2026|5", ID_PENSION, "Pensión mayo 2026", None, dt.date(2026, 5, 31)),
+    ("PENSION|2026|6", ID_PENSION, "Pensión junio 2026", None, dt.date(2026, 6, 30)),
+    ("MODULO|2026|II", ID_MODULO_2, "Módulos II 2026", Decimal("150.00"), dt.date(2026, 7, 10)),
+    ("PENSION|2026|7", ID_PENSION, "Pensión julio 2026", None, dt.date(2026, 7, 31)),
+    ("PENSION|2026|8", ID_PENSION, "Pensión agosto 2026", None, dt.date(2026, 8, 31)),
+    ("PENSION|2026|9", ID_PENSION, "Pensión septiembre 2026", None, dt.date(2026, 9, 30)),
+    ("PENSION|2026|10", ID_PENSION, "Pensión octubre 2026", None, dt.date(2026, 10, 31)),
+    ("PENSION|2026|11", ID_PENSION, "Pensión noviembre 2026", None, dt.date(2026, 11, 30)),
+    ("PENSION|2026|12", ID_PENSION, "Pensión diciembre 2026", None, dt.date(2026, 12, 25)),
 ]
 
 
@@ -322,20 +334,20 @@ def clave_cargo(mes):
 def clasificar_concepto(mes):
     """Devuelve (id_tipo_pago, concepto legible) a partir de la columna MES."""
     if isinstance(mes, dt.datetime):
-        return 3, f"Pensión {MESES_ES[mes.month - 1]} {mes.year}"
+        return ID_PENSION, f"Pensión {MESES_ES[mes.month - 1]} {mes.year}"
     texto = limpiar(mes)
     if not texto:
-        return 5, "Pago sin concepto registrado"
+        return ID_PENSION, "Pago sin concepto registrado"
     arriba = texto.upper()
     if "VACANTE" in arriba:
-        return 1, texto
+        return ID_VACANTE, texto
     if "MATRIC" in arriba or "MATRÍC" in arriba:
-        return 2, texto
+        return ID_MATRICULA, texto
     if "MODULO" in arriba or "MÓDULO" in arriba:
-        return 4, texto
+        return (ID_MODULO_2 if re.search(r"II", arriba) else ID_MODULO_1), texto
     if any(m.upper() in arriba for m in MESES_ES) or "SETIEMBRE" in arriba:
-        return 3, texto
-    return 5, texto
+        return ID_PENSION, texto
+    return ID_PENSION, texto
 
 
 def leer_pagos(dnis_validos):
@@ -366,6 +378,15 @@ def leer_pagos(dnis_validos):
             continue
         mora = a_decimal(fila[8]) or Decimal("0.00")
         total = a_decimal(fila[9]) or (monto + mora)
+        # El schema PagoBase exige monto_total == monto + mora. El Excel del BCP
+        # a veces trae un total mayor sin reflejarlo en la columna de mora (son
+        # los S/5 de recargo), y esas filas hacían fallar /finance/pagos/ entero.
+        # Se respeta el total realmente cobrado y se ajusta la mora.
+        if total != monto + mora:
+            if total >= monto:
+                mora = total - monto
+            else:
+                monto, mora = total, Decimal("0.00")
         fecha_pago = fila[5] if isinstance(fila[5], dt.datetime) else None
         vence = fila[6].date() if isinstance(fila[6], dt.datetime) else None
         id_tipo, concepto = clasificar_concepto(fila[3])
@@ -405,7 +426,11 @@ def calcular_pendientes(alumnos, pagos_reales, hoy):
             esperado = monto_fijo if monto_fijo is not None else a["pension"]
             ya = pagado.get((a["dni"], clave_cargo_), Decimal("0"))
             saldo = esperado - ya
-            if saldo <= 0:
+            # Tolerancia: la pensión de cada alumno se toma del Excel, pero el
+            # colegio a veces cobró unos soles menos (descuentos, redondeos).
+            # Sin este margen se generaban cientos de cargos de S/5 y S/10 que
+            # no son deuda real, sino el desfase con el importe que se asumió.
+            if saldo <= TOLERANCIA_SALDO:
                 continue
             pendientes.append({
                 "dni": a["dni"], "id_tipo_pago": id_tipo,
@@ -659,8 +684,8 @@ def generar(salida):
       "fecha_vencimiento, mora, accion_vencimiento, activo, periodo_academico) VALUES")
     w(",\n".join(
         f"  ({i}, {sql(cat)}, {sql(nom)}, {costo}, {sql(ini)}, {sql(fin)}, "
-        f"0.00, 'APLICAR_MORA', 1, 'REGULAR')"
-        for i, cat, nom, costo, ini, fin in CATEGORIAS_TIPO_PAGO
+        f"{mora}, {sql(accion)}, 1, 'REGULAR')"
+        for i, cat, nom, costo, ini, fin, mora, accion in CATEGORIAS_TIPO_PAGO
     ) + ";")
 
     # 6. Usuarios

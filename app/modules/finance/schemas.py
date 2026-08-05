@@ -85,6 +85,10 @@ class PagoResponse(PagoBase):
     fecha_vencimiento: Optional[date] = None # <-- CRÍTICO para el cronograma 2025
     fecha_pago: Optional[datetime] = None
     estado: str
+    # Datos del alumno para las tablas de caja y recaudación (propiedades del
+    # modelo Pago; requieren joinedload(Pago.alumno) en consultas masivas)
+    alumno_nombre: Optional[str] = None
+    dni_alumno: Optional[str] = None
     codigo_operacion_bcp: Optional[str] = None
     # Incluir el log del banco solo para el Admin (puedes crear un PagoDetalleAdminResponse)
     json_respuesta_banco: Optional[str] = None 

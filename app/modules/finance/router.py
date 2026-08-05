@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status,File, UploadFile, 
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date, timedelta
 from typing import List,Optional
-from sqlalchemy import func, extract
+from sqlalchemy import func, extract, or_, and_
 from app.db.database import get_db
 from . import models, schemas
 from app.modules.academic import models as academic_models
@@ -372,26 +372,88 @@ def listar_pagos_filtrados(
     busqueda: str = None,
     tipo: str = None,
     anio: int = None,
-    criterio_fecha: str = "pago",
+    criterio_fecha: str = None,
+    estado: str = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles("ADMIN"))
 ):
+    """
+    Listado de pagos del panel de caja y recaudación.
+
+    `estado` acepta: PENDIENTE, VENCIDO, PAGADO, ANULADO o nada (todos).
+    VENCIDO no se limita al estado guardado: también incluye los que siguen en
+    PENDIENTE pero cuya fecha ya pasó, que es como los pinta la propia tabla.
+
+    La fecha por la que se filtra el año se deduce del estado, sin que haya que
+    elegirla aparte: los pagados se miran por su fecha de pago y los que se
+    deben, por su fecha de vencimiento. `criterio_fecha` se mantiene por
+    compatibilidad, pero solo se respeta si se envía explícitamente.
+    """
     # Aplicar moras antes de devolver resultados para que los montos estén siempre actualizados
     FinanceService.aplicar_moras_pagos_vencidos(db)
 
-    query = db.query(models.Pago)
+    hoy = date.today()
+    # joinedload: la respuesta incluye el nombre y DNI del alumno de cada pago.
+    # Sin esto, con miles de filas se lanzaría una consulta por cada una.
+    query = db.query(models.Pago).options(joinedload(models.Pago.alumno))
     filtro_anio = anio if anio else datetime.now().year
 
-    # 1. Filtro por Año dinámico
-    if criterio_fecha == "vencimiento":
-        query = query.filter(
-            extract('year', models.Pago.fecha_vencimiento) == filtro_anio,
-            models.Pago.estado == "PENDIENTE"
-        )
-        orden = models.Pago.fecha_vencimiento.asc()
+    estado = (estado or "").upper() or None
+
+    # 1. ¿Por qué fecha se filtra el año?
+    if criterio_fecha in ("pago", "vencimiento"):
+        criterio = criterio_fecha
+    elif estado == "PAGADO":
+        criterio = "pago"
+    elif estado in ("PENDIENTE", "VENCIDO"):
+        criterio = "vencimiento"
     else:
+        criterio = "ambos"
+
+    if criterio == "vencimiento":
+        # Antes se forzaba estado == "PENDIENTE" aquí, lo que hacía imposible
+        # ver los pagos VENCIDO. Ahora el estado se decide más abajo.
+        query = query.filter(extract('year', models.Pago.fecha_vencimiento) == filtro_anio)
+        if not estado:
+            query = query.filter(models.Pago.estado.in_(["PENDIENTE", "VENCIDO"]))
+        orden = models.Pago.fecha_vencimiento.asc()
+    elif criterio == "pago":
         query = query.filter(extract('year', models.Pago.fecha_pago) == filtro_anio)
         orden = models.Pago.fecha_pago.desc()
+    else:
+        # Sin filtro de estado: entra todo lo del año, se haya pagado o no
+        query = query.filter(
+            or_(
+                extract('year', models.Pago.fecha_pago) == filtro_anio,
+                extract('year', models.Pago.fecha_vencimiento) == filtro_anio,
+            )
+        )
+        orden = func.coalesce(models.Pago.fecha_pago, models.Pago.fecha_vencimiento).desc()
+
+    # 1b. Filtro explícito por estado
+    if estado:
+        if estado == "VENCIDO":
+            query = query.filter(
+                or_(
+                    models.Pago.estado == "VENCIDO",
+                    and_(
+                        models.Pago.estado == "PENDIENTE",
+                        models.Pago.fecha_vencimiento != None,  # noqa: E711
+                        models.Pago.fecha_vencimiento < hoy,
+                    ),
+                )
+            )
+        elif estado == "PENDIENTE":
+            # Pendiente "de verdad": aún no le llega la fecha de vencimiento
+            query = query.filter(
+                models.Pago.estado == "PENDIENTE",
+                or_(
+                    models.Pago.fecha_vencimiento == None,  # noqa: E711
+                    models.Pago.fecha_vencimiento >= hoy,
+                ),
+            )
+        else:
+            query = query.filter(models.Pago.estado == estado)
 
     # 2. Búsqueda Avanzada (Concepto o DNI)
     if busqueda:

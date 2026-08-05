@@ -131,17 +131,28 @@ class FinanceService:
 
     @staticmethod
     def aplicar_moras_pagos_vencidos(db):
+        """
+        Carga la mora configurada sobre los pagos que pasaron su vencimiento.
+
+        La mora se suma AL PROPIO PAGO (columnas `mora` y `monto_total`), nunca
+        se crea un cargo aparte: el alumno ve una sola línea con su importe ya
+        recargado.
+
+        Se incluyen tanto los PENDIENTE con fecha pasada como los que ya están
+        marcados VENCIDO; antes solo se miraban los PENDIENTE, así que a los
+        VENCIDO no se les cobraba nunca el recargo.
+        """
         hoy = date.today()
         # Calculamos la fecha límite (10 días después del vencimiento)
         limite_gracia = hoy - timedelta(days=10)
-        
+
         # Buscamos deudas que superen el límite de gracia y que no tengan la mora cobrada aún
         pagos_vencidos = db.query(finance_models.Pago).options(
             joinedload(finance_models.Pago.tipo_pago)
         ).filter(
-            finance_models.Pago.estado == "PENDIENTE",
+            finance_models.Pago.estado.in_(["PENDIENTE", "VENCIDO"]),
             finance_models.Pago.fecha_vencimiento < limite_gracia,
-            finance_models.Pago.mora == 0 
+            finance_models.Pago.mora == 0
         ).all()
 
         cantidad = 0

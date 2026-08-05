@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import or_, and_
 from typing import List, Optional
 from datetime import date
+from decimal import Decimal
 from app.db.database import get_db
 from . import models, schemas
 from app.core.util.security import get_current_user
@@ -9,6 +11,7 @@ from app.core.util.security import get_current_user
 # Importamos modelos de alumno para asegurar relaciones si es necesario
 from app.modules.users.alumno import models as alumno_models
 from app.modules.academic import models as academic_models
+from app.modules.finance import models as finance_models
 
 # CAMBIO CLAVE: Prefijo "/enrollment" para coincidir con el frontend
 router = APIRouter(prefix="/enrollment", tags=["Matrícula"])
@@ -199,6 +202,39 @@ def _info_renovacion(db: Session, id_usuario: int):
             inscripcion_estado = "ABIERTA"
             inscripciones_abiertas = True
 
+    # --- ESTAR AL DÍA EN LOS PAGOS ---
+    # Solo bloquean los cargos YA VENCIDOS. Las pensiones de los meses que aún
+    # no llegan siguen en PENDIENTE y no deben impedir la renovación: si se
+    # exigiera el año completo pagado, nadie podría renovar hasta diciembre.
+    #
+    # Se detecta el vencimiento de dos formas para no depender de que un
+    # proceso haya marcado el estado: por estado VENCIDO, o por fecha de
+    # vencimiento ya pasada aunque siga como PENDIENTE.
+    pagos_vencidos = db.query(finance_models.Pago).filter(
+        finance_models.Pago.id_alumno == alumno.id_alumno,
+        or_(
+            finance_models.Pago.estado == "VENCIDO",
+            and_(
+                finance_models.Pago.estado == "PENDIENTE",
+                finance_models.Pago.fecha_vencimiento != None,  # noqa: E711
+                finance_models.Pago.fecha_vencimiento < hoy,
+            ),
+        ),
+    ).order_by(finance_models.Pago.fecha_vencimiento.asc()).all()
+
+    deuda_vencida = sum((p.monto_total or Decimal("0")) for p in pagos_vencidos)
+    al_dia = len(pagos_vencidos) == 0
+
+    detalle_deuda = [
+        {
+            "id_pago": p.id_pago,
+            "concepto": p.concepto,
+            "monto": float(p.monto_total or 0),
+            "fecha_vencimiento": p.fecha_vencimiento.isoformat() if p.fecha_vencimiento else None,
+        }
+        for p in pagos_vencidos
+    ]
+
     return {
         "alumno": alumno,
         "anio_activo": anio_activo,
@@ -215,9 +251,13 @@ def _info_renovacion(db: Session, id_usuario: int):
         "inscripciones_abiertas": inscripciones_abiertas,
         "inscripcion_inicio": fecha_inicio_insc.isoformat() if fecha_inicio_insc else None,
         "inscripcion_fin": fecha_fin_insc.isoformat() if fecha_fin_insc else None,
+        "al_dia": al_dia,
+        "deuda_vencida": float(deuda_vencida),
+        "pagos_vencidos": detalle_deuda,
         "puede_solicitar": (
             bool(matricula) and not egresa and not ya_matriculado_destino
             and not solicitud_en_curso and inscripciones_abiertas
+            and al_dia
         )
     }
 
@@ -257,6 +297,10 @@ def obtener_info_renovacion(id_usuario: int, db: Session = Depends(get_db), curr
         "inscripciones_abiertas": info["inscripciones_abiertas"],
         "inscripcion_inicio": info["inscripcion_inicio"],
         "inscripcion_fin": info["inscripcion_fin"],
+        # Estado de cuenta: la renovación exige no tener cargos vencidos
+        "al_dia": info["al_dia"],
+        "deuda_vencida": info["deuda_vencida"],
+        "pagos_vencidos": info["pagos_vencidos"],
         "solicitudes": [
             schemas.SolicitudMatriculaResponse.model_validate(s) for s in info["solicitudes"]
         ]
@@ -285,6 +329,17 @@ def solicitar_renovacion(data: schemas.SolicitudMatriculaCreate, db: Session = D
             raise HTTPException(status_code=400, detail="El periodo de inscripciones para el próximo año ya cerró")
         else:
             raise HTTPException(status_code=400, detail="Las inscripciones del próximo año aún no han sido habilitadas por el colegio")
+    # No se renueva con deuda vencida. Se valida también aquí y no solo en el
+    # front: alguien podría llamar al endpoint directamente.
+    if not info["al_dia"]:
+        cantidad = len(info["pagos_vencidos"])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Tienes {cantidad} pago(s) vencido(s) por S/ {info['deuda_vencida']:.2f}. "
+                "Debes regularizar tu deuda antes de renovar la matrícula."
+            ),
+        )
     if not info["puede_solicitar"]:
         raise HTTPException(status_code=400, detail="No es posible registrar tu solicitud de renovación en este momento")
 
