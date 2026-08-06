@@ -372,6 +372,7 @@ def listar_pagos_filtrados(
     busqueda: str = None,
     tipo: str = None,
     anio: int = None,
+    mes: int = None,
     criterio_fecha: str = None,
     estado: str = None,
     db: Session = Depends(get_db),
@@ -388,6 +389,9 @@ def listar_pagos_filtrados(
     elegirla aparte: los pagados se miran por su fecha de pago y los que se
     deben, por su fecha de vencimiento. `criterio_fecha` se mantiene por
     compatibilidad, pero solo se respeta si se envía explícitamente.
+
+    `mes` (1-12) acota el listado dentro del año usando esa misma fecha, para
+    poder revisar la caja mes a mes. Sin `mes` entra el año completo.
     """
     # Aplicar moras antes de devolver resultados para que los montos estén siempre actualizados
     FinanceService.aplicar_moras_pagos_vencidos(db)
@@ -410,25 +414,38 @@ def listar_pagos_filtrados(
     else:
         criterio = "ambos"
 
+    filtro_mes = mes if mes and 1 <= mes <= 12 else None
+
     if criterio == "vencimiento":
         # Antes se forzaba estado == "PENDIENTE" aquí, lo que hacía imposible
         # ver los pagos VENCIDO. Ahora el estado se decide más abajo.
         query = query.filter(extract('year', models.Pago.fecha_vencimiento) == filtro_anio)
+        if filtro_mes:
+            query = query.filter(extract('month', models.Pago.fecha_vencimiento) == filtro_mes)
         if not estado:
             query = query.filter(models.Pago.estado.in_(["PENDIENTE", "VENCIDO"]))
         orden = models.Pago.fecha_vencimiento.asc()
     elif criterio == "pago":
         query = query.filter(extract('year', models.Pago.fecha_pago) == filtro_anio)
+        if filtro_mes:
+            query = query.filter(extract('month', models.Pago.fecha_pago) == filtro_mes)
         orden = models.Pago.fecha_pago.desc()
     else:
-        # Sin filtro de estado: entra todo lo del año, se haya pagado o no
+        # Sin filtro de estado entra todo lo del año, se haya pagado o no.
         query = query.filter(
             or_(
                 extract('year', models.Pago.fecha_pago) == filtro_anio,
                 extract('year', models.Pago.fecha_vencimiento) == filtro_anio,
             )
         )
-        orden = func.coalesce(models.Pago.fecha_pago, models.Pago.fecha_vencimiento).desc()
+        # Para el mes se usa la fecha que define a cada pago: la de cobro si ya
+        # se pagó, y si no la de vencimiento. Comparando las dos por separado,
+        # un pago de marzo cobrado en abril salía en los dos meses y las cuentas
+        # por mes sumaban más que el año entero.
+        fecha_relevante = func.coalesce(models.Pago.fecha_pago, models.Pago.fecha_vencimiento)
+        if filtro_mes:
+            query = query.filter(extract('month', fecha_relevante) == filtro_mes)
+        orden = fecha_relevante.desc()
 
     # 1b. Filtro explícito por estado
     if estado:

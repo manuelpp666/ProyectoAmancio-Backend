@@ -8,12 +8,17 @@ from app.modules.users.docente.models import Docente
 from app.core.util.password import get_password_hash
 from app.core.util.security import get_current_user
 from app.core.util.usuarios import generar_username
+from app.core.util.permisos import permisos_completos, normalizar
 
 router = APIRouter(prefix="/personal", tags=["Gestión de Personal"])
 
 # Función auxiliar para unificar la respuesta
 def to_response(registro, tipo):
     id_val = getattr(registro, f"id_{tipo}")
+    # Solo el administrador tiene permisos. Se devuelven completados con el
+    # catálogo actual para que la pantalla muestre también las pestañas que se
+    # añadieron después de la última vez que se guardaron.
+    permisos = getattr(registro, "permisos", None)
     return {
         "id": id_val,
         "id_usuario": registro.id_usuario,
@@ -23,8 +28,7 @@ def to_response(registro, tipo):
         "telefono": registro.telefono,
         "email": registro.email,
         "usuario": registro.usuario,
-        # Importante: Solo el administrador tiene permisos
-        "permisos": getattr(registro, "permisos", None) 
+        "permisos": normalizar(permisos) if tipo == "admin" else None,
     }
 
 @router.get("/{tipo}", response_model=List[schemas.PersonalResponse])
@@ -92,10 +96,12 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
 
     # 4. Crear el perfil específico según el tipos
     if tipo == "admin":
-        # Al Administrador le pasamos explícitamente los permisos que extrajimos
+        # Un administrador nuevo entra con todo el panel activado; el director
+        # le cierra después lo que no le corresponda desde Gestión de Personal.
+        # Si el formulario mandó permisos, se completan con el catálogo actual.
         nuevo_perfil = models.Administrador(
-            id_usuario=nuevo_usuario.id_usuario, 
-            permisos=permisos_data, 
+            id_usuario=nuevo_usuario.id_usuario,
+            permisos=normalizar(permisos_data) if permisos_data else permisos_completos(),
             **datos_perfil
         )
     elif tipo == "docente":
@@ -202,9 +208,11 @@ def actualizar_permisos_admin(
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No tienes permiso para alterar privilegios")
 
-    # 3. Actualizar el campo JSON
-    admin.permisos = data.permisos
-    
+    # 3. Se guarda el árbol completo, no solo lo que mandó la pantalla: así una
+    #    clave ausente no queda a merced del valor por defecto y lo marcado es
+    #    exactamente lo único a lo que tendrá acceso.
+    admin.permisos = normalizar(data.permisos)
+
     db.commit()
     db.refresh(admin)
     

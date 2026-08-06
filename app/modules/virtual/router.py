@@ -45,6 +45,72 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 router = APIRouter(prefix="/virtual", tags=["Aula Virtual"])
 
 
+# ===========================================================================
+# REGLAS DE MENSAJERÍA
+# ===========================================================================
+# A quién puede ESCRIBIR PRIMERO cada rol. La secretaría del colegio trabaja
+# con cuenta de ADMIN, por eso ADMIN alcanza a todos.
+#
+# Las parejas alumno–docente además exigen vínculo académico: el docente tiene
+# que dictar en la sección del alumno en el año escolar activo.
+DESTINATARIOS_POR_ROL = {
+    "ADMIN":     {"ADMIN", "DOCENTE", "ALUMNO", "PSICOLOGO", "AUXILIAR"},
+    "ALUMNO":    {"DOCENTE", "PSICOLOGO"},
+    "DOCENTE":   {"ALUMNO", "DOCENTE", "PSICOLOGO", "AUXILIAR"},
+    "AUXILIAR":  {"DOCENTE"},
+    "PSICOLOGO": {"ALUMNO", "DOCENTE", "PSICOLOGO"},
+}
+
+
+def _hay_vinculo_academico(db, usuario_docente, usuario_alumno, anio_activo) -> bool:
+    """¿El docente dicta en la sección donde está matriculado el alumno?"""
+    docente = db.query(models_doc.Docente).filter(
+        models_doc.Docente.id_usuario == usuario_docente.id_usuario
+    ).first()
+    alumno = db.query(models_al.Alumno).filter(
+        models_al.Alumno.id_usuario == usuario_alumno.id_usuario
+    ).first()
+    if not docente or not alumno:
+        return False
+
+    return db.query(models_mn.CargaAcademica).join(
+        models_en.Matricula,
+        models_en.Matricula.id_seccion == models_mn.CargaAcademica.id_seccion,
+    ).filter(
+        models_mn.CargaAcademica.id_docente == docente.id_docente,
+        models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar,
+        models_en.Matricula.id_alumno == alumno.id_alumno,
+        models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar,
+    ).first() is not None
+
+
+def puede_iniciar(db, emisor, receptor, anio_activo) -> bool:
+    """¿`emisor` puede abrir una conversación con `receptor`?"""
+    if not emisor or not receptor or emisor.id_usuario == receptor.id_usuario:
+        return False
+    if receptor.rol not in DESTINATARIOS_POR_ROL.get(emisor.rol, set()):
+        return False
+
+    # Alumno y docente solo si comparten aula
+    if {emisor.rol, receptor.rol} == {"ALUMNO", "DOCENTE"}:
+        docente, alumno = (emisor, receptor) if emisor.rol == "DOCENTE" else (receptor, emisor)
+        return _hay_vinculo_academico(db, docente, alumno, anio_activo)
+
+    return True
+
+
+def puede_conversar(db, uno, otro, anio_activo) -> bool:
+    """
+    ¿Pueden intercambiar mensajes en una conversación ya abierta?
+
+    Basta con que a alguno de los dos se le permita iniciarla. Así el alumno
+    contesta al administrador que le escribió, aunque él no pueda escribirle
+    primero: sin esto quedarían conversaciones donde una parte no responde.
+    """
+    return (puede_iniciar(db, uno, otro, anio_activo)
+            or puede_iniciar(db, otro, uno, anio_activo))
+
+
 @router.post("/chat/mensaje/")
 async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
@@ -70,71 +136,11 @@ async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(g
     if not anio_activo:
         raise HTTPException(status_code=400, detail="No hay un año escolar activo")
 
-    puede_enviar = False
-
-    # --- REGLA: PSICOLOGO ENVÍA ---
-    if remitente.rol == 'PSICOLOGO':
-        # Puede hablar con Alumnos o con otros Psicólogos sin restricción académica
-        if receptor.rol in ['ALUMNO', 'PSICOLOGO']:
-            puede_enviar = True
-
-    # --- REGLA: DOCENTE ENVÍA ---
-    elif remitente.rol == 'DOCENTE':
-        if receptor.rol in ['DOCENTE', 'PSICOLOGO']:
-            puede_enviar = True # Docentes hablan con colegas y psicólogos libremente
-        
-        elif receptor.rol == 'ALUMNO':
-            docente_perfil = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == remitente.id_usuario).first()
-            alumno_perfil = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == receptor.id_usuario).first()
-            
-            es_su_alumno = db.query(models_mn.CargaAcademica).join(
-                models_en.Matricula, models_en.Matricula.id_seccion == models_mn.CargaAcademica.id_seccion
-            ).filter(
-                models_mn.CargaAcademica.id_docente == docente_perfil.id_docente,
-                models_en.Matricula.id_alumno == alumno_perfil.id_alumno,
-                models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
-            ).first()
-            if es_su_alumno: puede_enviar = True
-
-    # --- REGLA: ALUMNO ENVÍA ---
-    elif remitente.rol == 'ALUMNO':
-        if receptor.rol == 'PSICOLOGO':
-            puede_enviar = True # Alumnos siempre pueden contactar al psicólogo
-
-        else:
-            alumno_perfil = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == remitente.id_usuario).first()
-            matricula_remitente = db.query(models_en.Matricula).filter(
-                models_en.Matricula.id_alumno == alumno_perfil.id_alumno,
-                models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
-            ).first()
-
-            if not matricula_remitente:
-                raise HTTPException(status_code=403, detail="El alumno no tiene matrícula activa")
-
-            if receptor.rol == 'DOCENTE':
-                docente_receptor = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == receptor.id_usuario).first()
-                le_ensenha = db.query(models_mn.CargaAcademica).filter(
-                    models_mn.CargaAcademica.id_docente == docente_receptor.id_docente,
-                    models_mn.CargaAcademica.id_seccion == matricula_remitente.id_seccion,
-                    models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
-                ).first()
-                if le_ensenha: puede_enviar = True
-
-            elif receptor.rol == 'ALUMNO':
-                alumno_receptor = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == receptor.id_usuario).first()
-                misma_seccion = db.query(models_en.Matricula).filter(
-                    models_en.Matricula.id_alumno == alumno_receptor.id_alumno,
-                    models_en.Matricula.id_seccion == matricula_remitente.id_seccion,
-                    models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
-                ).first()
-                if misma_seccion: puede_enviar = True
-
-    # --- REGLA: ADMIN ENVÍA ---
-    elif remitente.rol == 'ADMIN':
-        puede_enviar = True
-
-    if not puede_enviar:
-        raise HTTPException(status_code=403, detail="Restricción académica: No puedes enviar mensajes a este usuario.")
+    if not puede_conversar(db, remitente, receptor, anio_activo):
+        raise HTTPException(
+            status_code=403,
+            detail="No puedes intercambiar mensajes con este usuario.",
+        )
 
     # Persistencia y Notificación (se mantiene igual)
     nuevo_mensaje = models.Mensaje(**mensaje.model_dump())
@@ -167,7 +173,14 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
     
     if not anio_activo or not user: return []
 
-    contactos_validos = []
+    # Perfil (tabla y rol) de cada tipo de cuenta
+    PERFILES = {
+        "ALUMNO": models_al.Alumno,
+        "DOCENTE": models_doc.Docente,
+        "PSICOLOGO": models_psi.Psicologo,
+        "AUXILIAR": models_psi.Auxiliar,
+        "ADMIN": models_psi.Administrador,
+    }
 
     def aplicar_filtro(query_obj, modelo):
         if query:
@@ -180,95 +193,63 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
             )
         return query_obj
 
-    # --- LÓGICA SI EL QUE BUSCA ES UN ALUMNO ---
-    if user.rol == 'ALUMNO':
+    # Solo se listan los roles que este usuario tiene permitido contactar
+    permitidos = DESTINATARIOS_POR_ROL.get(user.rol, set())
+
+    # Alumno y docente se ven únicamente si comparten aula: se resuelve con una
+    # consulta acotada en vez de traer a todos y descartar uno por uno.
+    seccion_alumno = None
+    id_docente = None
+    if user.rol == "ALUMNO":
         alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
-        matricula = db.query(models_en.Matricula).filter(
-            models_en.Matricula.id_alumno == alumno.id_alumno, 
-            models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
-        ).first()
-
-        # 1. Psicólogos (Siempre visibles para alumnos)
-        q_psicologos = db.query(models_psi.Psicologo)
-        psicologos = aplicar_filtro(q_psicologos, models_psi.Psicologo).all()
-        for p in psicologos:
-            contactos_validos.append({"id_usuario": p.id_usuario, "nombre": f"{p.nombres} {p.apellidos}", "dni": p.dni, "rol": "PSICOLOGO"})
-
-        if matricula:
-            # 2. Sus Docentes
-            q_docentes = db.query(models_doc.Docente).join(models_mn.CargaAcademica, models_mn.CargaAcademica.id_docente == models_doc.Docente.id_docente).filter(
-                models_mn.CargaAcademica.id_seccion == matricula.id_seccion,
-                models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
-            )
-            # 3. Sus Compañeros
-            q_companheros = db.query(models_al.Alumno).join(models_en.Matricula, models_en.Matricula.id_alumno == models_al.Alumno.id_alumno).filter(
-                models_en.Matricula.id_seccion == matricula.id_seccion,
+        if alumno:
+            matricula = db.query(models_en.Matricula).filter(
+                models_en.Matricula.id_alumno == alumno.id_alumno,
                 models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar,
-                models_al.Alumno.id_usuario != id_usuario
-            )
-            
-            for d in aplicar_filtro(q_docentes, models_doc.Docente).all():
-                contactos_validos.append({"id_usuario": d.id_usuario, "nombre": f"{d.nombres} {d.apellidos}", "dni": d.dni, "rol": "DOCENTE"})
-            for c in aplicar_filtro(q_companheros, models_al.Alumno).all():
-                contactos_validos.append({"id_usuario": c.id_usuario, "nombre": f"{c.nombres} {c.apellidos}", "dni": c.dni, "rol": "ALUMNO"})
-
-    # --- LÓGICA SI EL QUE BUSCA ES UN DOCENTE ---
-    elif user.rol == 'DOCENTE':
+            ).first()
+            seccion_alumno = matricula.id_seccion if matricula else None
+    elif user.rol == "DOCENTE":
         docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
-        
-        # 1. Alumnos de sus secciones
-        q_alumnos = db.query(models_al.Alumno).join(models_en.Matricula, models_en.Matricula.id_alumno == models_al.Alumno.id_alumno).join(
-            models_mn.CargaAcademica, models_mn.CargaAcademica.id_seccion == models_en.Matricula.id_seccion
-        ).filter(
-            models_mn.CargaAcademica.id_docente == docente.id_docente,
-            models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
-        ).distinct()
+        id_docente = docente.id_docente if docente else None
 
-        # 2. Otros Docentes
-        q_colegas = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario != id_usuario)
+    contactos_validos = []
+    for rol_destino in sorted(permitidos):
+        modelo = PERFILES[rol_destino]
+        q = db.query(modelo).filter(modelo.id_usuario != id_usuario)
 
-        # 3. Psicólogos (Siempre visibles para docentes)
-        q_psicologos = db.query(models_psi.Psicologo)
+        if user.rol == "ALUMNO" and rol_destino == "DOCENTE":
+            if seccion_alumno is None:
+                continue  # sin matrícula activa no tiene docentes asignados
+            q = q.join(
+                models_mn.CargaAcademica,
+                models_mn.CargaAcademica.id_docente == models_doc.Docente.id_docente,
+            ).filter(
+                models_mn.CargaAcademica.id_seccion == seccion_alumno,
+                models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar,
+            ).distinct()
 
-        for a in aplicar_filtro(q_alumnos, models_al.Alumno).all():
-            contactos_validos.append({"id_usuario": a.id_usuario, "nombre": f"{a.nombres} {a.apellidos}", "dni": a.dni, "rol": "ALUMNO"})
-        for col in aplicar_filtro(q_colegas, models_doc.Docente).all():
-            contactos_validos.append({"id_usuario": col.id_usuario, "nombre": f"{col.nombres} {col.apellidos}", "dni": col.dni, "rol": "DOCENTE"})
-        for p in aplicar_filtro(q_psicologos, models_psi.Psicologo).all():
-            contactos_validos.append({"id_usuario": p.id_usuario, "nombre": f"{p.nombres} {p.apellidos}", "dni": p.dni, "rol": "PSICOLOGO"})
+        elif user.rol == "DOCENTE" and rol_destino == "ALUMNO":
+            if id_docente is None:
+                continue
+            q = q.join(
+                models_en.Matricula,
+                models_en.Matricula.id_alumno == models_al.Alumno.id_alumno,
+            ).join(
+                models_mn.CargaAcademica,
+                models_mn.CargaAcademica.id_seccion == models_en.Matricula.id_seccion,
+            ).filter(
+                models_mn.CargaAcademica.id_docente == id_docente,
+                models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar,
+                models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar,
+            ).distinct()
 
-    # --- LÓGICA SI EL QUE BUSCA ES UN PSICOLOGO ---
-    elif user.rol == 'PSICOLOGO':
-        # 1. Todos los Alumnos (sin excepción)
-        q_alumnos = db.query(models_al.Alumno)
-        # 2. Todos los Docentes (sin excepción)
-        q_docentes = db.query(models_doc.Docente)
-        # 3. Otros Psicólogos
-        q_psicologos = db.query(models_psi.Psicologo).filter(models_psi.Psicologo.id_usuario != id_usuario)
-
-        for a in aplicar_filtro(q_alumnos, models_al.Alumno).all():
-            contactos_validos.append({"id_usuario": a.id_usuario, "nombre": f"{a.nombres} {a.apellidos}", "dni": a.dni, "rol": "ALUMNO"})
-        for d in aplicar_filtro(q_docentes, models_doc.Docente).all():
-            contactos_validos.append({"id_usuario": d.id_usuario, "nombre": f"{d.nombres} {d.apellidos}", "dni": d.dni, "rol": "DOCENTE"})
-        for p in aplicar_filtro(q_psicologos, models_psi.Psicologo).all():
-            contactos_validos.append({"id_usuario": p.id_usuario, "nombre": f"{p.nombres} {p.apellidos}", "dni": p.dni, "rol": "PSICOLOGO"})
-
-    # --- LÓGICA SI EL QUE BUSCA ES UN ADMIN ---
-    elif user.rol == 'ADMIN':
-        q_docentes = db.query(models_doc.Docente)
-        q_alumnos = db.query(models_al.Alumno)
-        q_psicologos = db.query(models_psi.Psicologo)
-        q_admins = db.query(models_psi.Administrador).filter(
-            models_psi.Administrador.id_usuario != id_usuario
-        )
-        for d in aplicar_filtro(q_docentes, models_doc.Docente).all():
-            contactos_validos.append({"id_usuario": d.id_usuario, "nombre": f"{d.nombres} {d.apellidos}", "dni": d.dni, "rol": "DOCENTE"})
-        for a in aplicar_filtro(q_alumnos, models_al.Alumno).all():
-            contactos_validos.append({"id_usuario": a.id_usuario, "nombre": f"{a.nombres} {a.apellidos}", "dni": a.dni, "rol": "ALUMNO"})
-        for p in aplicar_filtro(q_psicologos, models_psi.Psicologo).all():
-            contactos_validos.append({"id_usuario": p.id_usuario, "nombre": f"{p.nombres} {p.apellidos}", "dni": p.dni, "rol": "PSICOLOGO"})
-        for adm in aplicar_filtro(q_admins, models_psi.Administrador).all():
-            contactos_validos.append({"id_usuario": adm.id_usuario, "nombre": f"{adm.nombres} {adm.apellidos}", "dni": adm.dni, "rol": "ADMIN"})
+        for p in aplicar_filtro(q, modelo).all():
+            contactos_validos.append({
+                "id_usuario": p.id_usuario,
+                "nombre": f"{p.nombres} {p.apellidos}",
+                "dni": p.dni,
+                "rol": rol_destino,
+            })
 
     return contactos_validos
 
@@ -343,7 +324,6 @@ def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = 
     if current_user.get("rol") != "ADMIN" and current_user.get("id") not in [req.usuario1_id, req.usuario2_id]:
         raise HTTPException(status_code=403, detail="No puedes modificar esta información")
 
-
     # 1. Verificar si ya existe una conversación entre estos dos usuarios
     existente = db.query(models.Conversacion).filter(
         or_(
@@ -355,7 +335,23 @@ def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = 
     if existente:
         return existente
 
-    # 2. Si no existe, crearla
+    # 2. Antes de abrir una conversación nueva se comprueban las mismas reglas
+    #    que al enviar. Sin esto quedaban chats vacíos entre personas que
+    #    después no podían escribirse.
+    anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == 1).first()
+    if not anio_activo:
+        raise HTTPException(status_code=400, detail="No hay un año escolar activo")
+
+    uno = db.query(models_usuario.Usuario).get(req.usuario1_id)
+    otro = db.query(models_usuario.Usuario).get(req.usuario2_id)
+    if not uno or not otro:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if not puede_conversar(db, uno, otro, anio_activo):
+        raise HTTPException(
+            status_code=403,
+            detail="No puedes iniciar una conversación con este usuario.",
+        )
+
     nueva = models.Conversacion(
         usuario1_id=req.usuario1_id,
         usuario2_id=req.usuario2_id,

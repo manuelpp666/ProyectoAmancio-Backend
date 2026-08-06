@@ -12,9 +12,12 @@ from app.modules.personal.models import Psicologo
 from app.modules.users.alumno.models import Alumno
 from app.modules.users.familiar import services as familiar_services
 from app.core.util.security import get_current_user
+from app.core.util.correo_usuario import obtener_correo, guardar_correo
+from app.modules.users.router import _exigir_cambio_password, _exigir_correo
 from .schemas import (
     ChangePasswordSchema, ActualizarPerfilAdminSchema,
-    ActualizarDireccionSchema, ActualizarMedicosSchema, FamiliarCreateSchema
+    ActualizarDireccionSchema, ActualizarMedicosSchema, FamiliarCreateSchema,
+    RegistrarCorreoSchema, EstadoPrimerIngresoResponse,
 )
 
 router = APIRouter(prefix="/perfil", tags=["Perfil"])
@@ -192,3 +195,51 @@ async def change_password(data: ChangePasswordSchema, db: Session = Depends(get_
     user.debe_cambiar_password = False
     db.commit()
     return {"message": "Contraseña actualizada con éxito"}
+
+
+@router.get("/auth/primer-ingreso", response_model=EstadoPrimerIngresoResponse)
+def estado_primer_ingreso(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    """
+    Qué le falta a esta cuenta para poder usar el campus.
+
+    La pantalla de primer ingreso lo consulta al abrirse, en lugar de fiarse de
+    lo que devolvió el login: así sigue siendo correcta tras recargar la página
+    y no se le puede saltar cambiando lo guardado en el navegador.
+    """
+    user = db.query(Usuario).filter(Usuario.id_usuario == current_user.get("id")).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    correo = obtener_correo(db, user)
+    return {
+        "debe_cambiar_password": bool(user.debe_cambiar_password) and _exigir_cambio_password(db),
+        "debe_registrar_correo": _exigir_correo(db) and not correo,
+        "es_alumno": user.rol == "ALUMNO",
+        "email_actual": correo,
+    }
+
+
+@router.post("/auth/registrar-correo")
+def registrar_correo(
+    data: RegistrarCorreoSchema,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Guarda el correo de contacto de la cuenta que ha iniciado sesión.
+
+    En el alumno el correo va a su apoderado, que es quien recibe los avisos de
+    asistencia y conducta. Ver app/core/util/correo_usuario.py.
+    """
+    user = db.query(Usuario).filter(Usuario.id_usuario == current_user.get("id")).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    try:
+        guardar_correo(db, user, str(data.email))
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+    db.commit()
+    return {"message": "Correo registrado con éxito", "email": str(data.email)}

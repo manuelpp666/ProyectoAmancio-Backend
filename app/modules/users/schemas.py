@@ -33,3 +33,6 @@ class LoginResponse(BaseModel):
     # True cuando el usuario aún tiene la clave inicial y el colegio
     # exige cambiarla antes de usar el campus.
     debe_cambiar_password: bool = False
+    # True cuando la cuenta todavía no tiene un correo de contacto registrado
+    # y el colegio exige pedirlo en el primer ingreso.
+    debe_registrar_correo: bool = False

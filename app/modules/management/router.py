@@ -1020,10 +1020,6 @@ def dashboard_admin(
         raise HTTPException(status_code=403, detail="No autorizado")
 
     hoy = date.today()
-    inicio_mes = hoy.replace(day=1)
-    mes_anterior_fin = inicio_mes - timedelta(days=1)
-    inicio_mes_anterior = mes_anterior_fin.replace(day=1)
-
     # Matrículas del año consultado: base de casi todo lo demás
     matriculas = (
         db.query(models_en.Matricula)
@@ -1033,61 +1029,10 @@ def dashboard_admin(
     ids_matricula = [m.id_matricula for m in matriculas]
     ids_alumno = list({m.id_alumno for m in matriculas})
 
-    # ── FINANZAS ────────────────────────────────────────────────────────────
-    def suma(*filtros):
-        q = db.query(func.coalesce(func.sum(models_fi.Pago.monto_total), 0))
-        for f in filtros:
-            q = q.filter(f)
-        return float(q.scalar() or 0)
-
-    recaudado_mes = suma(
-        models_fi.Pago.estado == "PAGADO",
-        models_fi.Pago.fecha_pago >= inicio_mes,
-    )
-    recaudado_mes_anterior = suma(
-        models_fi.Pago.estado == "PAGADO",
-        models_fi.Pago.fecha_pago >= inicio_mes_anterior,
-        models_fi.Pago.fecha_pago <= mes_anterior_fin,
-    )
-    deuda_vencida = suma(models_fi.Pago.estado == "VENCIDO")
-    por_cobrar = suma(models_fi.Pago.estado == "PENDIENTE")
-
-    alumnos_con_deuda = (
-        db.query(func.count(func.distinct(models_fi.Pago.id_alumno)))
-        .filter(models_fi.Pago.estado == "VENCIDO")
-        .scalar() or 0
-    )
-
-    # Los 5 alumnos con mayor deuda vencida, con su grado y sección
-    top_deudores = []
-    filas = (
-        db.query(
-            models_al.Alumno.id_alumno,
-            models_al.Alumno.nombres,
-            models_al.Alumno.apellidos,
-            func.sum(models_fi.Pago.monto_total).label("deuda"),
-        )
-        .join(models_fi.Pago, models_fi.Pago.id_alumno == models_al.Alumno.id_alumno)
-        .filter(models_fi.Pago.estado == "VENCIDO")
-        .group_by(models_al.Alumno.id_alumno)
-        .order_by(func.sum(models_fi.Pago.monto_total).desc())
-        .limit(5)
-        .all()
-    )
-    ubicacion = {}
-    if filas:
-        for m in matriculas:
-            if m.id_alumno in {f[0] for f in filas}:
-                g = m.grado.nombre if m.grado else ""
-                s = m.seccion.nombre if m.seccion else ""
-                ubicacion[m.id_alumno] = f"{g} {s}".strip()
-    for id_al, nom, ape, deuda in filas:
-        top_deudores.append({
-            "id_alumno": id_al,
-            "nombre": f"{ape}, {nom}",
-            "aula": ubicacion.get(id_al, "—"),
-            "deuda": float(deuda or 0),
-        })
+    # El dashboard no devuelve nada económico (recaudación, deuda, morosos).
+    # Esa información es sensible y se consulta en Trámites y Finanzas, donde
+    # el acceso se controla por permiso. Aquí ni siquiera se calcula, para que
+    # no viaje al navegador de quien abre el panel.
 
     # ── ASISTENCIA DE HOY ───────────────────────────────────────────────────
     conteo_hoy = {"P": 0, "T": 0, "F": 0, "J": 0}
@@ -1217,14 +1162,6 @@ def dashboard_admin(
         })
 
     return {
-        "finanzas": {
-            "recaudado_mes": recaudado_mes,
-            "recaudado_mes_anterior": recaudado_mes_anterior,
-            "deuda_vencida": deuda_vencida,
-            "por_cobrar": por_cobrar,
-            "alumnos_con_deuda": alumnos_con_deuda,
-            "top_deudores": top_deudores,
-        },
         "asistencia_hoy": {
             "presentes": conteo_hoy["P"],
             "tardanzas": conteo_hoy["T"],

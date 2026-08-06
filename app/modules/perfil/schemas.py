@@ -1,10 +1,25 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
 class ChangePasswordSchema(BaseModel):
     username: str
     current_password: str
     new_password: str = Field(..., min_length=8)
+
+
+class RegistrarCorreoSchema(BaseModel):
+    # EmailStr rechaza direcciones mal escritas antes de guardarlas: un correo
+    # con una errata deja al apoderado sin recibir los avisos y nadie se entera.
+    email: EmailStr
+
+
+class EstadoPrimerIngresoResponse(BaseModel):
+    debe_cambiar_password: bool
+    debe_registrar_correo: bool
+    # Para el alumno el correo es el del apoderado, y el texto de la pantalla
+    # cambia en consecuencia.
+    es_alumno: bool
+    email_actual: Optional[str] = None
 
 class ActualizarPerfilAdminSchema(BaseModel):
     telefono: Optional[str] = None
