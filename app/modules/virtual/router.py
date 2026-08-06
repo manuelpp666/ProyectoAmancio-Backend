@@ -61,6 +61,33 @@ DESTINATARIOS_POR_ROL = {
     "PSICOLOGO": {"ALUMNO", "DOCENTE", "PSICOLOGO"},
 }
 
+# Dónde vive el nombre real de cada rol. La cuenta (`usuario`) solo guarda el
+# username; los nombres y apellidos están en la ficha de cada rol.
+PERFIL_POR_ROL = {
+    "ALUMNO": models_al.Alumno,
+    "DOCENTE": models_doc.Docente,
+    "PSICOLOGO": models_psi.Psicologo,
+    "AUXILIAR": models_psi.Auxiliar,
+    "ADMIN": models_psi.Administrador,
+}
+
+
+def nombre_de(db, usuario):
+    """
+    Nombre y apellidos reales de una cuenta.
+
+    Se consulta siempre por aquí para que ningún rol acabe mostrándose por su
+    username: en la lista de conversaciones, ADMIN y AUXILIAR no estaban
+    contemplados y salían como "ADM-73193257" en lugar de la persona.
+    """
+    modelo = PERFIL_POR_ROL.get(usuario.rol) if usuario else None
+    if modelo:
+        perfil = db.query(modelo).filter(modelo.id_usuario == usuario.id_usuario).first()
+        if perfil:
+            return (perfil.nombres or "").strip(), (perfil.apellidos or "").strip()
+    # Cuenta sin ficha: se muestra el username antes que dejarlo en blanco
+    return (usuario.username if usuario else "Sin nombre"), ""
+
 
 def _hay_vinculo_academico(db, usuario_docente, usuario_alumno, anio_activo) -> bool:
     """¿El docente dicta en la sección donde está matriculado el alumno?"""
@@ -173,15 +200,6 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
     
     if not anio_activo or not user: return []
 
-    # Perfil (tabla y rol) de cada tipo de cuenta
-    PERFILES = {
-        "ALUMNO": models_al.Alumno,
-        "DOCENTE": models_doc.Docente,
-        "PSICOLOGO": models_psi.Psicologo,
-        "AUXILIAR": models_psi.Auxiliar,
-        "ADMIN": models_psi.Administrador,
-    }
-
     def aplicar_filtro(query_obj, modelo):
         if query:
             return query_obj.filter(
@@ -214,7 +232,7 @@ def buscar_contactos(id_usuario: int, query: str = None, db: Session = Depends(g
 
     contactos_validos = []
     for rol_destino in sorted(permitidos):
-        modelo = PERFILES[rol_destino]
+        modelo = PERFIL_POR_ROL[rol_destino]
         q = db.query(modelo).filter(modelo.id_usuario != id_usuario)
 
         if user.rol == "ALUMNO" and rol_destino == "DOCENTE":
@@ -273,29 +291,8 @@ def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db), curren
         if not otro_usuario:
             continue
 
-        # 2. Lógica para obtener el nombre real desde Alumno o Docente
-        nombre_real = "Sin nombre"
-        apellidos_real = ""
-        
-        if otro_usuario.rol == 'DOCENTE':
-            perfil = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == otro_id).first()
-            if perfil:
-                nombre_real = perfil.nombres
-                apellidos_real = perfil.apellidos
-        elif otro_usuario.rol == 'ALUMNO':
-            perfil = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == otro_id).first()
-            if perfil:
-                nombre_real = perfil.nombres
-                apellidos_real = perfil.apellidos
-        elif otro_usuario.rol == 'PSICOLOGO':
-            perfil = db.query(models_psi.Psicologo).filter(models_psi.Psicologo.id_usuario == otro_id).first()
-            if perfil:
-                nombre_real = perfil.nombres
-                apellidos_real = perfil.apellidos
-        else:
-            # Fallback por si es ADMIN o FAMILIAR
-            nombre_real = otro_usuario.username
-            apellidos_real = ""
+        # 2. Nombre real de la persona (nunca su username)
+        nombre_real, apellidos_real = nombre_de(db, otro_usuario)
 
         # 3. Obtener último mensaje
         ultimo_msj = db.query(models.Mensaje).filter(
@@ -309,7 +306,8 @@ def listar_conversaciones(id_usuario: int, db: Session = Depends(get_db), curren
             "rol": otro_usuario.rol,
             "ultimoMensaje": ultimo_msj.contenido if ultimo_msj else "Empieza a chatear",
             "hora": ultimo_msj.fecha_envio.strftime("%H:%M") if ultimo_msj else "",
-            "iniciales": (nombre_real[0] + (apellidos_real[0] if apellidos_real else "")).upper(),
+            # Sin el guardia, un perfil con el nombre vacío rompía la lista entera
+            "iniciales": ((nombre_real[:1]) + (apellidos_real[:1])).upper() or "?",
             "color": "bg-[#701C32]" if otro_usuario.rol == "DOCENTE" else "bg-blue-600",
             "mensajes": [] 
         })

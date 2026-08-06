@@ -1,4 +1,15 @@
 import os
+import sys
+
+# La consola de Windows usa cp1252 cuando la salida va a un archivo o a una
+# tubería (por ejemplo al arrancar el servidor redirigiendo a un log). Con esa
+# codificación, cualquier print con un emoji o una tilde aborta el arranque con
+# UnicodeEncodeError antes de que el servidor llegue a escuchar. Se fuerza
+# UTF-8 aquí, antes del primer print.
+for _flujo in (sys.stdout, sys.stderr):
+    if hasattr(_flujo, "reconfigure"):
+        _flujo.reconfigure(encoding="utf-8", errors="replace")
+
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware

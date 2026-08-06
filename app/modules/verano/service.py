@@ -21,6 +21,7 @@ from app.modules.management import models as mn_models
 from app.modules.finance import models as fi_models
 from app.modules.pagina_principal import models as cfg_models
 from app.modules.users.alumno import models as al_models
+from app.modules.users.alumno import estados as estados_alumno
 from app.modules.users.relacion_familiar import models as rel_models
 from app.modules.users import models as usuario_models
 from app.core.util.password import get_password_hash
@@ -471,7 +472,7 @@ def procesar_pago_verano(db: Session, pago) -> bool:
             db.add(nuevo)
             db.flush()
             alumno.id_usuario = nuevo.id_usuario
-        alumno.estado_ingreso = "ESTUDIANTE"
+        alumno.estado_ingreso = estados_alumno.ESTUDIANTE
 
     # Crear matrícula de verano (si no existe)
     matricula = db.query(en_models.Matricula).filter(

@@ -4,6 +4,7 @@ from sqlalchemy import extract, func, or_
 from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
 from app.core.util.security import get_current_user
+from app.core.util import busqueda as busqueda_util
 from . import models, schemas
 from .constants import PUNTAJE_MAXIMO, UMBRAL_OBSERVACION, UMBRAL_CRITICO, calcular_puntaje, estado_visual
 from typing import Optional
@@ -107,15 +108,16 @@ def listar_reportes(
         alumno_models.Alumno, models.ReporteConducta.id_alumno == alumno_models.Alumno.id_alumno
     )
 
-    # Búsqueda por alumno (nombre, apellido o DNI)
+    # Búsqueda por alumno: nombres, apellidos o DNI, palabra a palabra, para que
+    # escribir el nombre completo tal como aparece en la lista encuentre al alumno.
     termino = (q or "").strip()
     if len(termino) >= 3:
-        patron = f"%{termino}%"
-        consulta = consulta.filter(or_(
-            alumno_models.Alumno.nombres.ilike(patron),
-            alumno_models.Alumno.apellidos.ilike(patron),
-            alumno_models.Alumno.dni.ilike(patron),
-        ))
+        consulta = busqueda_util.filtrar(
+            consulta, termino,
+            alumno_models.Alumno.nombres,
+            alumno_models.Alumno.apellidos,
+            alumno_models.Alumno.dni,
+        )
 
     total = consulta.count()
     reportes = consulta.order_by(
@@ -602,16 +604,21 @@ def buscar_alumnos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Busca alumnos matriculados por nombre o DNI (Escalable)."""
+    """Busca alumnos por nombre, apellidos o DNI (Escalable).
+
+    Cada palabra debe aparecer en alguno de esos datos, sin importar el orden,
+    para que escribir el nombre completo encuentre al alumno aunque nombres y
+    apellidos estén en columnas distintas.
+    """
     if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tienes permisos para buscar alumnos")
-    # Filtramos solo alumnos con matrícula activa (asumiendo que existe la tabla matricula)
-    alumnos = db.query(alumno_models.Alumno).filter(
-        (alumno_models.Alumno.nombres.ilike(f"%{q}%")) | 
-        (alumno_models.Alumno.apellidos.ilike(f"%{q}%")) |
-        (alumno_models.Alumno.dni.ilike(f"%{q}%"))
-    ).limit(10).all() # Limitamos para que sea rápido
-    
+    alumnos = busqueda_util.filtrar(
+        db.query(alumno_models.Alumno), q,
+        alumno_models.Alumno.nombres,
+        alumno_models.Alumno.apellidos,
+        alumno_models.Alumno.dni,
+    ).limit(10).all()  # Limitamos para que sea rápido
+
     return alumnos
 
 @router.get("/alumnos-en-riesgo")

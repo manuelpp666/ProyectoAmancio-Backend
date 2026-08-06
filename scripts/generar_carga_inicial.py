@@ -740,7 +740,11 @@ def generar(salida):
             f"  ({i}, {u}, {sql(a['dni'])}, {sql(a['nombres'])}, {sql(a['apellidos'])}, "
             f"{sql(a['direccion'])}, {sql(a['enfermedad'])}, {sql(a['talla'])}, "
             f"{sql(a['colegio'])}, {ID_GRADO[(a['nivel'], a['grado'])]}, "
-            f"{sql(a['hermanos'])}, 'ACEPTADO')"
+            # 'ESTUDIANTE' es el estado que usa el sistema para un alumno ya
+            # matriculado. Antes se escribía 'ACEPTADO', que no existía en
+            # ninguna otra parte del código y dejaba a los alumnos sin encajar
+            # en ninguna condición (ver app/modules/users/alumno/estados.py).
+            f"{sql(a['hermanos'])}, 'ESTUDIANTE')"
             for i, u, a in filas_alumno
         ),
     )

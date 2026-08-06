@@ -30,21 +30,97 @@ from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_i
 # pip install pdfplumber
 import pdfplumber
 
-# --- OCR OPCIONAL (solo se activa si una página no tiene texto extraíble,
-# es decir, si es una imagen escaneada). Esto evita gastar OCR en documentos
-# normales y mantiene el costo bajo. ---
+# --- OCR (solo se activa si una página no tiene texto extraíble, es decir, si
+# es una imagen escaneada). Esto evita gastar OCR en documentos normales y
+# mantiene el costo bajo. ---
+#
+# No basta con que los paquetes de Python se importen: pytesseract y pdf2image
+# son envoltorios que llaman a dos programas externos (Tesseract y Poppler). Si
+# se importan pero los programas no están, el OCR fallaba al procesar el primer
+# PDF escaneado en vez de saltárselo. Por eso aquí se comprueba que los
+# ejecutables existan de verdad y que esté el idioma español, y solo entonces se
+# enciende el OCR.
+#
+# Las rutas se pueden fijar en el .env (TESSERACT_CMD, POPPLER_PATH,
+# TESSDATA_PREFIX). Si no, se buscan en el PATH y en las rutas donde los deja
+# una instalación normal en Windows, para no depender de que el PATH esté bien
+# en la consola desde la que se arranque el servidor.
+import shutil
+
+def _buscar_ejecutable(nombre_env, ejecutable, candidatos):
+    ruta = os.getenv(nombre_env)
+    if ruta and os.path.exists(ruta):
+        return ruta
+    encontrado = shutil.which(ejecutable)
+    if encontrado:
+        return encontrado
+    for c in candidatos:
+        c = os.path.expandvars(c)
+        if os.path.exists(c):
+            return c
+    return None
+
+
+TESSERACT_CMD = _buscar_ejecutable(
+    "TESSERACT_CMD", "tesseract",
+    [r"%ProgramFiles%\Tesseract-OCR\tesseract.exe",
+     r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"],
+)
+_pdftoppm = _buscar_ejecutable(
+    "POPPLER_PDFTOPPM", "pdftoppm",
+    [r"%LOCALAPPDATA%\Microsoft\WinGet\Packages"
+     r"\oschwartz10612.Poppler_Microsoft.Winget.Source_8wekyb3d8bbwe"
+     r"\poppler-25.07.0\Library\bin\pdftoppm.exe"],
+)
+POPPLER_PATH = os.getenv("POPPLER_PATH") or (os.path.dirname(_pdftoppm) if _pdftoppm else None)
+
+# Carpeta de idiomas. La del sistema (Program Files) solo trae inglés y añadir
+# el español ahí exige permisos de administrador, así que el proyecto lleva la
+# suya en ProyectoAmancio-Backend/tessdata.
+#
+# Tiene que estar dentro del proyecto, NO en AppData: si Python es el de
+# Microsoft Store, Windows virtualiza sus escrituras en AppData y la carpeta
+# queda en un almacén privado del paquete que Tesseract (aplicación normal) no
+# puede ver. Con la carpeta junto al proyecto, ambos ven lo mismo.
+_TESSDATA_PROYECTO = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    "tessdata",
+)
+_tessdata = os.getenv("TESSDATA_PREFIX") or _TESSDATA_PROYECTO
+if os.path.isdir(_tessdata):
+    os.environ["TESSDATA_PREFIX"] = _tessdata
+
+OCR_AVAILABLE = False
 try:
     import pytesseract
     from pdf2image import convert_from_path
-    OCR_AVAILABLE = True
+
+    if TESSERACT_CMD:
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+    faltan = []
+    if not TESSERACT_CMD:
+        faltan.append("Tesseract (programa)")
+    if not POPPLER_PATH:
+        faltan.append("Poppler (programa)")
+    if not faltan:
+        idiomas = set(pytesseract.get_languages(config=""))
+        if "spa" not in idiomas:
+            faltan.append("idioma español de Tesseract (spa.traineddata)")
+
+    if faltan:
+        print("[WARN] OCR desactivado, falta: " + ", ".join(faltan))
+    else:
+        OCR_AVAILABLE = True
+        print(f"[OK] OCR activo · Tesseract: {TESSERACT_CMD} · idiomas: spa+eng")
 except ImportError:
-    OCR_AVAILABLE = False
     print(
         "[WARN] pytesseract/pdf2image no están instalados. El fallback de OCR para "
         "PDFs escaneados estará desactivado. Instala con:\n"
-        "  pip install pytesseract pdf2image\n"
-        "  apt-get install -y tesseract-ocr tesseract-ocr-spa poppler-utils"
+        "  pip install pytesseract pdf2image"
     )
+except Exception as e:  # p. ej. Tesseract instalado pero roto
+    print(f"[WARN] OCR desactivado por un error al comprobarlo: {e}")
 
 load_dotenv()
 
@@ -153,7 +229,12 @@ def _ocr_page(path: str, page_number: int) -> str:
     if not OCR_AVAILABLE:
         return ""
     try:
-        images = convert_from_path(path, first_page=page_number + 1, last_page=page_number + 1, dpi=200)
+        # poppler_path explícito: en Windows los binarios no siempre están en el
+        # PATH del proceso que arranca el servidor, y sin esto convert_from_path
+        # fallaba aunque Poppler estuviera instalado.
+        extra = {"poppler_path": POPPLER_PATH} if POPPLER_PATH else {}
+        images = convert_from_path(
+            path, first_page=page_number + 1, last_page=page_number + 1, dpi=200, **extra)
         if not images:
             return ""
         return pytesseract.image_to_string(images[0], lang="spa+eng")

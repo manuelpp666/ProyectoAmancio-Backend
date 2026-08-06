@@ -14,6 +14,7 @@ from app.modules.users.alumno import models as user_models
 from app.modules.enrollment import models as er_models
 from .service import FinanceService
 from app.core.util.security import get_current_user, require_roles, require_service_key
+from app.core.util import busqueda as busqueda_util
 
 
 router = APIRouter(prefix="/finance", tags=["Finanzas"])
@@ -472,12 +473,18 @@ def listar_pagos_filtrados(
         else:
             query = query.filter(models.Pago.estado == estado)
 
-    # 2. Búsqueda Avanzada (Concepto o DNI)
+    # 2. Búsqueda avanzada: nombre del alumno, su DNI o el concepto del pago.
+    # Cada palabra debe aparecer en alguno de esos datos, así que "castro
+    # pension" acota a las pensiones de ese alumno.
     if busqueda:
         # Usamos outerjoin para evitar perder pagos sin alumno asignado por error
-        query = query.outerjoin(user_models.Alumno, models.Pago.id_alumno == user_models.Alumno.id_alumno).filter(
-            (models.Pago.concepto.ilike(f"%{busqueda}%")) |
-            (user_models.Alumno.dni.ilike(f"%{busqueda}%"))
+        query = busqueda_util.filtrar(
+            query.outerjoin(user_models.Alumno, models.Pago.id_alumno == user_models.Alumno.id_alumno),
+            busqueda,
+            models.Pago.concepto,
+            user_models.Alumno.nombres,
+            user_models.Alumno.apellidos,
+            user_models.Alumno.dni,
         )
 
     # 3. Filtro Exacto por CATEGORÍA (NUEVO)

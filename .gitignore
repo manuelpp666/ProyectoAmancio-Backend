@@ -6,3 +6,8 @@ venv
 media
 modules/chatbot/router.py
 envoriginal.txt
+
+# Idiomas de Tesseract para el OCR del chatbot (32 MB, se descargan aparte).
+# Si falta, el chatbot sigue funcionando: solo se desactiva el OCR de PDFs
+# escaneados y lo avisa por consola al arrancar. Para restaurarlo, ver README.
+tessdata/

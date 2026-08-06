@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
 from typing import List
 from datetime import date, datetime
 from app.db.database import get_db
@@ -10,10 +11,12 @@ from app.modules.users.familiar.models import Familiar
 from app.modules.users.familiar import schemas as familiar_schemas
 from app.modules.users.familiar import services as familiar_services
 from app.modules.academic.models import Grado
+from app.modules.users.alumno import estados
 from app.modules.finance import models as finance_models
 from app.core.util.security import get_current_user
 from app.core.util.password import get_password_hash
 from app.core.util.usuarios import generar_username
+from app.core.util import busqueda as busqueda_util
 from . import models, schemas # Asegúrate de importar los modelos correctos
 
 router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
@@ -21,6 +24,20 @@ router = APIRouter(prefix="/alumnos", tags=["Alumnos"])
 def _solo_admin(current_user: dict):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No tienes permisos para esta operación")
+
+def _filtrar_por_busqueda(query, termino: str):
+    """
+    Filtra alumnos por DNI o por nombre.
+
+    Cada palabra escrita debe aparecer en algún dato del alumno, sin importar
+    el orden: "castro carlos" encuentra a CASTRO CASTILLO, CARLOS ADRIÁN igual
+    que "carlos castro".
+    """
+    return busqueda_util.filtrar(
+        query, termino,
+        models.Alumno.nombres, models.Alumno.apellidos, models.Alumno.dni,
+    )
+
 
 def _obtener_alumno(db: Session, id_alumno: int) -> models.Alumno:
     alumno = db.query(models.Alumno).filter(models.Alumno.id_alumno == id_alumno).first()
@@ -102,31 +119,45 @@ def crear_alumno_con_familiar(
     }
 
 @router.get("/", response_model=List[schemas.AlumnoResponse])
-def listar_alumnos(dni: str = None, db: Session = Depends(get_db),
+def listar_alumnos(busqueda: str = None, dni: str = None, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
 
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
 
-    query = db.query(models.Alumno).filter(models.Alumno.estado_ingreso != "rechazado")
-    
-    if dni:
-        # Usamos ilike por si acaso, aunque el DNI suele ser exacto
-        query = query.filter(models.Alumno.dni.like(f"{dni}%"))
-    
+    # joinedload: la tabla muestra el usuario con el que cada alumno inicia
+    # sesión. Sin esto, con casi 600 alumnos se lanzaría una consulta por fila
+    # solo para leer su username.
+    query = (
+        db.query(models.Alumno)
+        .options(joinedload(models.Alumno.usuario), joinedload(models.Alumno.grado_ingreso))
+        .filter(models.Alumno.estado_ingreso != estados.RECHAZADO)
+    )
+
+    # `dni` se sigue aceptando por compatibilidad con llamadas antiguas
+    termino = (busqueda or dni or "").strip()
+    if termino:
+        query = _filtrar_por_busqueda(query, termino)
+
     return query.all()
 
 @router.get("/solicitudes-pendientes", response_model=List[schemas.AlumnoResponse])
 def listar_postulantes(
+    busqueda: str = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user) 
+    current_user: dict = Depends(get_current_user)
 ):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para ver solicitudes de admisión"
         )
-    return db.query(models.Alumno).filter(models.Alumno.estado_ingreso == "postulante").all()
+    query = db.query(models.Alumno).filter(
+        models.Alumno.estado_ingreso == estados.POSTULANTE
+    )
+    if busqueda and busqueda.strip():
+        query = _filtrar_por_busqueda(query, busqueda.strip())
+    return query.all()
 
 @router.post("/decidir-admision/{id_alumno}")
 def decidir_admision(
@@ -148,7 +179,7 @@ def decidir_admision(
 
         if aprobado:
             # --- LÓGICA DE APROBACIÓN ---
-            alumno.estado_ingreso = "ADMITIDO"
+            alumno.estado_ingreso = estados.ADMITIDO
             alumno.motivo_rechazo = None
 
             # A. Crear Usuario para el ALUMNO (si no tiene uno asignado)
@@ -228,7 +259,7 @@ def decidir_admision(
             
         else:
             # --- LÓGICA DE RECHAZO ---
-            alumno.estado_ingreso = "RECHAZADO"
+            alumno.estado_ingreso = estados.RECHAZADO
             alumno.motivo_rechazo = motivo
 
         # Guardar todos los cambios de forma atómica

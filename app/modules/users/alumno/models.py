@@ -18,6 +18,7 @@ class Alumno(Base):
     colegio_procedencia = Column(String(100))
     id_grado_ingreso = Column(Integer, ForeignKey("grado.id_grado"), nullable=True)
     relacion_fraternal = Column(Boolean, default=False)
+    # Valores válidos en app/modules/users/alumno/estados.py
     estado_ingreso = Column(String(20), default='POSTULANTE')
     motivo_rechazo = Column(Text, nullable=True)
     # Documentos de admisión (año regular) — URLs de los archivos subidos
