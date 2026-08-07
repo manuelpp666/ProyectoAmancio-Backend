@@ -10,6 +10,7 @@ from app.modules.personal.models import Administrador
 from app.modules.pagina_principal.models import PaginaConfiguracion
 from app.core.util.correo_usuario import tiene_correo
 from app.core.util.permisos import normalizar as normalizar_permisos
+from app.core import config
 
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
 
@@ -96,12 +97,15 @@ def login(credentials: schemas.UsuarioLogin, response: Response, db: Session = D
     )
 
     # CONFIGURAR LA COOKIE HTTPONLY
+    # secure y samesite salen de app/core/config.py: en producción el frontend
+    # está en otro dominio, así que la cookie necesita SameSite=None + Secure
+    # para que el navegador acepte enviarla.
     response.set_cookie(
         key="authToken",
         value=access_token,
         httponly=True,   # <--- Lo más importante: JS no podrá leerla
-        secure=False,    # Ponlo en True cuando uses HTTPS (Producción)
-        samesite="lax",
+        secure=config.COOKIE_SECURE,
+        samesite=config.COOKIE_SAMESITE,
         path="/",
     )
     # ¿Hay que obligarlo a cambiar la contraseña? Solo si el colegio tiene la
@@ -132,8 +136,10 @@ def logout(response: Response):
         key="authToken",
         value="",
         httponly=True,
-        samesite="lax",
-        secure=False, # True en producción con HTTPS
+        # Debe coincidir con la cookie que se creó al entrar: si no, el
+        # navegador la trata como otra cookie distinta y la sesión no se cierra.
+        samesite=config.COOKIE_SAMESITE,
+        secure=config.COOKIE_SECURE,
         path="/",
         expires=0,    # Expira ya
         max_age=0     # Expira ya

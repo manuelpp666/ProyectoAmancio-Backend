@@ -5,9 +5,10 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-# ¡IMPORTANTE! Mueve esto a tus variables de entorno (.env) después
 SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("ALGORITHM")
+# Debe coincidir con el de security.py: un token firmado con un algoritmo y
+# validado con otro no pasa la verificación.
+ALGORITHM = (os.getenv("ALGORITHM") or "HS256").strip()
 # Fallback a 60 min si la variable no está configurada (evita crash al arrancar)
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES") or 60)
 

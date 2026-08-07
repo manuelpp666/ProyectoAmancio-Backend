@@ -5,6 +5,7 @@ from typing import List
 from datetime import datetime, date, timedelta
 from app.db.database import get_db
 from app.modules.academic import models as models_ac
+from app.modules.academic import consultas as consultas_ac
 from app.modules.users.alumno import models as models_al
 from app.modules.users.docente import models as models_doc
 from app.modules.enrollment import models as models_en
@@ -877,24 +878,34 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
     if current_user.get("id") != id_usuario:
         raise HTTPException(status_code=403, detail="No puedes ver perfiles ajenos")
 
-    anio_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
-    if not anio_activo:
+    # El año activo se lee de la caché: este endpoint lo consultaban los 650
+    # usuarios cada minuto para leer siempre la misma fila.
+    id_anio_activo = consultas_ac.id_anio_activo(db)
+    if not id_anio_activo:
         return {"total": 0}
 
     total = 0
     rol = current_user.get("rol")
 
+    # El rol viene del token firmado, así que se puede usar para buscar solo el
+    # perfil que corresponde. Antes se consultaban docente Y alumno en todas las
+    # llamadas, y una de las dos siempre sobraba.
+
     # --- A. DOCENTE: entregas (tope 5) ---
-    docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
+    docente = None
+    if rol == "DOCENTE":
+        docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
     if docente:
         c = db.query(models_vr.EntregaTarea).join(models_vr.Tarea).join(models_mn.CargaAcademica).filter(
             models_mn.CargaAcademica.id_docente == docente.id_docente,
-            models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
+            models_mn.CargaAcademica.id_anio_escolar == id_anio_activo
         ).count()
         total += min(c, 5)
 
     # --- B. ALUMNO: notas (tope 3), deudas, citas de hoy ---
-    alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
+    alumno = None
+    if rol == "ALUMNO":
+        alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
     if alumno:
         total += min(db.query(models_vr.EntregaTarea).filter(
             models_vr.EntregaTarea.id_alumno == alumno.id_alumno,
@@ -904,7 +915,7 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
         total += db.query(models_fi.Pago).join(models_en.Matricula).filter(
             models_fi.Pago.id_alumno == alumno.id_alumno,
             models_fi.Pago.estado == "PENDIENTE",
-            models_en.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
+            models_en.Matricula.id_anio_escolar == id_anio_activo
         ).count()
 
         inicio_hoy = datetime.combine(date.today(), datetime.min.time())

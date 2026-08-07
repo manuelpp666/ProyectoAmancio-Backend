@@ -37,18 +37,49 @@ from app.modules.pagina_principal import router as pagina_web_router
 from app.modules.personal import router as personal_router
 from app.modules.verano import router as verano_router
 from app.core.socket_manager import socket_manager
+from app.core import socket_manager as socket_manager_mod
+from app.core import config
 from dotenv import load_dotenv
 load_dotenv()
 
+# Si falta configuración esencial, es preferible no arrancar a fallar en la
+# primera petición con un error que no explica nada.
+config.verificar()
+print(f"⚙️  {config.resumen()}")
 
-app = FastAPI()
+import anyio
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def ciclo_de_vida(app: FastAPI):
+    """
+    Ajusta el número de peticiones síncronas simultáneas antes de atender la
+    primera.
+
+    Los endpoints síncronos (la gran mayoría) corren en el pool de hilos de
+    AnyIO, que por defecto admite 40. Ese número tiene que ir de la mano del de
+    conexiones a la base: si entran más peticiones que conexiones hay, las que
+    sobran esperan por una que no va a llegar y acaban fallando por tiempo
+    agotado. El limitador solo existe dentro del bucle de eventos, así que se
+    toca aquí y no al importar el módulo.
+    """
+    anyio.to_thread.current_default_thread_limiter().total_tokens = config.HILOS_PETICIONES
+    socket_manager_mod.avisar_si_hay_varios_workers()
+    yield
+
+# En producción la documentación interactiva queda desactivada: publica el
+# esquema completo de la API sin pedir credenciales.
+app = FastAPI(docs_url=config.DOCS_URL, redoc_url=config.REDOC_URL,
+              openapi_url=None if config.ES_PRODUCCION else "/openapi.json",
+              lifespan=ciclo_de_vida)
 
 # Solo activar cuando estés en el servidor de producción
 # from fastapi.middleware.proxy_headers import ProxyHeadersMiddleware
 # app.add_middleware(ProxyHeadersMiddleware, trusted_proxies="127.0.0.1")
 
 raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
-ALLOWED_ORIGINS = [origin.strip() for origin in raw_origins.split(",")]
+ALLOWED_ORIGINS = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 # Agregamos un print para que veas en la terminal qué está cargando exactamente
 print(f"📡 CORS Origins: {ALLOWED_ORIGINS}")

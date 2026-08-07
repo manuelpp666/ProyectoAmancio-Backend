@@ -7,9 +7,10 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-# ¡IMPORTANTE! Mueve esto a tus variables de entorno (.env) después
 SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("ALGORITHM")
+# Sin valor por defecto, un .env incompleto dejaba ALGORITHM en None y la
+# validación del token reventaba en la primera petición, no al arrancar.
+ALGORITHM = (os.getenv("ALGORITHM") or "HS256").strip()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="usuarios/login")
 

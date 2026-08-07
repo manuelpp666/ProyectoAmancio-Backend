@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, Back
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from app.db.database import get_db
-from . import models, schemas
+from . import models, schemas, consultas
 from typing import List, Optional
 from datetime import date
 from pydantic import BaseModel  # <--- NUEVO: Importación para el endpoint de edición
@@ -84,6 +84,10 @@ def actualizar_estado_anios(db: Session, background: Optional[BackgroundTasks] =
 
     if cambios:
         db.commit()
+        # El año activo está cacheado (se consulta en cada notificación de cada
+        # usuario): si acaba de cambiar hay que olvidarlo ya, sin esperar a que
+        # caduque.
+        consultas.olvidar_anio_activo()
 
     # Cierre automático de los años que acaban de terminar (idempotente)
     for anio_id in recien_cerrados:
@@ -220,6 +224,7 @@ def editar_anio(anio_id: str, datos: EditarAnioRequest, background_tasks: Backgr
     db_anio.activo = datos.fecha_inicio <= hoy <= datos.fecha_fin
 
     db.commit()
+    consultas.olvidar_anio_activo()
     actualizar_estado_anios(db, background_tasks)
 
     # Al cambiar las fechas, las pensiones pendientes que quedaron fuera del nuevo
@@ -329,16 +334,23 @@ def crear_nivel(nivel: schemas.NivelCreate, db: Session = Depends(get_db),
 @router.get("/niveles/", response_model=List[schemas.NivelResponse])
 def listar_niveles(db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
-    return db.query(models.Nivel).all()
+    # Sin ORDER BY el orden lo decide MySQL y no está garantizado: Primaria
+    # (id 1) tiene que salir antes que Secundaria (id 2).
+    return db.query(models.Nivel).order_by(models.Nivel.id_nivel).all()
 
 @router.get("/niveles-cursos/", response_model=List[schemas.NivelConCursosResponse])
 def listar_niveles_con_cursos(db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes acceder esta información.")
+    # El joinedload trae niveles, grados y cursos en una sola consulta con JOIN,
+    # y el orden de las filas de ese JOIN no tiene por qué respetar el de la
+    # tabla nivel: por eso salía Secundaria antes que Primaria. Se pide
+    # explícitamente. (El orden de los grados dentro de cada nivel ya lo fija
+    # el `order_by` de la relación Nivel.grados.)
     return db.query(models.Nivel).options(
         joinedload(models.Nivel.grados).joinedload(models.Grado.planes_estudio).joinedload(models.PlanEstudio.curso)
-    ).all()
+    ).order_by(models.Nivel.id_nivel).all()
 
 
 # --- GRADOS ---
