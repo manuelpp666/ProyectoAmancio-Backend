@@ -4,12 +4,11 @@ import asyncio
 import threading
 import queue as thread_queue
 import time
+import requests
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
 from google import genai
 from google.genai import types as genai_types
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from docx import Document as DocxDocument
 from docx.table import Table
@@ -136,26 +135,158 @@ MAX_DOCUMENTS = 5
 
 NAMESPACE = "colegio"
 
+# Debe coincidir EXACTO con la dimensión configurada en tu índice de Pinecone.
+# gemini-embedding-2 soporta dimensión variable (output_dimensionality); si
+# algún día recreas el índice con otra dimensión, este es el único lugar que
+# hay que tocar -- se usa tanto para indexar (embed_documents) como para
+# consultar (embed_query y get_native_embedding_3072), así que ambos lados
+# quedan sincronizados automáticamente.
+EMBEDDING_DIMENSIONS = 3072
+
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+client = genai.Client(api_key=GOOGLE_API_KEY)
 INDEX_NAME = os.getenv("INDEX_NAME", "colegio-knowledge")
 
 os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
 
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/gemini-embedding-2",
-    google_api_key=GOOGLE_API_KEY
-)
+class NativeGeminiEmbeddings:
+    """Genera embeddings usando el cliente REST de google-genai en vez de
+    gRPC (ver por qué en el comentario de más abajo). Ya no hereda de
+    langchain_core.embeddings.Embeddings porque no se usa con
+    PineconeVectorStore -- ese SDK también quedó fuera, ver PineconeREST."""
 
-client = genai.Client(api_key=GOOGLE_API_KEY)
+    def __init__(self, genai_client: "genai.Client", model: str = "models/gemini-embedding-2"):
+        self._client = genai_client
+        self._model = model
 
-vectorstore = PineconeVectorStore(
-    index_name=INDEX_NAME,
-    embedding=embeddings,
-    namespace=NAMESPACE
-)
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        # Secuencial a propósito: nada de ThreadPoolExecutor/hilos aquí.
+        # Es un poco más lento que en paralelo, pero es justamente la
+        # concurrencia con hilos la que rompe en cPanel.
+        vectors: List[List[float]] = []
+        for text in texts:
+            response = self._client.models.embed_content(
+                model=self._model,
+                contents=text,
+                config=genai_types.EmbedContentConfig(
+                    task_type="RETRIEVAL_DOCUMENT",
+                    output_dimensionality=EMBEDDING_DIMENSIONS,
+                ),
+            )
+            vectors.append(response.embeddings[0].values)
+        return vectors
+
+    def embed_query(self, text: str) -> List[float]:
+        response = self._client.models.embed_content(
+            model=self._model,
+            contents=text,
+            config=genai_types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=EMBEDDING_DIMENSIONS,
+            ),
+        )
+        return response.embeddings[0].values
+
+
+embeddings = NativeGeminiEmbeddings(client)
+
+
+# ==========================================================================
+# CLIENTE PINECONE 100% REST (reemplaza al SDK oficial `pinecone-client` /
+# `langchain_pinecone`) -- SOLUCIÓN DEFINITIVA AL "can't start new thread" /
+# "'DummyProcess' object has no attribute 'terminate'"
+# ==========================================================================
+# El SDK oficial de Pinecone arma, para manejar sus conexiones HTTP
+# concurrentes, un multiprocessing.pool.ThreadPool (esa clase usa por dentro
+# multiprocessing.dummy.Process, que en el error aparece como "DummyProcess").
+# Eso es lo tercero (después de OpenBLAS y gRPC) que intenta abrir hilos del
+# sistema operativo en un entorno cPanel/CloudLinux donde la cuenta ya tiene
+# su cupo de hilos (LVE) casi agotado -- por eso truena distinto según cuánto
+# margen quedaba en ese momento (a veces "DummyProcess...terminate", a veces
+# derecho "can't start new thread").
+#
+# La única forma de eliminar el riesgo por completo es dejar de usar el SDK
+# para las llamadas de datos (upsert/fetch/delete/query) y hablarle a la API
+# REST de Pinecone directamente con `requests`, que NO abre hilos propios:
+# reutiliza sockets dentro del mismo hilo que hace la llamada (igual que ya
+# hace el cliente REST de Gemini, que nunca ha fallado en cPanel).
+class PineconeREST:
+    API_VERSION = "2025-10"
+
+    def __init__(self, api_key: str, index_name: str):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Api-Key": api_key,
+            "Content-Type": "application/json",
+            "X-Pinecone-Api-Version": self.API_VERSION,
+        })
+        self._host = self._resolve_host(index_name)
+
+    def _resolve_host(self, index_name: str) -> str:
+        # Se resuelve UNA sola vez al arrancar el servidor (plano de control),
+        # no en cada request -- esto nunca es el cuello de botella.
+        resp = self._session.get(f"https://api.pinecone.io/indexes/{index_name}", timeout=15)
+        resp.raise_for_status()
+        host = resp.json().get("host")
+        if not host:
+            raise RuntimeError(f"No se pudo resolver el host del índice '{index_name}' en Pinecone.")
+        return f"https://{host}"
+
+    def upsert(self, vectors: List[dict], namespace: str) -> None:
+        resp = self._session.post(
+            f"{self._host}/vectors/upsert",
+            json={"vectors": vectors, "namespace": namespace},
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+    def fetch_existing_ids(self, ids: List[str], namespace: str) -> set:
+        """Si la verificación misma falla (red, timeout, etc.), se asume que
+        faltan todos los IDs -- eso fuerza un reintento en vez de reportar
+        un falso "ya está" que ocultaría chunks realmente perdidos."""
+        if not ids:
+            return set()
+        try:
+            resp = self._session.get(
+                f"{self._host}/vectors/fetch",
+                params={"ids": ids, "namespace": namespace},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return set(resp.json().get("vectors", {}).keys())
+        except Exception as e:
+            print(f"[PINECONE][WARN] No se pudo verificar contra Pinecone: {e}")
+            return set()
+
+    def delete(self, ids: List[str], namespace: str) -> None:
+        if not ids:
+            return
+        resp = self._session.post(
+            f"{self._host}/vectors/delete",
+            json={"ids": ids, "namespace": namespace},
+            timeout=15,
+        )
+        resp.raise_for_status()
+
+    def query(self, vector: List[float], top_k: int, namespace: str) -> List[dict]:
+        resp = self._session.post(
+            f"{self._host}/query",
+            json={
+                "vector": vector,
+                "topK": top_k,
+                "namespace": namespace,
+                "includeMetadata": True,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json().get("matches", [])
+
+
+pinecone_client = PineconeREST(PINECONE_API_KEY, INDEX_NAME)
 
 # ==========================================================================
 # 1. PROTECCIÓN DE DATOS SENSIBLES
@@ -372,7 +503,7 @@ def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: di
         if doc.total_chunks and doc.total_chunks > 0:
             safe_filename = doc.filename.replace(" ", "_")
             ids_to_delete = [f"{safe_filename}-{i}" for i in range(doc.total_chunks)]
-            vectorstore.delete(ids=ids_to_delete, namespace=NAMESPACE)
+            pinecone_client.delete(ids_to_delete, namespace=NAMESPACE)
             print(f"[PINECONE] Se eliminaron {len(ids_to_delete)} chunks correctamente.")
     except Exception as e:
         print(f"[PINECONE WARNING] No se pudo borrar de Pinecone o ya no existe: {str(e)}")
@@ -476,12 +607,11 @@ async def upload(file: UploadFile = File(...), db: Session = Depends(get_db), cu
         ids = [f"{safe_filename}-{i}" for i in range(len(final_docs))]
 
         # 4. Subida por LOTES (reduce llamadas a la API de embeddings/Pinecone
-        #    frente al 1-por-1 original). PERO: vectorstore.add_documents()
-        #    puede devolver la lista de IDs "esperada" sin que eso garantice
-        #    que Pinecone realmente los persistió (el mismo bug de
-        #    truncamiento silencioso que ya habías detectado). Por eso, tras
-        #    cada lote, se verifica CONTRA PINECONE DE VERDAD con index.fetch()
-        #    y solo se reintentan los IDs que de verdad faltan.
+        #    frente al 1-por-1 original). El upsert vía REST puede devolver
+        #    200 OK sin que eso garantice al 100% que Pinecone ya lo persistió
+        #    para lectura inmediata, así que tras cada lote se verifica
+        #    CONTRA PINECONE DE VERDAD con /vectors/fetch y solo se reintentan
+        #    los IDs que de verdad faltan.
         BATCH_SIZE = 10
         upserted_count = 0
         failed_ids: List[str] = []
@@ -489,49 +619,50 @@ async def upload(file: UploadFile = File(...), db: Session = Depends(get_db), cu
 
         id_to_doc = dict(zip(ids, final_docs))
 
-        def _fetch_existing_ids(id_list: List[str]) -> set:
-            """Consulta directamente a Pinecone (no a langchain) cuáles IDs
-            realmente existen en el namespace. Esta es la única fuente de
-            verdad confiable."""
-            try:
-                fetch_res = vectorstore.index.fetch(ids=id_list, namespace=NAMESPACE)
-                vectors = getattr(fetch_res, "vectors", None)
-                if vectors is None and isinstance(fetch_res, dict):
-                    vectors = fetch_res.get("vectors", {})
-                return set(vectors.keys()) if vectors else set()
-            except Exception as e:
-                print(f"[PINECONE][WARN] No se pudo verificar el lote contra Pinecone: {e}")
-                return set()  # si no se puede verificar, se asume que faltan todos (fuerza reintento)
+        def _vector_payload(doc_id: str, doc: LangDocument, vector: List[float]) -> dict:
+            # "text" es la clave que usan los chunks ya indexados por
+            # langchain_pinecone -- se mantiene el mismo nombre para que
+            # /ask siga leyendo también los documentos indexados antes de
+            # este cambio.
+            return {
+                "id": doc_id,
+                "values": vector,
+                "metadata": {"source": doc.metadata.get("source", file.filename), "text": doc.page_content},
+            }
 
         for start in range(0, len(final_docs), BATCH_SIZE):
             batch_docs = final_docs[start:start + BATCH_SIZE]
             batch_ids = ids[start:start + BATCH_SIZE]
 
             try:
-                vectorstore.add_documents(documents=batch_docs, ids=batch_ids, namespace=NAMESPACE)
+                batch_vectors = embeddings.embed_documents([d.page_content for d in batch_docs])
+                payload = [_vector_payload(bid, doc, vec) for bid, doc, vec in zip(batch_ids, batch_docs, batch_vectors)]
+                pinecone_client.upsert(payload, namespace=NAMESPACE)
             except Exception as batch_error:
                 print(f"[PINECONE][WARN] Excepción al subir el lote {start}-{start+BATCH_SIZE}: {batch_error}")
 
-            existing = _fetch_existing_ids(batch_ids)
+            existing = pinecone_client.fetch_existing_ids(batch_ids, NAMESPACE)
             missing = [bid for bid in batch_ids if bid not in existing]
 
             if missing:
                 print(f"[PINECONE][WARN] {len(missing)} chunk(s) no llegaron a Pinecone en el lote {start}-{start+BATCH_SIZE}. Reintentando 1 a 1...")
                 for mid in list(missing):
                     try:
-                        vectorstore.add_documents(documents=[id_to_doc[mid]], ids=[mid], namespace=NAMESPACE)
+                        doc = id_to_doc[mid]
+                        vec = embeddings.embed_documents([doc.page_content])[0]
+                        pinecone_client.upsert([_vector_payload(mid, doc, vec)], namespace=NAMESPACE)
                     except Exception as chunk_error:
                         print(f"[ERROR Chunk {mid}] {str(chunk_error)}")
 
                 # Verificación final de este lote tras los reintentos
-                still_missing = [bid for bid in batch_ids if bid not in _fetch_existing_ids(batch_ids)]
+                still_missing = [bid for bid in batch_ids if bid not in pinecone_client.fetch_existing_ids(batch_ids, NAMESPACE)]
                 failed_ids.extend(still_missing)
 
         # Conteo final real (no estimado): cuántos IDs de este archivo existen
         # de verdad en Pinecone ahora mismo.
         confirmed_ids: set = set()
         for start in range(0, len(ids), 100):
-            confirmed_ids |= _fetch_existing_ids(ids[start:start + 100])
+            confirmed_ids |= pinecone_client.fetch_existing_ids(ids[start:start + 100], NAMESPACE)
         upserted_count = len(confirmed_ids)
 
         print(f"[PINECONE] Subida completada. Total confirmado en Pinecone: {upserted_count} de {len(final_docs)}")
@@ -662,9 +793,20 @@ ESTILO Y FORMATO DE RESPUESTA:
 - Ve directo al punto sin preámbulos innecesarios ("De acuerdo con la información...").
 """.strip()
 
-# --- MODELOS CON FALLBACK BACKUP ---
-PRIMARY_MODEL = "gemini-3.5-flash-lite"
-FALLBACK_MODEL = "gemini-flash-latest"
+# --- CADENA DE MODELOS (ordenados por velocidad segun el benchmark) ---
+# Si un modelo falla (error, 404, cuota agotada) o no arranca a tiempo,
+# se pasa automaticamente al siguiente de la lista. Se dejan varios
+# "escalones" (no solo un fallback) porque en el benchmark se vio que
+# varios modelos individuales pueden fallar o quedarse sin cuota en
+# cualquier momento (p. ej. gemini-flash-latest fallo en una corrida y en
+# otra no) -- con 4 opciones en cadena es mucho mas dificil que el
+# endpoint /ask se quede sin poder responder.
+MODEL_CHAIN = [
+    "gemini-flash-lite-latest",   # 1° mas rapido en el benchmark (~0.55s)
+    "gemini-3.5-flash-lite",      # 2° mas rapido (~0.61s)
+    "gemini-3.1-flash-lite",      # 3° mas rapido (~0.71s)
+    "gemini-flash-latest",        # modelo "latest" estable, como ultimo respaldo
+]
 
 # Config de generación: temperatura 0 para respuestas factuales. Bajamos
 # max_output_tokens de 1536 a 800: el tiempo de generación de un LLM escala
@@ -679,13 +821,16 @@ GENERATION_CONFIG = genai_types.GenerateContentConfig(
     max_output_tokens=2048,
 )
 
-# Con streaming, este timeout ya NO espera la respuesta completa del modelo
-# primario -- solo espera a que llegue el PRIMER fragmento de texto. Por eso
-# se puede bajar de 12s a un valor más agresivo: si en ~6s el modelo
-# primario ni siquiera empezó a responder, algo anda mal (sobrecarga, error)
-# y tiene sentido cambiar a fallback. Si ya empezó a responder, seguimos
+# Con streaming, este timeout ya NO espera la respuesta completa de un
+# modelo -- solo espera a que llegue el PRIMER fragmento de texto. Por eso
+# se puede usar un valor agresivo: si en ~6s un modelo de la cadena ni
+# siquiera empezó a responder, algo anda mal (sobrecarga, error, cuota) y
+# tiene sentido pasar al siguiente. Si ya empezó a responder, seguimos
 # streameando con ESE modelo hasta el final sin volver a chequear timeout.
-PRIMARY_FIRST_CHUNK_TIMEOUT_SECONDS = 6
+# Al ULTIMO modelo de la cadena no se le aplica timeout (None): ya no hay
+# a donde mas saltar, asi que es mejor esperar su respuesta completa que
+# cortarlo a mitad de camino y dejar al usuario sin nada.
+FIRST_CHUNK_TIMEOUT_SECONDS = 6
 async def get_native_embedding_3072(text: str) -> List[float]:
     """
     Genera el vector de 3072 dimensiones usando el cliente ASÍNCRONO nativo (client.aio).
@@ -695,7 +840,8 @@ async def get_native_embedding_3072(text: str) -> List[float]:
         model="models/gemini-embedding-2",
         contents=text,
         config=genai_types.EmbedContentConfig(
-            task_type="RETRIEVAL_QUERY"
+            task_type="RETRIEVAL_QUERY",
+            output_dimensionality=EMBEDDING_DIMENSIONS,
         )
     )
     # Accedemos a 'embeddings' (plural) y tomamos el primer resultado [0]
@@ -757,34 +903,68 @@ async def _stream_model_response(
             raise payload
 
 
-async def _ask_stream_generator(contents: str) -> AsyncGenerator[str, None]:
-    """Orquesta primario -> fallback para el endpoint /ask, streameando al
-    cliente en cuanto hay texto disponible. Si el modelo primario no
-    arranca a tiempo (o falla de entrada), se cambia a fallback antes de
-    haber mandado nada -- si el primario YA empezó a responder, nos
-    quedamos con él hasta el final (cambiar de modelo a mitad de respuesta
-    daría una respuesta incoherente)."""
-    t0 = time.perf_counter()
-    try:
-        async for piece in _stream_model_response(
-            PRIMARY_MODEL, contents, first_chunk_timeout=PRIMARY_FIRST_CHUNK_TIMEOUT_SECONDS
-        ):
-            yield piece
-        print(f"[GEMINI] Respuesta completa de '{PRIMARY_MODEL}' en {time.perf_counter() - t0:.2f}s.")
-        return
-    except Exception as e:
-        reason = "timeout esperando el primer fragmento" if isinstance(e, asyncio.TimeoutError) else f"{type(e).__name__}: {e}"
-        print(f"[GEMINI][WARN] El modelo '{PRIMARY_MODEL}' falló ({reason}) tras {time.perf_counter() - t0:.2f}s. "
-              f"Cambiando a fallback '{FALLBACK_MODEL}' (todavía no se envió nada al cliente).")
+def _es_error_de_cuota(e: Exception) -> bool:
+    """Detecta si la excepcion es por cuota agotada / rate limit (429,
+    RESOURCE_EXHAUSTED) en vez de un fallo generico. Sirve solo para loggear
+    con mas claridad -- la logica de fallback es la misma en ambos casos."""
+    texto = str(e).upper()
+    return "429" in texto or "RESOURCE_EXHAUSTED" in texto or "QUOTA" in texto
 
-    t_fallback = time.perf_counter()
-    try:
-        async for piece in _stream_model_response(FALLBACK_MODEL, contents, first_chunk_timeout=None):
-            yield piece
-        print(f"[GEMINI] Respuesta completa de fallback '{FALLBACK_MODEL}' en {time.perf_counter() - t_fallback:.2f}s.")
-    except Exception as fallback_error:
-        print(f"[GEMINI][ERROR REAL en /ask] Fallback también falló: {type(fallback_error).__name__}: {fallback_error}")
-        yield "Error técnico o alta demanda del servicio, intenta de nuevo en unos segundos 🍎"
+
+async def _ask_stream_generator(contents: str) -> AsyncGenerator[str, None]:
+    """Orquesta la cadena MODEL_CHAIN para el endpoint /ask, streameando al
+    cliente en cuanto hay texto disponible.
+
+    - Si un modelo no arranca a tiempo, falla, devuelve 404, o se queda sin
+      cuota ANTES de mandar el primer fragmento, se pasa al siguiente
+      modelo de la cadena sin que el cliente note nada.
+    - Si un modelo YA empezó a responder y falla a mitad de camino, NO se
+      cambia de modelo (eso mezclaria dos respuestas distintas en un solo
+      mensaje). En ese caso se corta el stream con un aviso breve.
+    - El ultimo modelo de la cadena corre sin timeout de primer fragmento:
+      ya no hay a donde mas saltar, asi que se le da todo el tiempo que
+      necesite en vez de cortarlo antes de tiempo.
+    """
+    for idx, model in enumerate(MODEL_CHAIN):
+        es_ultimo = idx == len(MODEL_CHAIN) - 1
+        timeout = None if es_ultimo else FIRST_CHUNK_TIMEOUT_SECONDS
+        t_model = time.perf_counter()
+        ya_se_envio_algo = False
+        try:
+            async for piece in _stream_model_response(model, contents, first_chunk_timeout=timeout):
+                ya_se_envio_algo = True
+                yield piece
+            print(f"[GEMINI] Respuesta completa de '{model}' en {time.perf_counter() - t_model:.2f}s.")
+            return
+        except Exception as e:
+            elapsed = time.perf_counter() - t_model
+            if isinstance(e, asyncio.TimeoutError):
+                reason = "timeout esperando el primer fragmento"
+            elif _es_error_de_cuota(e):
+                reason = f"cuota agotada / rate limit ({type(e).__name__})"
+            else:
+                reason = f"{type(e).__name__}: {e}"
+
+            if ya_se_envio_algo:
+                # Este modelo ya habia mandado texto real al cliente: cambiar
+                # de modelo ahora pegaria la respuesta de OTRO modelo detras
+                # de un texto incompleto. Mejor cortar aca con un aviso claro
+                # que devolver una respuesta incoherente.
+                print(f"[GEMINI][ERROR] '{model}' falló A MITAD de la respuesta ({reason}) tras {elapsed:.2f}s. "
+                      f"No se cambia de modelo (evita mezclar respuestas); se corta el stream.")
+                yield "\n\n⚠️ Se interrumpió la respuesta por un problema técnico. Por favor, intenta de nuevo 🍎"
+                return
+
+            if es_ultimo:
+                print(f"[GEMINI][ERROR REAL en /ask] El último modelo de la cadena ('{model}') también falló "
+                      f"({reason}) tras {elapsed:.2f}s. Se agotó toda la cadena de modelos.")
+                break
+
+            print(f"[GEMINI][WARN] '{model}' falló ({reason}) tras {elapsed:.2f}s. "
+                  f"Cambiando al siguiente modelo de la cadena (todavía no se envió nada al cliente).")
+            continue
+
+    yield "Error técnico o alta demanda del servicio, intenta de nuevo en unos segundos 🍎"
 
 
 @router.post("/ask")
@@ -843,20 +1023,26 @@ async def ask(question: str = Form(...)):
 
     t_pine = time.perf_counter()
     try:
-        docs = await asyncio.to_thread(
-            vectorstore.similarity_search_by_vector, query_vector, k=k, namespace=NAMESPACE
-        )
+        matches = await asyncio.to_thread(pinecone_client.query, query_vector, k, NAMESPACE)
     except Exception as e:
         print(f"[PINECONE][ERROR] Falló la búsqueda en el namespace '{NAMESPACE}' tras {time.perf_counter() - t_pine:.2f}s: {type(e).__name__}: {e}")
         return {"answer": "Error técnico o alta demanda del servicio, intenta de nuevo en unos segundos 🍎"}
     pinecone_s = time.perf_counter() - t_pine
+
+    # "text"/"source" son las claves de metadata con las que se guardó cada
+    # chunk en /upload (ver _vector_payload). Se reconstruye aquí una forma
+    # mínima equivalente a los Document de langchain que se usaban antes.
+    docs = [
+        {"source": m.get("metadata", {}).get("source", "desconocido"), "text": m.get("metadata", {}).get("text", "")}
+        for m in matches
+    ]
 
     print(f"[PINECONE] Pregunta: '{question}' -> se recuperaron {len(docs)} chunks del namespace '{NAMESPACE}'.")
     if not docs:
         print("[PINECONE][ALERTA] No se recupero NINGUN chunk. Revisa que el namespace "
               "y la dimension del embedding coincidan con los documentos indexados.")
 
-    contexto = "\n\n".join([f"FUENTE: {d.metadata.get('source')}\nCONTENIDO: {d.page_content}" for d in docs])
+    contexto = "\n\n".join([f"FUENTE: {d['source']}\nCONTENIDO: {d['text']}" for d in docs])
 
     contents = f"""Fecha de hoy: {hoy}
 
