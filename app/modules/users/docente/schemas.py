@@ -1,5 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
-from app.core.util.utils import DniStr, TelefonoStr
+from app.core.util.utils import (
+    DniStr, TelefonoStr, DniOpcional, TelefonoOpcional, EmailOpcional,
+)
 from typing import Optional
 
 
@@ -22,9 +24,10 @@ class DocenteUpdate(BaseModel):
     especialidad: Optional[str] = None
     descripcion: Optional[str] = None
     url_perfil: Optional[str] = None
-    email: Optional[EmailStr] = None
-    dni: Optional[DniStr] = None
-    telefono: Optional[TelefonoStr] = None
+    # Campos que el formulario puede enviar en blanco: "" se guarda como NULL.
+    email: EmailOpcional = None
+    dni: DniOpcional = None
+    telefono: TelefonoOpcional = None
     visible_web: Optional[bool] = None
 
 class UsuarioEnDocente(BaseModel):
@@ -34,8 +37,10 @@ class UsuarioEnDocente(BaseModel):
 class DocenteResponse(DocenteBase):
     id_docente: int
     dni: str
-    # Tolerantes a nulos para no romper la lista si un docente no tiene estos datos
-    email: Optional[EmailStr] = None
+    # Tolerantes a nulos para no romper la lista si un docente no tiene estos
+    # datos. Y tolerantes a "" porque hay filas antiguas guardadas así: con
+    # Optional[EmailStr] esa fila reventaba el listado entero.
+    email: EmailOpcional = None
     telefono: Optional[str] = None
     visible_web: bool = True
     usuario: UsuarioEnDocente | None = None

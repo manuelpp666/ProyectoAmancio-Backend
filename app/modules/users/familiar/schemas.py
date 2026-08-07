@@ -1,11 +1,12 @@
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
-from app.core.util.utils import DniStr, TelefonoStr
+from app.core.util.utils import DniStr, TelefonoStr, EmailOpcional
 
 class FamiliarBase(BaseModel):
     nombres: str = Field(..., max_length=250)
     apellidos: str = Field(..., max_length=250)
-    email: Optional[EmailStr] = None
+    # El formulario manda "" cuando el apoderado no da correo.
+    email: EmailOpcional = None
     direccion: Optional[str] = Field(None, max_length=300)
 
 class FamiliarCreate(FamiliarBase):

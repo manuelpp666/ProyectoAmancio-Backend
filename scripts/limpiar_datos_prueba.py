@@ -34,6 +34,31 @@ PREFIJO_DNI_PRUEBA = "9999"
 TEXTOS_DE_RELLENO = ("prueba", "temporal", "example.com", "test@")
 SALUDOS_DE_PRUEBA = ("hola", "test", "prueba", "hola hola", "aaa", "1", "asd")
 
+# PERO hay personal REAL del colegio con DNI inventado: el directorio 2026 trae
+# tres personas sin DNI (Juana Serquén, Edgar Herrera, Royer Castillo) y la
+# carga inicial les asignó 99900001/2/3. Con el prefijo actual ("9999") no las
+# alcanza —empiezan por 9990—, pero basta acortarlo a "999" para borrar a tres
+# empleados y sus cursos asignados. La excepción evita que eso dependa de una
+# cifra. La lista se lee del propio directorio para no mantenerla a mano.
+def _dnis_del_directorio() -> set:
+    sys.path.insert(0, os.path.join(RAIZ, "scripts"))
+    try:
+        import datos_personal
+    except ImportError:
+        # Sin el directorio a mano, lo prudente es no borrar ninguna cuenta
+        # por su DNI: se seguirá detectando la de prueba por nombre y correo.
+        print("[AVISO] No se encontró scripts/datos_personal.py: no se borrará "
+              "ninguna cuenta por el prefijo del DNI.")
+        return None
+    reales = set()
+    for lista in (datos_personal.ADMINISTRATIVOS, datos_personal.PSICOLOGOS,
+                  datos_personal.AUXILIARES, datos_personal.DOCENTES):
+        reales.update(registro[0] for registro in lista)
+    return reales
+
+
+DNIS_REALES = _dnis_del_directorio()
+
 PERFILES = [
     ("administrador", "id_admin"),
     ("docente", "id_docente"),
@@ -69,21 +94,48 @@ def insert_de(tabla, fila, cols):
     return f"INSERT INTO `{tabla}` ({campos}) VALUES ({valores});"
 
 
+def tiene_vida_academica(id_alumno) -> bool:
+    """¿El alumno tiene matrícula o pagos? Entonces es real, no una prueba."""
+    for tabla in ("matricula", "pago"):
+        cur.execute(f"SELECT 1 FROM `{tabla}` WHERE id_alumno = %s LIMIT 1",
+                    (id_alumno,))
+        if cur.fetchone():
+            return True
+    return False
+
+
 # ---------------------------------------------------------------- 1. cuentas
 cuentas = []          # (tabla_perfil, pk, id_perfil, id_usuario, descripcion)
 for tabla, pk in PERFILES:
     cols = columnas(tabla)
     if "dni" not in cols:
         continue
-    condiciones = [f"dni LIKE '{PREFIJO_DNI_PRUEBA}%'"]
+    condiciones = []
+    if DNIS_REALES is not None:
+        condiciones.append(f"dni LIKE '{PREFIJO_DNI_PRUEBA}%'")
     for campo in ("nombres", "apellidos", "email"):
         if campo in cols:
             condiciones += [f"LOWER(`{campo}`) LIKE '%{t}%'" for t in TEXTOS_DE_RELLENO]
+    if not condiciones:
+        continue
     cur.execute(
         f"SELECT {pk}, id_usuario, dni, nombres, apellidos FROM `{tabla}` "
         f"WHERE {' OR '.join(condiciones)}"
     )
     for id_perfil, id_usuario, dni, nom, ape in cur.fetchall():
+        # Quien figura en el directorio del colegio es personal real, tenga el
+        # DNI que tenga.
+        if DNIS_REALES and dni in DNIS_REALES:
+            print(f"[PROTEGIDO] {tabla} · DNI {dni} · {nom} {ape} "
+                  f"— está en el directorio, no se toca.")
+            continue
+        # Un alumno matriculado o con pagos registrados no es una cuenta de
+        # prueba por mucho que su DNI parezca de relleno: lo que está mal es el
+        # DNI, no la persona. (Le pasó a Gadiel Aquino Navarro, id_alumno 1.)
+        if tabla == "alumno" and tiene_vida_academica(id_perfil):
+            print(f"[PROTEGIDO] alumno · DNI {dni} · {nom} {ape} "
+                  f"— tiene matrícula o pagos, no se toca.")
+            continue
         cuentas.append((tabla, pk, id_perfil, id_usuario,
                         f"{tabla} · DNI {dni} · {nom} {ape}"))
 

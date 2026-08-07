@@ -39,6 +39,45 @@ def _filtrar_por_busqueda(query, termino: str):
     )
 
 
+def asegurar_usuario(db: Session, alumno: models.Alumno) -> Usuario | None:
+    """
+    Garantiza que el alumno tenga cuenta para entrar al campus.
+
+    Todo alumno que ya forma parte del colegio (ADMITIDO o ESTUDIANTE) necesita
+    su usuario; el POSTULANTE todavía no, porque solo envió una solicitud desde
+    la web pública y puede acabar rechazado.
+
+    Se llama desde los tres sitios donde nace un alumno activo: el alta manual
+    del panel (con y sin apoderado) y la aprobación de una admisión. Antes cada
+    sitio lo resolvía por su cuenta y el alta manual sencillamente no lo hacía,
+    así que el alumno quedaba registrado pero sin poder iniciar sesión.
+
+    No hace commit: lo deja en la transacción de quien llama.
+    """
+    if alumno.id_usuario or alumno.estado_ingreso not in estados.ACTIVOS:
+        return None
+
+    username = generar_username(alumno.dni, "ALUMNO")
+
+    # Si ya existe la cuenta (un alumno que vuelve, o una carga previa), se
+    # reutiliza en vez de chocar contra el UNIQUE de usuario.username.
+    usuario = db.query(Usuario).filter(Usuario.username == username).first()
+    if not usuario:
+        usuario = Usuario(
+            username=username,
+            # Contraseña inicial: su propio DNI. debe_cambiar_password queda en
+            # su valor por defecto para obligarle a cambiarla al entrar.
+            password_hash=get_password_hash(alumno.dni),
+            rol="ALUMNO",
+            activo=True,
+        )
+        db.add(usuario)
+        db.flush()
+
+    alumno.id_usuario = usuario.id_usuario
+    return usuario
+
+
 def _obtener_alumno(db: Session, id_alumno: int) -> models.Alumno:
     alumno = db.query(models.Alumno).filter(models.Alumno.id_alumno == id_alumno).first()
     if not alumno:
@@ -64,6 +103,9 @@ def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db),
         raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
     db_alumno = models.Alumno(**alumno.model_dump())
     db.add(db_alumno)
+    db.flush()
+    # Un alumno dado de alta ya admitido tiene que poder entrar al campus.
+    asegurar_usuario(db, db_alumno)
     db.commit()
     db.refresh(db_alumno)
     return db_alumno
@@ -94,6 +136,10 @@ def crear_alumno_con_familiar(
         nuevo_alumno = models.Alumno(**datos.alumno.model_dump())
         db.add(nuevo_alumno)
         db.flush()  # Para obtener id_alumno
+
+        # El panel da de alta al alumno ya ADMITIDO, así que necesita su cuenta
+        # aquí mismo: no va a pasar por /decidir-admision.
+        asegurar_usuario(db, nuevo_alumno)
 
         # Si el apoderado no indicó dirección, hereda la del alumno (regla de admisión)
         familiar_data = datos.familiar.model_copy()
@@ -182,25 +228,10 @@ def decidir_admision(
             alumno.estado_ingreso = estados.ADMITIDO
             alumno.motivo_rechazo = None
 
-            # A. Crear Usuario para el ALUMNO (si no tiene uno asignado)
-            if not alumno.id_usuario:
-                # Verificamos si ya existe un usuario con ese DNI para evitar errores de duplicidad
-                username_alumno = generar_username(alumno.dni, "ALUMNO")
-                user_existente = db.query(al_models.Usuario).filter(al_models.Usuario.username == username_alumno).first()
-                
-                if user_existente:
-                    alumno.id_usuario = user_existente.id_usuario
-                else:
-                    nuevo_user_alumno = al_models.Usuario( # Asegúrate de usar models.Usuario si así se llama en tu archivo
-                        username=username_alumno,
-                        password_hash=get_password_hash(alumno.dni),
-                        rol="ALUMNO",
-                        activo=True
-                    )
-                    db.add(nuevo_user_alumno)
-                    db.flush() 
-                    alumno.id_usuario = nuevo_user_alumno.id_usuario
-            
+            # A. Crear su cuenta del campus (misma función que usa el alta manual)
+            asegurar_usuario(db, alumno)
+
+
             # C. Buscar el tipo de pago de Vacante y Matrícula (NUEVA LÓGICA MM-DD)
             hoy = date.today()
             hoy_md = hoy.strftime("%m-%d")

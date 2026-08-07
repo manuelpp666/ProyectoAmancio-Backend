@@ -1,14 +1,16 @@
-from pydantic import BaseModel, ConfigDict, Field, EmailStr
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 from decimal import Decimal
-from app.core.util.utils import DniStr, TelefonoStr
+from app.core.util.utils import DniStr, TelefonoOpcional, EmailOpcional
 
 class PersonalBase(BaseModel):
     dni: DniStr
     nombres: str
     apellidos: str
-    telefono: Optional[TelefonoStr] = None
-    email: Optional[EmailStr] = None
+    # Opcionales de verdad: el formulario los manda como "" cuando están en
+    # blanco y eso debe guardarse como NULL, no rechazar la edición entera.
+    telefono: TelefonoOpcional = None
+    email: EmailOpcional = None
 
 class PersonalCreate(PersonalBase):
     password: str
