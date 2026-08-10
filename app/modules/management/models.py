@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DECIMAL, ForeignKey, Date, DateTime, CHAR
+from sqlalchemy import Column, Integer, String, DECIMAL, ForeignKey, Date, DateTime, CHAR, UniqueConstraint
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.db.database import Base
@@ -26,6 +26,14 @@ class Asistencia(Base):
 
 class Nota(Base):
     __tablename__ = "nota"
+    # Un alumno solo puede tener una nota de cada tipo por curso y bimestre.
+    # Al cerrar el bimestre la aplicación busca la fila y la actualiza, así que
+    # esto no le estorba: protege de cargas masivas repetidas, que es como se
+    # duplicaron las notas de 2026 al ejecutar dos veces el mismo script.
+    __table_args__ = (
+        UniqueConstraint("id_matricula", "id_curso", "bimestre", "tipo_nota",
+                         name="uq_nota_alumno_curso_bim"),
+    )
     id_nota = Column(Integer, primary_key=True)
     id_matricula = Column(Integer, ForeignKey("matricula.id_matricula"))
     id_curso = Column(Integer, ForeignKey("curso.id_curso"))
@@ -36,6 +44,11 @@ class Nota(Base):
 
 class ResumenNota(Base):
     __tablename__ = "resumen_nota"
+    # Una sola boleta por alumno y curso: los cuatro bimestres van en columnas
+    # de esta misma fila, no en filas distintas.
+    __table_args__ = (
+        UniqueConstraint("id_matricula", "id_curso", name="uq_resumen_alumno_curso"),
+    )
     id_resumen_notas = Column(Integer, primary_key=True)
     id_matricula = Column(Integer, ForeignKey("matricula.id_matricula"))
     id_curso = Column(Integer, ForeignKey("curso.id_curso"))
