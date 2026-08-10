@@ -102,7 +102,16 @@ def crear_noticia(noticia: schemas.NoticiaCreate, db: Session = Depends(get_db),
 @router.get("/noticias/", response_model=List[schemas.NoticiaResponse])
 def listar_noticias(search: str = None, db: Session = Depends(get_db)):
     """
-    Lista noticias activas con filtro opcional por título o contenido.
+    Lista noticias activas, de la más reciente a la más antigua, con filtro
+    opcional por título o contenido.
+
+    El orden importa y no es cosmético: la portada se queda con las tres
+    primeras de esta lista. Sin ORDER BY, MySQL las devolvía por clave
+    primaria, así que en el inicio salían las tres más ANTIGUAS y una noticia
+    nueva no aparecía nunca.
+
+    Se desempata por id descendente para que dos noticias publicadas en el
+    mismo minuto salgan en un orden estable.
     """
     query = db.query(models.Noticia).filter(models.Noticia.activo == True)
 
@@ -114,8 +123,11 @@ def listar_noticias(search: str = None, db: Session = Depends(get_db)):
                 models.Noticia.contenido.ilike(search_filter)
             )
         )
-    
-    return query.all()
+
+    return query.order_by(
+        desc(models.Noticia.fecha_publicacion),
+        desc(models.Noticia.id_noticia),
+    ).all()
 
 @router.get("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse)
 def obtener_noticia(noticia_id: int, db: Session = Depends(get_db)):
