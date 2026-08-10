@@ -290,17 +290,34 @@ def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db), cur
     ]
 
 @router.patch("/citas/{id_cita}/completar")
-def finalizar_cita(id_cita: int, resultado: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """El psicólogo registra lo ocurrido en la reunión y cierra la cita."""
-    if current_user.get("rol") != "AUXILIAR" and current_user.get("rol") != "PSICOLOGO":
-        raise HTTPException(status_code=403, detail="No puedes mddificar esta información")
-    
+def finalizar_cita(
+    id_cita: int,
+    datos: schemas.CitaResultado,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    El psicólogo registra lo ocurrido en la reunión y cierra la cita.
+
+    El texto llega en el cuerpo de la petición. Antes se recibía como query
+    param, lo que obligaba a meter el relato de la sesión en la URL.
+    """
+    if current_user.get("rol") not in ("AUXILIAR", "PSICOLOGO"):
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información")
+
     cita = db.query(models.CitaPsicologia).filter(models.CitaPsicologia.id_cita == id_cita).first()
     if not cita:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
-    
+
+    # Una cita cancelada no se atendió, y una ya cerrada no se cierra dos veces.
+    if cita.estado not in ("PROGRAMADA", "REPROGRAMADA"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se pueden cerrar citas pendientes. Esta cita está {cita.estado}.",
+        )
+
     cita.estado = "COMPLETADA"
-    cita.resultado_reunion = resultado
+    cita.resultado_reunion = datos.resultado.strip()
     db.commit()
     return {"mensaje": "Cita finalizada y registrada"}
 
@@ -591,8 +608,18 @@ def obtener_resumen_dashboard(db: Session = Depends(get_db), current_user: dict 
         models.CitaPsicologia.estado == "COMPLETADA"
     ).count()
 
+    # "Citas para Hoy": las de HOY que siguen pendientes de atender.
+    # Antes contaba todas las citas en estado PROGRAMADA sin mirar la fecha, así
+    # que el número crecía con el año y no coincidía con la agenda del día.
+    # Se incluye REPROGRAMADA porque también está pendiente, y es el estado en
+    # el que queda una cita a la que se le cambió la hora.
+    citas_hoy = db.query(models.CitaPsicologia).filter(
+        func.date(models.CitaPsicologia.fecha_cita) == datetime.now().date(),
+        models.CitaPsicologia.estado.in_(["PROGRAMADA", "REPROGRAMADA"]),
+    ).count()
+
     return {
-        "citas_pendientes": db.query(models.CitaPsicologia).filter(models.CitaPsicologia.estado == "PROGRAMADA").count(),
+        "citas_pendientes": citas_hoy,
         "alumnos_riesgo": conteo_riesgo,
         "atenciones_mes": atenciones_mes
     }

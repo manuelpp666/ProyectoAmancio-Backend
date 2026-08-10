@@ -20,3 +20,12 @@ class CitaCreate(BaseModel):
     id_familiar: Optional[int] = None
     motivo: str
     fecha_cita: datetime
+
+
+class CitaResultado(BaseModel):
+    """Lo que el psicólogo escribe al cerrar una cita ya atendida.
+
+    Va en el cuerpo de la petición y no en la URL: es un texto largo, y como
+    query param se rompería con los saltos de línea y los acentos.
+    """
+    resultado: str = Field(min_length=10, max_length=1000)
