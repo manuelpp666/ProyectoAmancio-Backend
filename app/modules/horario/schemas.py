@@ -45,9 +45,72 @@ class MateriaDisponibleResponse(BaseModel):
     id_carga_academica: int
     curso_nombre: str = Field(..., min_length=2, max_length=100)
     docente_nombre: str = Field(..., min_length=2, max_length=250)
-    
+
     # CAMBIAMOS horas_semanales por minutos_semanales Y AÑADIMOS minutos_asignados respetando tus validaciones
     minutos_semanales: int = Field(default=0, ge=0)
     minutos_asignados: int = Field(default=0, ge=0)
-    
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------------------------
+# CONFIGURACIÓN DE LA REJILLA
+# ---------------------------------------------------------------------------
+Ambito = Literal["PRIMARIA", "SECUNDARIA", "PRE_ACADEMIA"]
+Modalidad = Literal["REGULAR", "VERANO"]
+
+
+class RecesoBase(BaseModel):
+    nombre: str = Field(default="Recreo", min_length=1, max_length=40)
+    hora_inicio: str = Field(..., pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    duracion: int = Field(..., ge=5, le=180, description="Minutos que dura el receso")
+
+
+class RecesoResponse(RecesoBase):
+    id_receso: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ConfiguracionUpdate(BaseModel):
+    """Solo la jornada y la duración del bloque; los recesos van aparte."""
+    duracion_bloque: int = Field(..., ge=10, le=240)
+    hora_inicio: str = Field(..., pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    hora_fin: str = Field(..., pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    # Si el cambio deja clases en horas que dejan de existir, el servidor
+    # responde 409 en vez de guardar. El panel pregunta y reenvía esto en true.
+    confirmar: bool = False
+
+    @model_validator(mode="after")
+    def validar_jornada(self) -> "ConfiguracionUpdate":
+        if self.hora_fin <= self.hora_inicio:
+            raise ValueError("La jornada debe terminar después de empezar")
+        inicio_min = int(self.hora_inicio[:2]) * 60 + int(self.hora_inicio[3:])
+        fin_min = int(self.hora_fin[:2]) * 60 + int(self.hora_fin[3:])
+        if fin_min - inicio_min < self.duracion_bloque:
+            raise ValueError(
+                "La jornada es más corta que un bloque: no cabría ninguna clase"
+            )
+        return self
+
+
+class BloqueResponse(BaseModel):
+    """Una fila de la rejilla, ya calculada."""
+    hora_inicio: str
+    hora_fin: str
+    tipo: Literal["clase", "receso"]
+    duracion: int
+    nombre: Optional[str] = None  # solo para los recesos
+
+
+class ConfiguracionResponse(BaseModel):
+    id_configuracion: int
+    ambito: Ambito
+    modalidad: Modalidad
+    duracion_bloque: int
+    hora_inicio: str
+    hora_fin: str
+    recesos: List[RecesoResponse] = []
+    # La rejilla resultante, para previsualizarla sin recalcular en el cliente
+    bloques: List[BloqueResponse] = []
+
     model_config = ConfigDict(from_attributes=True)

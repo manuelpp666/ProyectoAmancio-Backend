@@ -500,10 +500,17 @@ def cerrar_notas_bimestre(
     return {"message": f"Bimestre {bimestre} cerrado exitosamente para la carga {id_carga}"}
 # --- Asignación de Docentes ---
 
-@router.get("/vínculos-academicos/{anio_id}", response_model=List[schemas.VinculoAcademicoResponse])
+# La ruta buena es la de abajo, sin tilde. La versión con tilde se mantiene
+# registrada solo por compatibilidad: el navegador la envía codificada como
+# /gestion/v%C3%ADnculos-academicos/... y, al pasar por el proxy de Apache en
+# cPanel, no llega igual que en local, así que FastAPI no la reconocía y
+# devolvía 404 solo en producción. Las URL de la API se dejan en ASCII.
+@router.get("/vinculos-academicos/{anio_id}", response_model=List[schemas.VinculoAcademicoResponse])
+@router.get("/vínculos-academicos/{anio_id}", response_model=List[schemas.VinculoAcademicoResponse],
+            include_in_schema=False)
 def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
-    Obtiene todos los cursos por sección de un año escolar 
+    Obtiene todos los cursos por sección de un año escolar
     y muestra qué docente tienen asignado (si lo hay).
     """
     if current_user.get("rol") != "ADMIN":
