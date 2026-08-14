@@ -17,19 +17,34 @@ más de 6000 notas), así que:
   * Las columnas se calculan sobre el total filtrado, no sobre la página, para
     que no cambien al pasar de página.
   * Son dos consultas por petición, no una por alumno.
+
+Dos cosas se hacen EXACTAMENTE igual que en `router_libreta.py`, y tienen que
+seguir haciéndose igual, porque lo que se ve aquí y lo que sale impreso en el
+PDF son el mismo dato y el colegio los compara:
+
+  * Las columnas son los cursos del PLAN DE ESTUDIOS de los grados filtrados,
+    no solo los que ya tienen nota. Un curso sin cargar tiene que verse como
+    una casilla pendiente; si se omite la columna, nadie se entera de que
+    falta.
+  * El promedio es el PONDERADO DE ÁREAS, no la media de las notas sueltas.
+    Son números distintos: en 5to de secundaria, con 19 cursos repartidos en
+    11 áreas, la media plana da 14.63 y el ponderado de la libreta 16.45. Se
+    promedia dentro de cada área, se redondea a entero, y recién esos enteros
+    se promedian entre sí.
 """
 
 from __future__ import annotations
 
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.core.util.security import get_current_user
-from app.modules.academic.models import AnioEscolar, Area, Curso, Grado, Nivel, Seccion
+from app.modules.academic.models import (AnioEscolar, Area, Curso, Grado, Nivel,
+                                         PlanEstudio, Seccion)
 from app.modules.enrollment.models import Matricula
 from app.modules.management.models import ExoneracionCurso, Nota
 from app.modules.users.alumno.models import Alumno
@@ -46,6 +61,33 @@ ROLES_PERMITIDOS = ("ADMIN", "DOCENTE", "AUXILIAR")
 def _autorizar(usuario: dict) -> None:
     if (usuario or {}).get("rol") not in ROLES_PERMITIDOS:
         raise HTTPException(403, "No tienes permiso para consultar las notas")
+
+
+def _entero(valor: float) -> int:
+    """Redondeo al entero más cercano con el medio punto hacia arriba.
+
+    `round()` de Python redondea 12.5 a 12 (redondeo bancario) y la libreta
+    del colegio lo sube a 13. Misma función que en `router_libreta.py`: si una
+    de las dos cambia, la tabla y el PDF dejan de coincidir.
+    """
+    return int(Decimal(str(valor)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _dos_decimales(valor: float) -> float:
+    return float(Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _clave_curso(nombre: str) -> str:
+    """Orden de los cursos dentro de un área, el mismo que imprime la libreta.
+
+    Es la ordenación por punto de código, sin normalizar acentos: por eso
+    ÁLGEBRA va detrás de RAZONAMIENTO MATEMÁTICO y no delante de ARITMÉTICA.
+    Se ve raro escrito, pero es exactamente el orden del papel, y es también
+    el que usa `router_libreta.py` al ordenar los cursos de cada bloque. Se
+    ordena por el nombre tal cual está en la base, sin tocarlo, para que las
+    dos pantallas den el mismo resultado carácter a carácter.
+    """
+    return nombre or ""
 
 
 def _base(db: Session, anio: str, nivel, id_grado, id_seccion, dni):
@@ -111,19 +153,67 @@ def notas_finales(
     # --- cuántos alumnos hay en total con esos filtros ---
     total = base.order_by(None).count()
 
-    # --- columnas: los cursos con nota en TODO el conjunto filtrado ---
+    # --- columnas: el plan de estudios de los grados filtrados ---
     # Se calcula aparte de la página para que la tabla no cambie de columnas al
-    # avanzar. Es una consulta ligera: agrupa por curso, no por alumno.
+    # avanzar. Son los cursos que el alumno DEBERÍA tener, no los que ya tienen
+    # nota: si solo se listaran los segundos, un curso que nadie cargó
+    # desaparecería de la tabla y no habría forma de notar que falta.
     ids_filtrados = base.order_by(None).with_entities(Matricula.id_matricula).subquery()
-    q_cursos = (db.query(Curso.id_curso, Curso.nombre, Area.nombre.label("area"))
-                .join(Nota, Nota.id_curso == Curso.id_curso)
-                .outerjoin(Area, Area.id_area == Curso.id_area)
-                .filter(Nota.id_matricula.in_(db.query(ids_filtrados.c.id_matricula))))
+    ids_grado = [g for (g,) in base.order_by(None)
+                 .with_entities(Grado.id_grado).distinct().all()]
+
+    cursos_plan = []
+    if ids_grado:
+        cursos_plan = (db.query(Curso.id_curso, Curso.nombre, Curso.id_area)
+                       .join(PlanEstudio, PlanEstudio.id_curso == Curso.id_curso)
+                       .filter(PlanEstudio.id_grado.in_(ids_grado)).distinct().all())
+
+    # Cursos con nota que NO están en el plan. Pasa de verdad: los que van con
+    # 20 automático (Arte y Pintura, Tutoría, Cívica...) tienen nota pero
+    # deliberadamente no se metieron en `plan_estudio`, para no tocar horarios
+    # ni asignación de docentes. Sin esta segunda consulta no saldrían.
+    q_extra = (db.query(Curso.id_curso, Curso.nombre, Curso.id_area)
+               .join(Nota, Nota.id_curso == Curso.id_curso)
+               .filter(Nota.id_matricula.in_(db.query(ids_filtrados.c.id_matricula))))
     if bimestre:
-        q_cursos = q_cursos.filter(Nota.bimestre == bimestre)
-    cursos = (q_cursos.group_by(Curso.id_curso, Curso.nombre, Area.nombre)
-              .order_by(Area.nombre.asc(), Curso.nombre.asc()).all())
-    columnas = [{"id_curso": c.id_curso, "curso": c.nombre, "area": c.area} for c in cursos]
+        q_extra = q_extra.filter(Nota.bimestre == bimestre)
+    ids_plan = {c.id_curso for c in cursos_plan}
+    if ids_plan:
+        q_extra = q_extra.filter(~Curso.id_curso.in_(ids_plan))
+    cursos_todos = list(cursos_plan) + list(q_extra.distinct().all())
+
+    # --- orden de la libreta: primero por área, luego por curso ---
+    # El orden de las áreas NO es el mismo en los dos niveles (Inglés va
+    # tercero en primaria y último en secundaria), así que se elige según lo
+    # que se esté mirando. Si el filtro mezcla niveles se usa el de
+    # secundaria, que es el que tiene más áreas, y primaria queda de reserva.
+    niveles_vistos = {n for (n,) in base.order_by(None)
+                      .with_entities(Nivel.nombre).distinct().all()}
+    solo_primaria = bool(niveles_vistos) and all(
+        "PRIM" in (n or "").upper() for n in niveles_vistos)
+
+    areas_info = {a.id_area: a for a in db.query(Area).all()}
+
+    def _orden_area(id_area):
+        a = areas_info.get(id_area)
+        if a is None:
+            return (9999, "")            # curso sin área: al final
+        orden = getattr(a, "orden_primaria" if solo_primaria else "orden_secundaria", None)
+        if orden is None:
+            # El área no existe en ese nivel (o falta el script 19): se usa el
+            # orden del otro nivel antes que mandarla al final sin más.
+            orden = getattr(a, "orden_secundaria" if solo_primaria else "orden_primaria", None)
+        return (orden if orden is not None else 9999, a.nombre or "")
+
+    cursos_todos.sort(key=lambda c: (_orden_area(c.id_area), _clave_curso(c.nombre)))
+    columnas = [{"id_curso": c.id_curso, "curso": c.nombre,
+                 "id_area": c.id_area,
+                 "area": (areas_info[c.id_area].nombre
+                          if c.id_area in areas_info else None)}
+                for c in cursos_todos]
+
+    # id_curso -> id_area, para agrupar las notas de cada alumno por área.
+    area_de_curso = {c.id_curso: c.id_area for c in cursos_todos}
 
     # --- la página de alumnos ---
     filas = (base.order_by(Nivel.nombre.asc(), Grado.orden.asc(), Seccion.nombre.asc(),
@@ -163,6 +253,16 @@ def notas_finales(
         notas = por_alumno.get(f.id_matricula, {})
         valores = [v for v, _ in notas.values()]
         exo = exonerados.get(f.id_matricula, set())
+
+        # --- ponderado de áreas, exactamente como la libreta ---
+        # Se agrupa por área, se promedia dentro de cada una y se redondea a
+        # entero; el ponderado es la media de esos enteros. Un área sin
+        # ninguna nota (toda exonerada, o sin cargar) ni suma ni divide.
+        por_area: dict = {}
+        for id_curso, (valor, _) in notas.items():
+            por_area.setdefault(area_de_curso.get(id_curso), []).append(valor)
+        promedios_area = [_entero(sum(v) / len(v)) for v in por_area.values() if v]
+
         alumnos.append({
             "id_matricula": f.id_matricula,
             "dni": f.dni,
@@ -176,9 +276,12 @@ def notas_finales(
             # dejar la casilla en blanco.
             "exonerados": [str(c) for c in sorted(exo)],
             "cursos_con_nota": len(valores),
-            # El promedio se saca únicamente sobre los cursos CON nota, igual
-            # que en la libreta del colegio: un curso exonerado no divide.
-            "promedio": round(sum(valores) / len(valores), 2) if valores else None,
+            # Suma de los promedios de área: es el "PUNTAJE ACUMULADO" que sale
+            # impreso en el pie de la libreta.
+            "puntaje_acumulado": sum(promedios_area) if promedios_area else None,
+            "num_areas": len(promedios_area),
+            "promedio": (_dos_decimales(sum(promedios_area) / len(promedios_area))
+                         if promedios_area else None),
         })
 
     return {"anio": anio, "es_verano": es_verano, "bimestre": bimestre,

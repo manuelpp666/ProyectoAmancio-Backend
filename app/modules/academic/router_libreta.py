@@ -11,16 +11,17 @@ Por qué vive en su propio archivo y no dentro de `router_notas.py` ni de
 así el diff de esta tarea no se mezcla con el de esos archivos que ya están
 en producción.
 
-Dos cosas que este endpoint da por hechas porque las está construyendo OTRA
-tarea en paralelo, y que aquí se tratan con cuidado para no reventar si
-todavía no existen:
+El bimestre es ACUMULATIVO: pedir el III trae los bimestres I, II y III, y
+todos los promedios se calculan solo sobre esos tres. Es lo que hace la
+libreta en papel, que en cada entrega reimprime los bimestres anteriores. Sin
+esto, la libreta del I bimestre saldría con columnas de bimestres que el
+alumno todavía no ha cursado y el promedio de área mezclaría notas que en esa
+fecha aún no existían.
 
-  * `Area.orden_primaria` / `Area.orden_secundaria`: el orden oficial de las
-    áreas en la libreta. Si la columna no está en el modelo, o está pero la
-    tabla real todavía no la tiene, se cae al orden alfabético.
-  * `app.modules.behavior.models.NotaConducta`: la nota de conducta por
-    bimestre. Si el modelo no existe todavía, la conducta sale `null` y no
-    se rompe nada.
+`Area.orden_primaria` / `Area.orden_secundaria` es el orden oficial de las
+áreas en la libreta; lo crea el script 19. Si esas columnas no estuvieran (una
+base a la que todavía no se le pasó el script), se cae al orden alfabético en
+vez de reventar.
 """
 
 from __future__ import annotations
@@ -36,15 +37,8 @@ from app.core.util.security import get_current_user
 from app.modules.academic.models import Area, Curso, Grado, Nivel, PlanEstudio, Seccion
 from app.modules.enrollment.models import Matricula
 from app.modules.management.models import ExoneracionCurso, Nota
+from app.modules.behavior.models import NotaConducta
 from app.modules.users.alumno.models import Alumno
-
-# La conducta la modela otra tarea en paralelo. Se importa de forma
-# defensiva: si el módulo aún no la declara, este endpoint sigue
-# funcionando y simplemente no manda la conducta (null en vez de reventar).
-try:
-    from app.modules.behavior.models import NotaConducta  # type: ignore
-except ImportError:  # pragma: no cover - depende de la otra tarea
-    NotaConducta = None  # type: ignore
 
 router = APIRouter(prefix="/academic", tags=["Académico"])
 
@@ -111,20 +105,24 @@ def _orden_areas(db: Session, ids_area: set, primaria: bool) -> dict:
 @router.get("/libreta/{id_matricula}")
 def libreta(
     id_matricula: int,
-    bimestre: Optional[int] = Query(None, ge=1, le=4, description="Bimestre destacado en el pie del PDF"),
+    bimestre: Optional[int] = Query(None, ge=1, le=4, description="Último bimestre a incluir; es acumulativo"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """Todo lo que necesita el PDF de la libreta de un alumno.
 
-    La tabla siempre trae los cuatro bimestres (1..4), tenga o no notas
-    cargadas todavía: así el PDF puede dibujar las cuatro columnas de la
-    libreta oficial aunque el año esté a la mitad. El parámetro `bimestre`
-    solo decide cuál es el bimestre "destacado" en el pie (puntaje
-    acumulado, ponderado y conducta que se leen de un vistazo); si no se
-    manda, se usa el bimestre más avanzado que ya tenga alguna nota.
+    `bimestre` es el ÚLTIMO que entra, no el único: pedir el III devuelve I,
+    II y III, y los promedios de área, el puntaje acumulado y el ponderado se
+    calculan solo sobre esos. Sin `bimestre` se devuelve el año completo.
+
+    `bimestres_visibles` dice qué columnas debe dibujar el PDF, para que no
+    tenga que deducirlo mirando qué notas vienen en null.
     """
     _autorizar(current_user)
+
+    # Bimestres que entran en esta libreta. Todo lo que sigue —notas, promedios
+    # de área, puntaje, ponderado y conducta— se calcula solo sobre estos.
+    visibles = tuple(b for b in BIMESTRES if bimestre is None or b <= bimestre)
 
     fila = (
         db.query(Matricula, Alumno, Seccion, Grado, Nivel)
@@ -158,7 +156,7 @@ def libreta(
     q_extra = (
         db.query(Curso.id_curso, Curso.nombre, Curso.id_area)
         .join(Nota, Nota.id_curso == Curso.id_curso)
-        .filter(Nota.id_matricula == id_matricula)
+        .filter(Nota.id_matricula == id_matricula, Nota.bimestre.in_(visibles))
     )
     if ids_plan:
         q_extra = q_extra.filter(~Curso.id_curso.in_(ids_plan))
@@ -171,19 +169,20 @@ def libreta(
         return {
             "alumno": _alumno_info(matricula, alumno, nivel, grado, seccion),
             "bimestre_cabecera": bimestre,
+            "bimestres_visibles": list(visibles),
             "areas": [],
             "resumen": {
-                "por_bimestre": {str(b): {"puntaje_acumulado": None, "num_areas": 0, "ponderado": None} for b in BIMESTRES},
-                "conducta_por_bimestre": {str(b): None for b in BIMESTRES},
+                "por_bimestre": {str(b): {"puntaje_acumulado": None, "num_areas": 0, "ponderado": None} for b in visibles},
+                "conducta_por_bimestre": {str(b): None for b in visibles},
                 "ponderado_final_anual": None,
             },
         }
 
-    # --- notas del alumno, todas (los cuatro bimestres) ---
+    # --- notas del alumno, solo de los bimestres que entran en esta libreta ---
     notas_por_curso: dict = {}
     for n in (
         db.query(Nota.id_curso, Nota.bimestre, Nota.valor)
-        .filter(Nota.id_matricula == id_matricula)
+        .filter(Nota.id_matricula == id_matricula, Nota.bimestre.in_(visibles))
         .all()
     ):
         notas_por_curso.setdefault(n.id_curso, {})[n.bimestre] = float(n.valor)
@@ -215,14 +214,14 @@ def libreta(
                 "id_curso": c.id_curso,
                 "nombre": c.nombre,
                 "exonerado": c.id_curso in exonerados,
-                "notas": {str(b): notas_curso.get(b) for b in BIMESTRES},
+                "notas": {str(b): notas_curso.get(b) for b in visibles},
             }
         )
 
     # --- promedio de área por bimestre y anual (reglas 1 y 4 del PDF) ---
     for info in bloques.values():
         promedio_bim = {}
-        for b in BIMESTRES:
+        for b in visibles:
             valores = [
                 c["notas"][str(b)] for c in info["cursos"] if c["notas"][str(b)] is not None
             ]
@@ -237,7 +236,7 @@ def libreta(
 
     # --- puntaje acumulado y ponderado, por bimestre (reglas 2, 3 y 5) ---
     resumen_bim = {}
-    for b in BIMESTRES:
+    for b in visibles:
         promedios_area = [
             info["promedio_por_bimestre"][str(b)]
             for info in bloques.values()
@@ -262,25 +261,19 @@ def libreta(
         else None
     )
 
-    # --- conducta por bimestre, tolerando que el modelo aún no exista ---
-    conducta_bim = {str(b): None for b in BIMESTRES}
-    if NotaConducta is not None:
-        try:
-            for nc in (
-                db.query(NotaConducta.bimestre, NotaConducta.valor)
-                .filter(NotaConducta.id_matricula == id_matricula)
-                .all()
-            ):
-                conducta_bim[str(nc.bimestre)] = nc.valor
-        except Exception:
-            # La tabla todavía no existe en la base real, aunque el modelo
-            # ya esté declarado: se descarta y sigue sin conducta.
-            db.rollback()
+    # --- conducta, solo de los bimestres que entran ---
+    conducta_bim = {str(b): None for b in visibles}
+    for nc in (
+        db.query(NotaConducta.bimestre, NotaConducta.valor)
+        .filter(NotaConducta.id_matricula == id_matricula, NotaConducta.bimestre.in_(visibles))
+        .all()
+    ):
+        conducta_bim[str(nc.bimestre)] = nc.valor
 
     # --- bimestre que se destaca en el pie del PDF ---
     bimestre_cabecera = bimestre
     if bimestre_cabecera is None:
-        con_datos = [b for b in BIMESTRES if resumen_bim[str(b)]["puntaje_acumulado"] is not None]
+        con_datos = [b for b in visibles if resumen_bim[str(b)]["puntaje_acumulado"] is not None]
         bimestre_cabecera = max(con_datos) if con_datos else None
 
     # --- áreas en el orden de la libreta, con sus cursos alfabéticos ---
@@ -300,6 +293,7 @@ def libreta(
     return {
         "alumno": _alumno_info(matricula, alumno, nivel, grado, seccion),
         "bimestre_cabecera": bimestre_cabecera,
+        "bimestres_visibles": list(visibles),
         "areas": areas_out,
         "resumen": {
             "por_bimestre": resumen_bim,

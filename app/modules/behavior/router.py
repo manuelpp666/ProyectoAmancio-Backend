@@ -138,6 +138,7 @@ def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends
 
     # Estado resultante del alumno, para que el auxiliar vea el impacto de inmediato
     anio_actual = datetime.now().year
+    _, _, numero_bimestre = _periodo(db, anio_actual)
     puntaje = calcular_puntaje(_puntos_perdidos_anio(db, reporte.id_alumno, anio_actual))
     requiere_cambio_ie = bool(nivel.cambio_ie) or _tiene_cambio_ie(db, reporte.id_alumno, anio_actual)
 
@@ -151,6 +152,13 @@ def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends
         "puntaje_actual": puntaje,
         "estado_color": estado_visual(puntaje, requiere_cambio_ie),
         "requiere_cambio_ie": requiere_cambio_ie,
+        # La escala viaja con la respuesta para que la pantalla del auxiliar no
+        # la lleve escrita a mano: cuando cambió de 100 a 20 se quedó
+        # desactualizada y mostraba rangos que ya no existían.
+        "bimestre": numero_bimestre,
+        "puntaje_maximo": PUNTAJE_MAXIMO,
+        "umbral_observacion": UMBRAL_OBSERVACION,
+        "umbral_critico": UMBRAL_CRITICO,
     }
 
 @router.get("/reportes/")
