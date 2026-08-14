@@ -25,6 +25,7 @@ import json
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.modules.finance import models as fin
@@ -37,6 +38,10 @@ from app.modules.users.alumno.models import Alumno
 # Estados de `pago` que representan una deuda viva: son las que viajan al BCP.
 PENDIENTES = ("PENDIENTE", "VENCIDO")
 TOLERANCIA = Decimal("0.01")
+
+# La puesta en marcha se anota como un lote con este estado. No es un reporte
+# de cobros y no debe salir en el historial de reportes ni contar como uno.
+ESTADO_LOTE_INICIAL = "INICIAL"
 
 # Tope de cobros que se devuelven al panel. Un reporte diario trae unas 50
 # líneas, pero si alguien sube dos meses de golpe la respuesta se dispararía.
@@ -116,25 +121,68 @@ def _marca(registro) -> Tuple[str, Optional[int]]:
 # Índice de deudas
 # ---------------------------------------------------------------------------
 
+class CuotaPagada:
+    """Copia ligera de una cuota YA COBRADA, solo para poder reconocerla.
+
+    No es una fila de la base que se vaya a modificar: sirve para contestar
+    "esto ya estaba pagado" cuando un cobro del banco no cruza con ninguna
+    deuda viva. Se guarda una copia mínima en vez del objeto entero porque son
+    casi diez mil y solo hacen falta cinco campos.
+    """
+
+    __slots__ = ("id_pago", "id_cuota_externa", "concepto", "monto",
+                 "fecha_vencimiento", "fecha_pago", "operacion", "del_crep")
+
+    def __init__(self, *, id_pago=None, id_cuota_externa=None, concepto=None,
+                 monto=None, fecha_vencimiento=None, fecha_pago=None,
+                 operacion=None, del_crep=False):
+        self.id_pago = id_pago
+        self.id_cuota_externa = id_cuota_externa
+        self.concepto = concepto
+        self.monto = monto
+        self.fecha_vencimiento = fecha_vencimiento
+        self.fecha_pago = fecha_pago
+        self.operacion = operacion
+        # True si se dio por pagada en la importación inicial, sin ver el cobro:
+        # cuando llega el reporte del banco, ese cobro la CONFIRMA. Si en cambio
+        # ya se había aplicado un cobro real y ahora llega otro distinto, eso sí
+        # hay que mirarlo.
+        self.del_crep = del_crep
+
+
+class _Cajones:
+    """Los tres niveles con los que se busca una cuota, de estricto a laxo."""
+
+    def __init__(self):
+        # 1) La fecha exacta.
+        self.por_clave: Dict[Tuple[str, dt.date], List] = {}
+        # 2) Solo las que vencen a fin de mes, para cruzar el 30 del sistema
+        #    con el 31 del banco. Se consulta si la fecha exacta no da nada.
+        self.por_fin_de_mes: Dict[Tuple[str, int, int], List] = {}
+        # 3) Todas las del alumno en ese mes, sin mirar el día. Último recurso,
+        #    y solo vale cuando hay una sola: así se resuelve diciembre, cuya
+        #    fecha cambia de un año a otro.
+        self.por_mes: Dict[Tuple[str, int, int], List] = {}
+
+
 class IndiceDeudas:
-    """Las cuotas vivas, indexadas por (documento, vencimiento).
+    """Las cuotas indexadas por (documento, vencimiento).
 
     Se arma una sola vez por proceso y se va actualizando en memoria conforme
     se aplican los pagos, para no consultar la base por cada línea del reporte.
+
+    Hay DOS juegos de índices: las cuotas vivas, que son a las que se puede
+    aplicar un cobro, y las ya pagadas, que solo se consultan cuando no hay
+    ninguna viva. Sin las segundas, un cobro de algo que el sistema ya daba por
+    cobrado salía como "sin coincidencia", que es lo mismo que dice un depósito
+    de un desconocido, y no hay forma de distinguirlos.
     """
 
     def __init__(self, db: Session):
         self.db = db
-        self.por_clave: Dict[Tuple[str, dt.date], List] = {}
-        # Segundo índice, solo con las cuotas que vencen a fin de mes, para
-        # cruzar el 30 del sistema con el 31 del banco. Se consulta únicamente
-        # cuando la fecha exacta no encuentra nada.
-        self.por_fin_de_mes: Dict[Tuple[str, int, int], List] = {}
-        # Todas las cuotas del alumno en cada mes, sin mirar el día. Es el
-        # último recurso, y solo vale cuando en ese mes hay una sola: así se
-        # resuelve diciembre, cuya fecha cambia de un año a otro.
-        self.por_mes: Dict[Tuple[str, int, int], List] = {}
-        # Dónde quedó cada cuota, para poder sacarla de todos los índices
+        self.vivas = _Cajones()
+        self.pagadas = _Cajones()
+        # Dónde quedó cada cuota viva, para poder sacarla de todos los índices
         # cuando se aplica un pago.
         self._ubicaciones: Dict[Tuple[str, Optional[int]], List[Tuple[dict, tuple]]] = {}
         # Documento -> nombre, de TODOS los alumnos, no solo de los que deben.
@@ -144,19 +192,27 @@ class IndiceDeudas:
         self._cargar_nombres()
         self._cargar_pagos()
         self._cargar_externas()
+        self._cargar_pagadas()
 
-    def _añadir(self, clave, registro):
+    def _añadir(self, clave, registro, cajones: Optional[_Cajones] = None,
+                rastrear: bool = True):
+        cajones = cajones or self.vivas
         doc, venc = clave
-        self.por_clave.setdefault(clave, []).append(registro)
-        ubicaciones = self._ubicaciones.setdefault(_marca(registro), [])
-        ubicaciones.append((self.por_clave, clave))
+        if venc is None:
+            return
+        cajones.por_clave.setdefault(clave, []).append(registro)
+        ubicaciones = self._ubicaciones.setdefault(_marca(registro), []) if rastrear else None
+        if ubicaciones is not None:
+            ubicaciones.append((cajones.por_clave, clave))
         if es_fin_de_mes(venc):
             fdm = (doc, venc.year, venc.month)
-            self.por_fin_de_mes.setdefault(fdm, []).append(registro)
-            ubicaciones.append((self.por_fin_de_mes, fdm))
+            cajones.por_fin_de_mes.setdefault(fdm, []).append(registro)
+            if ubicaciones is not None:
+                ubicaciones.append((cajones.por_fin_de_mes, fdm))
         mes = (doc, venc.year, venc.month)
-        self.por_mes.setdefault(mes, []).append(registro)
-        ubicaciones.append((self.por_mes, mes))
+        cajones.por_mes.setdefault(mes, []).append(registro)
+        if ubicaciones is not None:
+            ubicaciones.append((cajones.por_mes, mes))
 
     def quitar(self, registro) -> None:
         """Saca una cuota ya cobrada de todos los índices.
@@ -168,6 +224,40 @@ class IndiceDeudas:
             lista = indice.get(clave)
             if lista and registro in lista:
                 lista.remove(registro)
+
+    def dar_por_cobrada(self, registro, pago: PagoBCP) -> None:
+        """Mueve una cuota de las vivas a las pagadas, dentro de esta pasada.
+
+        Hay que hacer las dos cosas. Quitarla de las vivas evita aplicarle un
+        segundo cobro; meterla en las pagadas es lo que permite reconocer ese
+        segundo cobro como repetido en vez de darlo por huérfano. Sin lo
+        segundo, subir el reporte de media mañana y el del cierre en la MISMA
+        carga sacaba los cobros comunes como «sin coincidencia».
+
+        Se llama también al simular: no toca la base —solo estas listas en
+        memoria— y es lo que hace que la simulación cuente lo mismo que va a
+        pasar de verdad.
+        """
+        self.quitar(registro)
+        doc = ""
+        if isinstance(registro, fin.Pago):
+            doc = _doc(registro.alumno.dni) if registro.alumno else ""
+        else:
+            doc = _doc(getattr(registro, "documento", None))
+        if not doc or not registro.fecha_vencimiento:
+            return
+        self._añadir(
+            (doc, registro.fecha_vencimiento),
+            CuotaPagada(
+                id_pago=getattr(registro, "id_pago", None),
+                id_cuota_externa=getattr(registro, "id_cuota_externa", None),
+                concepto=getattr(registro, "concepto", None),
+                monto=registro.monto,
+                fecha_vencimiento=registro.fecha_vencimiento,
+                fecha_pago=pago.fecha_pago,
+                operacion=pago.operacion,
+                del_crep=False),
+            cajones=self.pagadas, rastrear=False)
 
     def _cargar_nombres(self):
         for dni, apellidos, nombres in self.db.query(
@@ -207,8 +297,48 @@ class IndiceDeudas:
                 if doc:
                     self._añadir((doc, c.fecha_vencimiento), c)
 
-    def buscar(self, pago: PagoBCP) -> Tuple[List, Optional[str]]:
-        """Cuotas que encajan con ese cobro, sin repetir.
+    def _cargar_pagadas(self):
+        """Las cuotas ya cobradas, para reconocer un cobro repetido.
+
+        Se traen solo las columnas que hacen falta —son casi diez mil filas— y
+        no se rastrean sus ubicaciones: de aquí no se quita nada nunca, porque
+        no se les puede aplicar ningún cobro.
+        """
+        from app.modules.users.alumno.models import Alumno as _Al
+
+        for f in (self.db.query(fin.Pago.id_pago, fin.Pago.concepto, fin.Pago.monto,
+                                fin.Pago.fecha_vencimiento, fin.Pago.fecha_pago,
+                                fin.Pago.codigo_operacion_bcp,
+                                fin.Pago.json_respuesta_banco, _Al.dni)
+                  .join(_Al, _Al.id_alumno == fin.Pago.id_alumno)
+                  .filter(fin.Pago.estado == "PAGADO").all()):
+            doc = _doc(f.dni)
+            if not doc or not f.fecha_vencimiento:
+                continue
+            self._añadir(
+                (doc, f.fecha_vencimiento),
+                CuotaPagada(id_pago=f.id_pago, concepto=f.concepto, monto=f.monto,
+                            fecha_vencimiento=f.fecha_vencimiento,
+                            fecha_pago=f.fecha_pago,
+                            operacion=f.codigo_operacion_bcp,
+                            del_crep="SINCRONIZACION_CREP" in (f.json_respuesta_banco or "")),
+                cajones=self.pagadas, rastrear=False)
+
+        for c in (self.db.query(fin.CuotaExterna)
+                  .filter(fin.CuotaExterna.estado == "PAGADO").all()):
+            for doc in {_doc(c.documento), _doc(c.codigo_depositante)}:
+                if doc:
+                    self._añadir(
+                        (doc, c.fecha_vencimiento),
+                        CuotaPagada(id_cuota_externa=c.id_cuota_externa,
+                                    concepto=c.concepto, monto=c.monto,
+                                    fecha_vencimiento=c.fecha_vencimiento,
+                                    fecha_pago=c.fecha_pago,
+                                    operacion=c.codigo_operacion_bcp),
+                        cajones=self.pagadas, rastrear=False)
+
+    def _buscar_en(self, cajones: _Cajones, pago: PagoBCP) -> Tuple[List, Optional[str]]:
+        """Cuotas de esos cajones que encajan con el cobro, sin repetir.
 
         Devuelve (cuotas, cómo se encontraron): None si la fecha era idéntica,
         "fin_de_mes" o "mismo_mes" si hubo que aflojar. Se intenta en ese
@@ -230,14 +360,14 @@ class IndiceDeudas:
 
         # 1) La fecha exacta.
         for doc in pago.documentos:
-            recoger(self.por_clave.get((_doc(doc), venc)))
+            recoger(cajones.por_clave.get((_doc(doc), venc)))
         if encontrados:
             return encontrados, None
 
         # 2) El mismo fin de mes: el 30 del sistema y el 31 del banco.
         if es_fin_de_mes(venc):
             for doc in pago.documentos:
-                recoger(self.por_fin_de_mes.get((_doc(doc), venc.year, venc.month)))
+                recoger(cajones.por_fin_de_mes.get((_doc(doc), venc.year, venc.month)))
             if encontrados:
                 return encontrados, "fin_de_mes"
 
@@ -246,8 +376,17 @@ class IndiceDeudas:
         #    devuelven las dos, que es lo que hace que salga como AMBIGUO y
         #    acabe en la bandeja para que alguien decida.
         for doc in pago.documentos:
-            recoger(self.por_mes.get((_doc(doc), venc.year, venc.month)))
+            recoger(cajones.por_mes.get((_doc(doc), venc.year, venc.month)))
         return (encontrados, "mismo_mes") if encontrados else ([], None)
+
+    def buscar(self, pago: PagoBCP) -> Tuple[List, Optional[str]]:
+        """Cuotas VIVAS que encajan con ese cobro."""
+        return self._buscar_en(self.vivas, pago)
+
+    def buscar_pagada(self, pago: PagoBCP) -> List[CuotaPagada]:
+        """Cuotas YA COBRADAS que encajan. Solo para explicar, no para aplicar."""
+        encontradas, _ = self._buscar_en(self.pagadas, pago)
+        return encontradas
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +414,54 @@ def _marcar_pagado(registro, pago: PagoBCP) -> None:
         }, ensure_ascii=False)
 
 
+def _explicar_ya_cobrada(ya: "CuotaPagada", pago: PagoBCP) -> Tuple[str, str, Optional[str]]:
+    """Por qué un cobro no encontró deuda: la cuota ya estaba cobrada.
+
+    Devuelve (resultado, detalle, cierre). `cierre` a None significa que el
+    caso va a la bandeja para que alguien lo mire. Hay tres situaciones y solo
+    una necesita a una persona:
+
+      · Es literalmente el mismo cobro (misma operación) -> REPETIDO. Pasa al
+        subir el reporte de media mañana y el del cierre, que trae otra vez los
+        de la mañana. No hay nada que hacer.
+      · La cuota se dio por pagada en la puesta en marcha, sin ver el cobro, y
+        ahora llega el cobro de verdad -> lo confirma. Tampoco hay nada que hacer.
+      · Ya se había aplicado OTRO cobro distinto a esa cuota -> puede ser un
+        pago doble, y eso sí hay que mirarlo.
+    """
+    cuando = f" el {ya.fecha_pago:%d/%m/%Y}" if ya.fecha_pago else ""
+
+    if ya.operacion and pago.operacion and str(ya.operacion) == str(pago.operacion):
+        return ("REPETIDO",
+                f"Este mismo cobro (operación {pago.operacion}) ya se había "
+                f"aplicado{cuando} a «{ya.concepto}». No se hace nada.",
+                "El mismo cobro ya estaba aplicado")
+
+    if ya.del_crep:
+        return ("YA_PAGADO",
+                f"«{ya.concepto}» ya figuraba pagada por la puesta en marcha, sin "
+                f"ver el cobro. Este reporte lo confirma: no hay nada que corregir.",
+                "El banco confirma un pago que ya estaba registrado")
+
+    return ("YA_PAGADO",
+            f"«{ya.concepto}» ya figuraba pagada{cuando}"
+            f"{f' con la operación {ya.operacion}' if ya.operacion else ''}. "
+            f"Este cobro es otro distinto: revisa si se pagó dos veces.",
+            None)
+
+
+def _misma_por_importe(candidatos: List, pago: PagoBCP):
+    """La cuota cuyo importe cuadra clavado con lo que se pagó.
+
+    Se usa sobre cuotas YA COBRADAS, para reconocer de cuál era un cobro que no
+    encajó con ninguna deuda viva. Con varias que cuadren no se elige ninguna:
+    decir "es esta" sin estar seguro sería peor que no decir nada.
+    """
+    cuadran = [c for c in candidatos
+               if abs(pago.monto_pagado - Decimal(str(c.monto or 0))) <= TOLERANCIA]
+    return cuadran[0] if len(cuadran) == 1 else None
+
+
 def _unica_por_importe(candidatos: List, pago: PagoBCP):
     """Cuando varias cuotas comparten vencimiento, la que cuadra en importe.
 
@@ -299,16 +486,20 @@ def _conciliar_reporte(db: Session, indice: IndiceDeudas, reporte, lote,
     pantalla quién pagó antes de escribir nada en la base.
     """
     conteo = {"APLICADO": 0, "EXTORNADO": 0, "SIN_COINCIDENCIA": 0,
-              "REPETIDO": 0, "MONTO_DISTINTO": 0, "AMBIGUO": 0}
+              "REPETIDO": 0, "YA_PAGADO": 0, "MONTO_DISTINTO": 0, "AMBIGUO": 0}
     detalle_cobros: List[dict] = []
 
     for pago in reporte.pagos:
         registro, resultado, detalle = None, None, None
         candidatos, como = [], None
+        # Nota automática con la que se cierra el cobro sin que nadie lo mire.
+        # Si queda en None, el cobro va a la bandeja de revisión.
+        cierre: Optional[str] = None
 
         if pago.extornado:
             resultado = "EXTORNADO"
             detalle = "El banco devolvió el dinero: la deuda sigue viva"
+            cierre = "Extornado por el banco: el dinero se devolvió"
         else:
             candidatos, como = indice.buscar(pago)
             # Cuando la fecha no era idéntica se deja constancia de por qué se
@@ -328,10 +519,20 @@ def _conciliar_reporte(db: Session, indice: IndiceDeudas, reporte, lote,
                                f"{pago.fecha_vencimiento:%d/%m/%Y}; estas son las "
                                f"de ese mes.")
             if not candidatos:
-                resultado = "SIN_COINCIDENCIA"
-                detalle = (f"No hay cuota pendiente para el documento "
-                           f"{pago.codigo_depositante} con vencimiento "
-                           f"{pago.fecha_vencimiento}")
+                # Antes de darlo por huérfano se mira si esa cuota ya estaba
+                # cobrada. Es lo más común después de la puesta en marcha: la
+                # importación inicial dio por pagadas las cuotas que el CREP ya
+                # no traía, y días después llega el reporte del banco con esos
+                # mismos cobros. Sin esto salían como "sin coincidencia", igual
+                # que un depósito de un desconocido, y no había cómo separarlos.
+                pagadas = indice.buscar_pagada(pago)
+                if pagadas:
+                    resultado, detalle, cierre = _explicar_ya_cobrada(pagadas[0], pago)
+                else:
+                    resultado = "SIN_COINCIDENCIA"
+                    detalle = (f"No hay cuota pendiente para el documento "
+                               f"{pago.codigo_depositante} con vencimiento "
+                               f"{pago.fecha_vencimiento}")
             elif len(candidatos) > 1 and _unica_por_importe(candidatos, pago) is None:
                 resultado = "AMBIGUO"
                 detalle = f"{len(candidatos)} cuotas encajan con ese cobro.{aviso_fecha}"
@@ -346,16 +547,30 @@ def _conciliar_reporte(db: Session, indice: IndiceDeudas, reporte, lote,
                 registro = desempatada or candidatos[0]
                 esperado = Decimal(str(registro.monto))
                 if abs(pago.monto_pagado - esperado) > TOLERANCIA:
-                    resultado = "MONTO_DISTINTO"
-                    detalle = (f"Pagó S/ {pago.monto_pagado} y la cuota es de "
-                               f"S/ {esperado}. No se marcó como pagada.{aviso_fecha}")
+                    # Antes de cantar "monto distinto": si el importe cuadra
+                    # clavado con una cuota YA COBRADA de esa misma fecha, lo
+                    # que pasa es que el cobro es de esa. Ocurre siempre que el
+                    # alumno debe dos cosas el mismo día —la pensión y el
+                    # módulo— y una ya estaba pagada: queda la otra de
+                    # candidata y sus importes no tienen por qué coincidir.
+                    gemela = _misma_por_importe(indice.buscar_pagada(pago), pago)
+                    if gemela is not None:
+                        resultado, detalle, cierre = _explicar_ya_cobrada(gemela, pago)
+                    else:
+                        resultado = "MONTO_DISTINTO"
+                        detalle = (f"Pagó S/ {pago.monto_pagado} y la cuota es de "
+                                   f"S/ {esperado}. No se marcó como pagada.{aviso_fecha}")
                     registro = None
                 else:
                     resultado = "APLICADO"
                     detalle = aviso_fecha.strip() or None
+                    cierre = "Aplicado automáticamente al conciliar"
                     if not simular:
                         _marcar_pagado(registro, pago)
-                        indice.quitar(registro)
+                    # El índice se actualiza SIEMPRE, también al simular: es
+                    # solo memoria, y sin ello la simulación contaría dos veces
+                    # un cobro que aparece en dos archivos de la misma carga.
+                    indice.dar_por_cobrada(registro, pago)
 
         conteo[resultado] = conteo.get(resultado, 0) + 1
 
@@ -399,18 +614,15 @@ def _conciliar_reporte(db: Session, indice: IndiceDeudas, reporte, lote,
                 medio_atencion=pago.medio_atencion,
                 resultado=resultado,
                 detalle=(detalle or "")[:255] or None,
-                # Los que se aplicaron solos no hay nada que revisarlos, y en
-                # los extornados la decisión ya la tomó el banco. El resto
-                # entra a la bandeja para que alguien los mire.
+                # `cierre` lo pone arriba cada caso que no necesita que nadie
+                # lo mire: el aplicado, el extornado (lo decidió el banco), el
+                # repetido y el que solo confirma un pago ya registrado. Lo que
+                # se queda sin `cierre` va a la bandeja de revisión.
                 estado=("RESUELTO" if resultado == "APLICADO"
-                        else "DESCARTADO" if resultado == "EXTORNADO"
+                        else "DESCARTADO" if cierre
                         else "PENDIENTE_REVISION"),
-                nota=("Aplicado automáticamente al conciliar"
-                      if resultado == "APLICADO"
-                      else "Extornado por el banco: el dinero se devolvió"
-                      if resultado == "EXTORNADO" else None),
-                fecha_resolucion=(dt.datetime.now()
-                                  if resultado in ("APLICADO", "EXTORNADO") else None),
+                nota=cierre,
+                fecha_resolucion=dt.datetime.now() if cierre else None,
             ))
     return conteo, detalle_cobros
 
@@ -440,11 +652,14 @@ def procesar_reportes(db: Session, archivos: List[Tuple[str, bytes]],
     leidos.sort(key=lambda x: (x[2].fecha_proceso or dt.date.min, x[0]))
 
     # 3) Descartar los que ya se aplicaron antes (por contenido, no por nombre).
-    ya = {h for (h,) in db.query(fin.LoteCobranza.huella).all()}
+    #    La puesta en marcha no entra: es otro tipo de archivo y no debe hacer
+    #    que un reporte de cobros parezca ya procesado.
+    ya = {h for (h,) in db.query(fin.LoteCobranza.huella)
+          .filter(fin.LoteCobranza.estado != ESTADO_LOTE_INICIAL).all()}
     resumen, indice = [], IndiceDeudas(db)
     cobros: List[dict] = []
     total = {"APLICADO": 0, "EXTORNADO": 0, "SIN_COINCIDENCIA": 0,
-             "REPETIDO": 0, "MONTO_DISTINTO": 0, "AMBIGUO": 0}
+             "REPETIDO": 0, "YA_PAGADO": 0, "MONTO_DISTINTO": 0, "AMBIGUO": 0}
 
     for nombre, datos, reporte in leidos:
         huella = _huella(datos)
@@ -702,6 +917,57 @@ def generar_archivo_crep(db: Session, fecha: Optional[dt.date] = None) -> Tuple[
 # Carga inicial: alinear la base con el CREP que el colegio usa hoy
 # ---------------------------------------------------------------------------
 
+def estado_puesta_en_marcha(db: Session) -> Optional[dict]:
+    """Si la importación inicial ya se hizo: cuándo, con qué y cómo se sabe.
+
+    Lo normal es que esté anotada como un lote INICIAL. Pero las que se hicieron
+    antes de que existiera esa anotación no dejaron el apunte, así que si no hay
+    lote se busca el RASTRO que deja en los datos:
+
+      · cuotas marcadas como pagadas por la sincronización del CREP, y
+      · deuda histórica dada de alta desde un archivo.
+
+    Ninguna de las dos cosas aparece por otro camino, así que si están, la
+    puesta en marcha se hizo. Se devuelve `registrada=False` para poder decir
+    que se dedujo en vez de afirmar una fecha exacta que no se guardó.
+    """
+    lote = (db.query(fin.LoteCobranza)
+            .filter(fin.LoteCobranza.estado == ESTADO_LOTE_INICIAL)
+            .order_by(fin.LoteCobranza.id_lote.desc()).first())
+    if lote is not None:
+        return {
+            "archivo": lote.nombre_archivo,
+            "fecha": lote.fecha_carga.isoformat() if lote.fecha_carga else None,
+            "cuotas": lote.registros_declarados,
+            "cuadraron": lote.aplicados,
+            "deuda_historica": lote.sin_coincidencia,
+            "registrada": True,
+        }
+
+    sincronizadas, desde = (
+        db.query(func.count(fin.Pago.id_pago), func.min(fin.Pago.fecha_pago))
+        .filter(fin.Pago.estado == "PAGADO",
+                fin.Pago.json_respuesta_banco.like("%SINCRONIZACION_CREP%")).one())
+    externas = (db.query(func.count(fin.CuotaExterna.id_cuota_externa))
+                .filter(fin.CuotaExterna.origen.isnot(None)).scalar() or 0)
+
+    if not sincronizadas and not externas:
+        return None
+
+    origen = (db.query(fin.CuotaExterna.origen)
+              .filter(fin.CuotaExterna.origen.isnot(None)).first())
+    return {
+        "archivo": origen[0] if origen else None,
+        "fecha": desde.isoformat() if desde else None,
+        "cuotas": None,
+        "cuadraron": None,
+        "deuda_historica": externas,
+        # Se dedujo del rastro, no de un apunte: la pantalla lo dice así.
+        "registrada": False,
+        "sincronizadas": int(sincronizadas or 0),
+    }
+
+
 def importar_crep_inicial(db: Session, datos: bytes, nombre: str = "CREP.txt",
                           simular: bool = True,
                           sincronizar_pagadas: bool = True) -> dict:
@@ -720,6 +986,24 @@ def importar_crep_inicial(db: Session, datos: bytes, nombre: str = "CREP.txt",
     que se informa cuota por cuota y conviene revisarlo antes de aplicarlo.
     """
     from app.modules.finance.crep import parsear_crep
+
+    # ¿Ya se hizo antes? La puesta en marcha es de una sola vez, así que queda
+    # anotada como un lote propio (estado INICIAL). Sin esa anotación no había
+    # forma de saber si estaba hecha: la pantalla se veía igual antes y después.
+    previa = estado_puesta_en_marcha(db)
+    huella = _huella(datos)
+    mismo_archivo = bool(
+        previa and previa["registrada"]
+        and db.query(fin.LoteCobranza)
+        .filter(fin.LoteCobranza.estado == ESTADO_LOTE_INICIAL,
+                fin.LoteCobranza.huella == huella).first())
+
+    if not simular and mismo_archivo:
+        raise ValueError(
+            "Este mismo archivo ya se importó como puesta en marcha"
+            + (f" el {dt.datetime.fromisoformat(previa['fecha']):%d/%m/%Y}"
+               if previa.get("fecha") else "")
+            + ". Volver a aplicarlo no cambiaría nada.")
 
     cabecera, cuotas = parsear_crep(datos)
 
@@ -801,6 +1085,11 @@ def importar_crep_inicial(db: Session, datos: bytes, nombre: str = "CREP.txt",
             # convenio, media pensión), así que solo se informa.
             if abs(Decimal(str(c.monto)) - Decimal(str(registro.monto))) > TOLERANCIA:
                 monto_distinto.append({
+                    # El identificador viaja para poder decidir desde la propia
+                    # pantalla, sin ir a buscar la cuota a mano en Pagos.
+                    "tipo": "pago" if isinstance(registro, fin.Pago) else "externa",
+                    "id": (getattr(registro, "id_pago", None)
+                           or getattr(registro, "id_cuota_externa", None)),
                     "dni": clave[0], "alumno": registro.alumno_nombre,
                     "concepto": registro.concepto,
                     "vencimiento": clave[1].isoformat(),
@@ -885,11 +1174,30 @@ def importar_crep_inicial(db: Session, datos: bytes, nombre: str = "CREP.txt",
             }, ensure_ascii=False)
 
     if not simular:
+        # Queda constancia de que la puesta en marcha se hizo, con qué archivo
+        # y cuándo. Es lo que permite que la pantalla lo diga en vez de invitar
+        # a repetirla.
+        db.add(fin.LoteCobranza(
+            nombre_archivo=nombre[:255],
+            # El CREP no lleva fecha de proceso en la cabecera (solo la llevan
+            # los reportes de cobros); queda la fecha_carga, que es cuándo se
+            # aplicó, que es justo lo que hay que poder enseñar.
+            fecha_reporte=None,
+            registros_declarados=len(cuotas),
+            monto_declarado=sum((Decimal(str(c.monto)) for c in cuotas), Decimal("0")),
+            huella=huella,
+            estado=ESTADO_LOTE_INICIAL,
+            aplicados=len(emparejadas),
+            sin_coincidencia=len(nuevas_externas),
+        ))
         db.commit()
 
     return {
         "simulado": simular,
         "archivo": nombre,
+        "ya_se_habia_hecho": None if previa is None else {
+            **previa, "mismo_archivo": mismo_archivo,
+        },
         "cuotas_en_el_archivo": len(del_archivo),
         "pendientes_en_la_base": len(de_la_base),
         "coinciden": len(emparejadas),
@@ -907,6 +1215,223 @@ def importar_crep_inicial(db: Session, datos: bytes, nombre: str = "CREP.txt",
              "vencimiento": c.fecha_vencimiento.isoformat(),
              "monto": float(c.monto), "mora": float(c.mora)}
             for c in nuevas_externas[:200]],
+    }
+
+
+def ajustar_importe(db: Session, tipo: str, id_cuota: int,
+                    monto: Decimal) -> dict:
+    """Pone en una cuota pendiente el importe que trae el archivo del BCP.
+
+    Es la ÚNICA vía por la que la conciliación cambia un precio, y solo ocurre
+    pulsando el botón de esa fila. El proceso automático nunca lo toca: el
+    importe es una decisión del colegio —una beca, media pensión, un convenio—
+    y no un dato del banco, así que nadie puede adivinar cuál de los dos manda.
+
+    A diferencia del resto de la importación inicial, esto NO tiene simulación:
+    se llama cuando alguien ya miró la fila y decidió. Escribe y devuelve cómo
+    quedó, para poder enseñarlo.
+    """
+    tipo = (tipo or "").lower()
+    if tipo not in ("pago", "externa"):
+        raise ValueError("El tipo de cuota debe ser 'pago' o 'externa'")
+
+    monto = Decimal(str(monto))
+    if monto <= 0:
+        raise ValueError("El importe tiene que ser mayor que cero")
+
+    if tipo == "pago":
+        cuota = (db.query(fin.Pago).options(joinedload(fin.Pago.alumno))
+                 .filter(fin.Pago.id_pago == id_cuota).first())
+        estados_vivos = PENDIENTES
+    else:
+        cuota = (db.query(fin.CuotaExterna)
+                 .filter(fin.CuotaExterna.id_cuota_externa == id_cuota).first())
+        estados_vivos = ("PENDIENTE",)
+
+    if cuota is None:
+        raise ValueError("Esa cuota no existe")
+    if cuota.estado not in estados_vivos:
+        # Cambiar el precio de algo ya cobrado descuadraría lo recaudado.
+        raise ValueError(f"Esa cuota figura como {cuota.estado.lower()}: "
+                         f"su importe ya no se puede cambiar desde aquí")
+
+    antes = Decimal(str(cuota.monto))
+    mora = Decimal(str(cuota.mora or 0))
+    cuota.monto = monto
+    cuota.monto_total = monto + mora
+    db.commit()
+
+    return {
+        "tipo": tipo,
+        "id": id_cuota,
+        "alumno": (cuota.alumno_nombre if isinstance(cuota, fin.Pago)
+                   else cuota.nombre),
+        "concepto": cuota.concepto,
+        "antes": float(antes),
+        "ahora": float(monto),
+        "mora": float(mora),
+        "nuevo_total": float(monto + mora),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Reporte de deudores
+# ---------------------------------------------------------------------------
+#
+# Es lo que el colegio sacaba a mano del .xlsm: quién debe, cuánto y desde
+# cuándo, con el desglose por sección para poder repartirlo entre los tutores.
+#
+# Se arma con TRES consultas, no una por alumno: las cuotas vivas, las
+# matrículas del año (que son las que dicen en qué sección está cada uno) y la
+# deuda anterior. Con ~500 alumnos y varias cuotas cada uno, ir alumno por
+# alumno serían miles de viajes a la base.
+
+def _seccion_de_cada_alumno(db: Session, anio: Optional[str]) -> Tuple[Dict[int, dict], Optional[str]]:
+    """id_alumno -> dónde está matriculado este año. También devuelve el año.
+
+    La sección sale de la MATRÍCULA, no del pago: una pensión de marzo se
+    cobra igual aunque al alumno lo hayan cambiado de sección en mayo, y el
+    tutor que tiene que reclamarla es el de ahora.
+    """
+    from app.modules.academic.models import AnioEscolar, Grado, Nivel, Seccion
+    from app.modules.enrollment.models import Matricula
+
+    if not anio:
+        activo = (db.query(AnioEscolar).filter(AnioEscolar.activo.is_(True))
+                  .order_by(AnioEscolar.id_anio_escolar.desc()).first())
+        anio = activo.id_anio_escolar if activo else None
+    if not anio:
+        return {}, None
+
+    filas = (db.query(Matricula.id_alumno, Seccion.nombre.label("seccion"),
+                      Grado.nombre.label("grado"), Grado.orden.label("orden_grado"),
+                      Nivel.nombre.label("nivel"))
+             .join(Seccion, Seccion.id_seccion == Matricula.id_seccion)
+             .join(Grado, Grado.id_grado == Seccion.id_grado)
+             .join(Nivel, Nivel.id_nivel == Grado.id_nivel)
+             .filter(Matricula.id_anio_escolar == anio).all())
+
+    return ({f.id_alumno: {"nivel": f.nivel, "grado": f.grado,
+                           "seccion": f.seccion, "orden_grado": f.orden_grado or 0}
+             for f in filas}, anio)
+
+
+def reporte_deudores(db: Session, anio: Optional[str] = None,
+                     hasta: Optional[dt.date] = None) -> dict:
+    """Todo el que debe algo, con su desglose y agrupado por sección.
+
+    `hasta` acota qué se considera deuda: por omisión entra todo lo pendiente,
+    incluidas las cuotas que aún no han vencido. Se informa aparte de lo YA
+    vencido, que es lo que de verdad se reclama.
+    """
+    hoy = dt.date.today()
+    hasta = hasta or None
+
+    ubicacion, anio = _seccion_de_cada_alumno(db, anio)
+
+    # --- cuotas vivas de alumnos ---
+    q = (db.query(fin.Pago).options(joinedload(fin.Pago.alumno))
+         .filter(fin.Pago.estado.in_(PENDIENTES)))
+    if hasta:
+        q = q.filter(fin.Pago.fecha_vencimiento <= hasta)
+
+    SIN_SECCION = {"nivel": "—", "grado": "—", "seccion": "SIN SECCIÓN", "orden_grado": 999}
+    deudores: Dict[int, dict] = {}
+
+    for p in q.all():
+        if not p.alumno:
+            continue                        # cuota huérfana: no hay a quién cobrarle
+        donde = ubicacion.get(p.alumno.id_alumno, SIN_SECCION)
+        d = deudores.setdefault(p.alumno.id_alumno, {
+            "dni": p.alumno.dni or "",
+            "alumno": f"{p.alumno.apellidos or ''}, {p.alumno.nombres or ''}".strip(", "),
+            **donde,
+            "cuotas": [],
+        })
+        monto = Decimal(str(p.monto or 0))
+        mora = Decimal(str(p.mora or 0))
+        vencida = bool(p.fecha_vencimiento and p.fecha_vencimiento < hoy)
+        d["cuotas"].append({
+            "concepto": p.concepto or "",
+            "vencimiento": p.fecha_vencimiento,
+            "monto": monto,
+            "mora": mora,
+            "total": monto + mora,
+            "vencida": vencida,
+            "dias_atraso": (hoy - p.fecha_vencimiento).days if vencida else 0,
+        })
+
+    # --- totales de cada alumno ---
+    for d in deudores.values():
+        # Lo más antiguo primero: es el orden en que se reclama.
+        d["cuotas"].sort(key=lambda c: (c["vencimiento"] or dt.date.max, c["concepto"]))
+        vencidas = [c for c in d["cuotas"] if c["vencida"]]
+        d["num_cuotas"] = len(d["cuotas"])
+        d["num_vencidas"] = len(vencidas)
+        d["deuda"] = sum((c["monto"] for c in d["cuotas"]), Decimal("0"))
+        d["mora"] = sum((c["mora"] for c in d["cuotas"]), Decimal("0"))
+        d["total"] = d["deuda"] + d["mora"]
+        d["vencido"] = sum((c["total"] for c in vencidas), Decimal("0"))
+        d["dias_atraso"] = max((c["dias_atraso"] for c in vencidas), default=0)
+        d["desde"] = vencidas[0]["vencimiento"] if vencidas else None
+
+    lista = sorted(deudores.values(),
+                   key=lambda d: (d["nivel"] or "", d["orden_grado"],
+                                  d["seccion"] or "", d["alumno"]))
+
+    # --- por sección, para repartir entre tutores ---
+    secciones: Dict[tuple, dict] = {}
+    for d in lista:
+        clave = (d["nivel"], d["orden_grado"], d["grado"], d["seccion"])
+        s = secciones.setdefault(clave, {
+            "nivel": d["nivel"], "grado": d["grado"], "seccion": d["seccion"],
+            "orden_grado": d["orden_grado"], "alumnos": [],
+        })
+        s["alumnos"].append(d)
+    for s in secciones.values():
+        s["num_alumnos"] = len(s["alumnos"])
+        s["num_cuotas"] = sum(a["num_cuotas"] for a in s["alumnos"])
+        s["deuda"] = sum((a["deuda"] for a in s["alumnos"]), Decimal("0"))
+        s["mora"] = sum((a["mora"] for a in s["alumnos"]), Decimal("0"))
+        s["total"] = sum((a["total"] for a in s["alumnos"]), Decimal("0"))
+        s["vencido"] = sum((a["vencido"] for a in s["alumnos"]), Decimal("0"))
+
+    # --- deuda anterior: gente que ya no está matriculada ---
+    q_ext = db.query(fin.CuotaExterna).filter(fin.CuotaExterna.estado == "PENDIENTE")
+    if hasta:
+        q_ext = q_ext.filter(fin.CuotaExterna.fecha_vencimiento <= hasta)
+    externas = []
+    for c in q_ext.all():
+        monto = Decimal(str(c.monto or 0))
+        mora = Decimal(str(c.mora or 0))
+        vencida = bool(c.fecha_vencimiento and c.fecha_vencimiento < hoy)
+        externas.append({
+            "documento": _doc(c.documento), "nombre": c.nombre or "",
+            "concepto": c.concepto or "", "vencimiento": c.fecha_vencimiento,
+            "monto": monto, "mora": mora, "total": monto + mora,
+            "dias_atraso": (hoy - c.fecha_vencimiento).days if vencida else 0,
+            "origen": c.origen or "",
+        })
+    externas.sort(key=lambda e: (e["vencimiento"] or dt.date.max, e["nombre"]))
+
+    return {
+        "anio": anio,
+        "fecha": hoy,
+        "deudores": lista,
+        "secciones": sorted(secciones.values(),
+                            key=lambda s: (s["nivel"] or "", s["orden_grado"],
+                                           s["seccion"] or "")),
+        "externas": externas,
+        "totales": {
+            "alumnos": len(lista),
+            "cuotas": sum(d["num_cuotas"] for d in lista),
+            "deuda": sum((d["deuda"] for d in lista), Decimal("0")),
+            "mora": sum((d["mora"] for d in lista), Decimal("0")),
+            "total": sum((d["total"] for d in lista), Decimal("0")),
+            "vencido": sum((d["vencido"] for d in lista), Decimal("0")),
+            "externas": len(externas),
+            "total_externas": sum((e["total"] for e in externas), Decimal("0")),
+        },
     }
 
 

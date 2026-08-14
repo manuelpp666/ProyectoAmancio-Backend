@@ -30,11 +30,13 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.core.util.security import get_current_user
-from app.modules.academic.models import Area, Curso, Grado, Nivel, PlanEstudio, Seccion
+from app.modules.academic.models import (AnioEscolar, Area, Curso, Grado, Nivel,
+                                         PlanEstudio, Seccion)
 from app.modules.enrollment.models import Matricula
 from app.modules.management.models import ExoneracionCurso, Nota
 from app.modules.behavior.models import NotaConducta
@@ -45,6 +47,12 @@ router = APIRouter(prefix="/academic", tags=["Académico"])
 ROLES_PERMITIDOS = ("ADMIN", "DOCENTE", "AUXILIAR")
 
 BIMESTRES = (1, 2, 3, 4)
+
+# Tope de libretas por descarga. Cada una es una página A4 que se dibuja en el
+# navegador, así que no puede ser ilimitado. 700 deja sitio para el colegio
+# entero (577 matriculados en 2026) y sigue frenando una petición absurda.
+# Lo normal es filtrar por sección: son 30 y salen en un momento.
+MAXIMO_LIBRETAS = 700
 
 
 def _autorizar(usuario: dict) -> None:
@@ -64,6 +72,35 @@ def _redondear_entero(valor: float) -> int:
 
 def _redondear_2(valor: float) -> float:
     return float(Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _exoneraciones_matricula(db: Session, id_matricula: int) -> set:
+    """Cursos de los que un alumno está exonerado. Ver `_exoneraciones_varias`."""
+    try:
+        return {e.id_curso for e in db.query(ExoneracionCurso.id_curso)
+                .filter(ExoneracionCurso.id_matricula == id_matricula).all()}
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        return set()
+
+
+def _exoneraciones_varias(db: Session, ids_matricula) -> dict:
+    """id_matricula -> {id_curso, ...}, para muchos alumnos a la vez.
+
+    `exoneracion_curso` es una tabla del script 18: en una base a la que
+    todavía no se le pasó, o que viene de un respaldo anterior a ese script,
+    no existe. Sin nadie exonerado la libreta solo pierde el EXO y muestra la
+    nota o el guion normal, así que se prefiere eso a tumbar la descarga.
+    """
+    try:
+        exo: dict = {}
+        for e in (db.query(ExoneracionCurso.id_matricula, ExoneracionCurso.id_curso)
+                  .filter(ExoneracionCurso.id_matricula.in_(ids_matricula)).all()):
+            exo.setdefault(e.id_matricula, set()).add(e.id_curso)
+        return exo
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        return {}
 
 
 def _orden_areas(db: Session, ids_area: set, primaria: bool) -> dict:
@@ -100,6 +137,118 @@ def _orden_areas(db: Session, ids_area: set, primaria: bool) -> dict:
 
     filas = db.query(Area.id_area, Area.nombre).filter(Area.id_area.in_(ids_area)).all()
     return {f.id_area: (0, f.nombre) for f in filas}
+
+
+def _armar_libreta(*, alumno_info: dict, cursos, notas_por_curso: dict,
+                   exonerados: set, conducta: dict, visibles: tuple,
+                   bimestre: Optional[int], orden_areas: dict) -> dict:
+    """Monta la libreta de UN alumno a partir de datos ya cargados.
+
+    Aquí no se consulta la base: todo llega resuelto. Es lo que permite que el
+    endpoint de una libreta y el de un grupo entero den exactamente el mismo
+    resultado —el colegio los compara— sin que el segundo haga una consulta por
+    alumno.
+
+    `cursos` es una lista de filas con id_curso, nombre e id_area.
+    `orden_areas` es {id_area: (orden, nombre)}.
+    """
+    if not cursos:
+        # Alumno sin plan de estudios y sin ninguna nota: la libreta sale
+        # vacía, no es un error.
+        return {
+            "alumno": alumno_info,
+            "bimestre_cabecera": bimestre,
+            "bimestres_visibles": list(visibles),
+            "areas": [],
+            "resumen": {
+                "por_bimestre": {str(b): {"puntaje_acumulado": None, "num_areas": 0,
+                                          "ponderado": None} for b in visibles},
+                "conducta_por_bimestre": {str(b): None for b in visibles},
+                "ponderado_final_anual": None,
+            },
+        }
+
+    # --- agrupar cursos por área ---
+    bloques: dict = {}
+    for c in cursos:
+        info = bloques.setdefault(c.id_area, {"cursos": []})
+        orden, nombre_area = orden_areas.get(c.id_area, (9999, None))
+        info["orden"] = orden
+        info["nombre"] = nombre_area or "SIN ÁREA"
+
+        notas_curso = notas_por_curso.get(c.id_curso, {})
+        info["cursos"].append({
+            "id_curso": c.id_curso,
+            "nombre": c.nombre,
+            "exonerado": c.id_curso in exonerados,
+            "notas": {str(b): notas_curso.get(b) for b in visibles},
+        })
+
+    # --- promedio de área por bimestre y anual (reglas 1 y 4 del PDF) ---
+    for info in bloques.values():
+        promedio_bim = {}
+        for b in visibles:
+            valores = [c["notas"][str(b)] for c in info["cursos"]
+                       if c["notas"][str(b)] is not None]
+            # Un curso sin nota (incluido el exonerado) no suma ni divide.
+            promedio_bim[str(b)] = (_redondear_entero(sum(valores) / len(valores))
+                                    if valores else None)
+        info["promedio_por_bimestre"] = promedio_bim
+
+        existentes = [v for v in promedio_bim.values() if v is not None]
+        info["promedio_anual"] = (_redondear_entero(sum(existentes) / len(existentes))
+                                  if existentes else None)
+        # Área sin ninguna nota en todo el año: exonerada por completo (EXO).
+        info["exonerada"] = info["promedio_anual"] is None
+
+    # --- puntaje acumulado y ponderado, por bimestre (reglas 2, 3 y 5) ---
+    resumen_bim = {}
+    for b in visibles:
+        promedios_area = [info["promedio_por_bimestre"][str(b)]
+                          for info in bloques.values()
+                          if info["promedio_por_bimestre"][str(b)] is not None]
+        if promedios_area:
+            puntaje = sum(promedios_area)
+            ponderado = _redondear_2(puntaje / len(promedios_area))
+        else:
+            puntaje = None
+            ponderado = None
+        resumen_bim[str(b)] = {"puntaje_acumulado": puntaje,
+                               "num_areas": len(promedios_area),
+                               "ponderado": ponderado}
+
+    ponderados = [v["ponderado"] for v in resumen_bim.values() if v["ponderado"] is not None]
+    ponderado_final_anual = (_redondear_2(sum(ponderados) / len(ponderados))
+                             if ponderados else None)
+
+    # --- bimestre que se destaca en el pie del PDF ---
+    bimestre_cabecera = bimestre
+    if bimestre_cabecera is None:
+        con_datos = [b for b in visibles
+                     if resumen_bim[str(b)]["puntaje_acumulado"] is not None]
+        bimestre_cabecera = max(con_datos) if con_datos else None
+
+    areas_out = [{
+        "id_area": area_id,
+        "nombre": info["nombre"],
+        "cursos": sorted(info["cursos"], key=lambda c: c["nombre"]),
+        "promedio_por_bimestre": info["promedio_por_bimestre"],
+        "promedio_anual": info["promedio_anual"],
+        "exonerada": info["exonerada"],
+    } for area_id, info in sorted(bloques.items(),
+                                  key=lambda kv: (kv[1]["orden"], kv[1]["nombre"]))]
+
+    return {
+        "alumno": alumno_info,
+        "bimestre_cabecera": bimestre_cabecera,
+        "bimestres_visibles": list(visibles),
+        "areas": areas_out,
+        "resumen": {
+            "por_bimestre": resumen_bim,
+            "conducta_por_bimestre": {str(b): conducta.get(b) for b in visibles},
+            "ponderado_final_anual": ponderado_final_anual,
+        },
+    }
 
 
 @router.get("/libreta/{id_matricula}")
@@ -163,20 +312,6 @@ def libreta(
     cursos_extra = q_extra.distinct().all()
 
     cursos_todos = list(cursos_plan) + list(cursos_extra)
-    if not cursos_todos:
-        # Alumno sin plan de estudios y sin ninguna nota cargada: la libreta
-        # sale igual, solo que vacía. No es un 404, la matrícula existe.
-        return {
-            "alumno": _alumno_info(matricula, alumno, nivel, grado, seccion),
-            "bimestre_cabecera": bimestre,
-            "bimestres_visibles": list(visibles),
-            "areas": [],
-            "resumen": {
-                "por_bimestre": {str(b): {"puntaje_acumulado": None, "num_areas": 0, "ponderado": None} for b in visibles},
-                "conducta_por_bimestre": {str(b): None for b in visibles},
-                "ponderado_final_anual": None,
-            },
-        }
 
     # --- notas del alumno, solo de los bimestres que entran en esta libreta ---
     notas_por_curso: dict = {}
@@ -188,119 +323,218 @@ def libreta(
         notas_por_curso.setdefault(n.id_curso, {})[n.bimestre] = float(n.valor)
 
     # --- cursos de los que está exonerado (vale para el año completo) ---
-    exonerados = {
-        e.id_curso
-        for e in db.query(ExoneracionCurso.id_curso)
-        .filter(ExoneracionCurso.id_matricula == id_matricula)
-        .all()
-    }
+    exonerados = _exoneraciones_matricula(db, id_matricula)
 
     # --- orden oficial de las áreas ---
     ids_area = {c.id_area for c in cursos_todos if c.id_area}
     orden_areas = _orden_areas(db, ids_area, es_primaria)
 
-    # --- agrupar cursos por área ---
-    bloques: dict = {}
-    for c in cursos_todos:
-        area_id = c.id_area
-        info = bloques.setdefault(area_id, {"cursos": []})
-        orden, nombre_area = orden_areas.get(area_id, (9999, None))
-        info["orden"] = orden
-        info["nombre"] = nombre_area or "SIN ÁREA"
+    # --- conducta, solo de los bimestres que entran ---
+    conducta = {
+        nc.bimestre: nc.valor
+        for nc in db.query(NotaConducta.bimestre, NotaConducta.valor)
+        .filter(NotaConducta.id_matricula == id_matricula,
+                NotaConducta.bimestre.in_(visibles)).all()
+    }
 
-        notas_curso = notas_por_curso.get(c.id_curso, {})
-        info["cursos"].append(
-            {
-                "id_curso": c.id_curso,
-                "nombre": c.nombre,
-                "exonerado": c.id_curso in exonerados,
-                "notas": {str(b): notas_curso.get(b) for b in visibles},
-            }
-        )
-
-    # --- promedio de área por bimestre y anual (reglas 1 y 4 del PDF) ---
-    for info in bloques.values():
-        promedio_bim = {}
-        for b in visibles:
-            valores = [
-                c["notas"][str(b)] for c in info["cursos"] if c["notas"][str(b)] is not None
-            ]
-            # Un curso sin nota (incluido el exonerado) no suma ni divide.
-            promedio_bim[str(b)] = _redondear_entero(sum(valores) / len(valores)) if valores else None
-        info["promedio_por_bimestre"] = promedio_bim
-
-        existentes = [v for v in promedio_bim.values() if v is not None]
-        info["promedio_anual"] = _redondear_entero(sum(existentes) / len(existentes)) if existentes else None
-        # Área sin ninguna nota en todo el año: exonerada por completo (EXO).
-        info["exonerada"] = info["promedio_anual"] is None
-
-    # --- puntaje acumulado y ponderado, por bimestre (reglas 2, 3 y 5) ---
-    resumen_bim = {}
-    for b in visibles:
-        promedios_area = [
-            info["promedio_por_bimestre"][str(b)]
-            for info in bloques.values()
-            if info["promedio_por_bimestre"][str(b)] is not None
-        ]
-        if promedios_area:
-            puntaje = sum(promedios_area)
-            ponderado = _redondear_2(puntaje / len(promedios_area))
-        else:
-            puntaje = None
-            ponderado = None
-        resumen_bim[str(b)] = {
-            "puntaje_acumulado": puntaje,
-            "num_areas": len(promedios_area),
-            "ponderado": ponderado,
-        }
-
-    ponderados_existentes = [v["ponderado"] for v in resumen_bim.values() if v["ponderado"] is not None]
-    ponderado_final_anual = (
-        _redondear_2(sum(ponderados_existentes) / len(ponderados_existentes))
-        if ponderados_existentes
-        else None
+    return _armar_libreta(
+        alumno_info=_alumno_info(matricula, alumno, nivel, grado, seccion),
+        cursos=cursos_todos,
+        notas_por_curso=notas_por_curso,
+        exonerados=exonerados,
+        conducta=conducta,
+        visibles=visibles,
+        bimestre=bimestre,
+        orden_areas=orden_areas,
     )
 
-    # --- conducta, solo de los bimestres que entran ---
-    conducta_bim = {str(b): None for b in visibles}
-    for nc in (
-        db.query(NotaConducta.bimestre, NotaConducta.valor)
-        .filter(NotaConducta.id_matricula == id_matricula, NotaConducta.bimestre.in_(visibles))
-        .all()
-    ):
-        conducta_bim[str(nc.bimestre)] = nc.valor
 
-    # --- bimestre que se destaca en el pie del PDF ---
-    bimestre_cabecera = bimestre
-    if bimestre_cabecera is None:
-        con_datos = [b for b in visibles if resumen_bim[str(b)]["puntaje_acumulado"] is not None]
-        bimestre_cabecera = max(con_datos) if con_datos else None
+@router.get("/libretas")
+def libretas_en_bloque(
+    anio: Optional[str] = Query(None, description="Año escolar; por defecto el activo"),
+    bimestre: Optional[int] = Query(None, ge=1, le=4),
+    nivel: Optional[str] = Query(None),
+    id_grado: Optional[int] = Query(None),
+    id_seccion: Optional[int] = Query(None),
+    dni: Optional[str] = Query(None),
+    limite: int = Query(MAXIMO_LIBRETAS, ge=1, le=MAXIMO_LIBRETAS),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Las libretas de TODOS los alumnos que cumplan los filtros, de una vez.
 
-    # --- áreas en el orden de la libreta, con sus cursos alfabéticos ---
-    areas_out = []
-    for area_id, info in sorted(bloques.items(), key=lambda kv: (kv[1]["orden"], kv[1]["nombre"])):
-        areas_out.append(
-            {
-                "id_area": area_id,
-                "nombre": info["nombre"],
-                "cursos": sorted(info["cursos"], key=lambda c: c["nombre"]),
-                "promedio_por_bimestre": info["promedio_por_bimestre"],
-                "promedio_anual": info["promedio_anual"],
-                "exonerada": info["exonerada"],
-            }
-        )
+    Los filtros son los mismos que los de la tabla de notas finales, y se
+    resuelven con la misma consulta (`router_notas._base`), para que lo que se
+    descargue sea exactamente la selección que se está viendo en pantalla.
+
+    Todo se carga en bloque: seis consultas para el grupo entero, no seis por
+    alumno. Con una sección de 30 son 6 consultas en vez de 180.
+
+    Devuelve también `descripcion`, el texto de los filtros usados, para que el
+    PDF se pueda nombrar y encabezar sin que el navegador tenga que recomponerlo.
+    """
+    _autorizar(current_user)
+
+    # Import perezoso: `_base` vive en el router de notas y es la MISMA consulta
+    # que pinta la tabla. Duplicarla aquí sería garantizar que algún día dejen
+    # de coincidir.
+    from app.modules.academic.router_notas import _base
+
+    # --- año escolar ---
+    if anio:
+        ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == anio).first()
+        if not ae:
+            raise HTTPException(404, f"No existe el año escolar {anio}")
+    else:
+        ae = (db.query(AnioEscolar).filter(AnioEscolar.activo.is_(True))
+              .order_by(AnioEscolar.id_anio_escolar.desc()).first())
+        if not ae:
+            raise HTTPException(404, "No hay ningún año escolar activo")
+    anio = ae.id_anio_escolar
+    if (ae.tipo or "REGULAR").strip().upper() == "VERANO":
+        bimestre = None                 # en verano el bimestre no significa nada
+
+    visibles = tuple(b for b in BIMESTRES if bimestre is None or b <= bimestre)
+
+    base = _base(db, anio, nivel, id_grado, id_seccion, dni)
+    total = base.order_by(None).count()
+    if total == 0:
+        raise HTTPException(404, "Ningún estudiante coincide con esos filtros")
+    if total > limite:
+        raise HTTPException(
+            400, f"Son {total} libretas y el máximo por descarga es {limite}. "
+                 f"Filtra por grado o por sección y descárgalas por partes.")
+
+    filas = (base
+             .with_entities(Matricula.id_matricula, Matricula.id_anio_escolar,
+                            Alumno.dni, Alumno.apellidos, Alumno.nombres,
+                            Nivel.nombre.label("nivel"),
+                            Grado.id_grado.label("id_grado"),
+                            Grado.nombre.label("grado"),
+                            Grado.orden.label("orden_grado"),
+                            Seccion.nombre.label("seccion"))
+             .order_by(Nivel.nombre.asc(), Grado.orden.asc(), Seccion.nombre.asc(),
+                       Alumno.apellidos.asc(), Alumno.nombres.asc())
+             .all())
+
+    ids = [f.id_matricula for f in filas]
+    ids_grado = {f.id_grado for f in filas if f.id_grado}
+
+    # --- 1. plan de estudios de todos los grados implicados ---
+    plan_por_grado: dict = {}
+    if ids_grado:
+        for fila in (db.query(PlanEstudio.id_grado, Curso.id_curso, Curso.nombre,
+                              Curso.id_area)
+                     .join(Curso, Curso.id_curso == PlanEstudio.id_curso)
+                     .filter(PlanEstudio.id_grado.in_(ids_grado)).distinct().all()):
+            plan_por_grado.setdefault(fila.id_grado, []).append(fila)
+
+    # --- 2. notas de todos, en una consulta ---
+    notas_por_matricula: dict = {}
+    cursos_con_nota: dict = {}
+    for n in (db.query(Nota.id_matricula, Nota.id_curso, Nota.bimestre, Nota.valor)
+              .filter(Nota.id_matricula.in_(ids), Nota.bimestre.in_(visibles)).all()):
+        notas_por_matricula.setdefault(n.id_matricula, {}) \
+                           .setdefault(n.id_curso, {})[n.bimestre] = float(n.valor)
+        cursos_con_nota.setdefault(n.id_matricula, set()).add(n.id_curso)
+
+    # --- 3. datos de todos los cursos con nota ---
+    # Se cargan TODOS, no solo los que faltan en algún plan: un curso puede
+    # estar en el plan de un grado y no en el de otro (Tutoría está en el de
+    # primaria pero no en el de 1º de secundaria, y allí va con 20 automático).
+    # Filtrar aquí contra la unión de los planes le quitaría ese curso a los
+    # alumnos del grado que no lo tiene, que son justo los que lo necesitan.
+    # Quién se lleva cada uno se decide más abajo, contra el plan de SU grado.
+    ids_sueltos = {c for cs in cursos_con_nota.values() for c in cs}
+    info_curso: dict = {}
+    if ids_sueltos:
+        info_curso = {c.id_curso: c for c in
+                      db.query(Curso.id_curso, Curso.nombre, Curso.id_area)
+                      .filter(Curso.id_curso.in_(ids_sueltos)).all()}
+
+    # --- 4. exoneraciones ---
+    exo_por_matricula = _exoneraciones_varias(db, ids)
+
+    # --- 5. conducta ---
+    conducta_por_matricula: dict = {}
+    for nc in (db.query(NotaConducta.id_matricula, NotaConducta.bimestre,
+                        NotaConducta.valor)
+               .filter(NotaConducta.id_matricula.in_(ids),
+                       NotaConducta.bimestre.in_(visibles)).all()):
+        conducta_por_matricula.setdefault(nc.id_matricula, {})[nc.bimestre] = nc.valor
+
+    # --- 6. orden de las áreas, en los dos niveles ---
+    # Se resuelve una vez para todas: el orden depende del nivel del alumno, y
+    # en una descarga de "todos" conviven primaria y secundaria.
+    ids_area = {c.id_area for cursos in plan_por_grado.values() for c in cursos if c.id_area}
+    ids_area |= {c.id_area for c in info_curso.values() if c.id_area}
+    orden_primaria = _orden_areas(db, ids_area, True)
+    orden_secundaria = _orden_areas(db, ids_area, False)
+
+    salida = []
+    for f in filas:
+        cursos = list(plan_por_grado.get(f.id_grado, []))
+        ids_plan = {c.id_curso for c in cursos}
+        for id_curso in sorted(cursos_con_nota.get(f.id_matricula, set()) - ids_plan):
+            extra = info_curso.get(id_curso)
+            if extra is not None:
+                cursos.append(extra)
+
+        es_primaria = "PRIM" in (f.nivel or "").upper()
+        salida.append(_armar_libreta(
+            alumno_info={
+                "id_matricula": f.id_matricula,
+                "dni": f.dni,
+                "nombres": f.nombres,
+                "apellidos": f.apellidos,
+                "nivel": f.nivel,
+                "grado": f.grado,
+                "seccion": f.seccion,
+                "anio_escolar": f.id_anio_escolar,
+            },
+            cursos=cursos,
+            notas_por_curso=notas_por_matricula.get(f.id_matricula, {}),
+            exonerados=exo_por_matricula.get(f.id_matricula, set()),
+            conducta=conducta_por_matricula.get(f.id_matricula, {}),
+            visibles=visibles,
+            bimestre=bimestre,
+            orden_areas=orden_primaria if es_primaria else orden_secundaria,
+        ))
 
     return {
-        "alumno": _alumno_info(matricula, alumno, nivel, grado, seccion),
-        "bimestre_cabecera": bimestre_cabecera,
+        "anio": anio,
+        "bimestre": bimestre,
         "bimestres_visibles": list(visibles),
-        "areas": areas_out,
-        "resumen": {
-            "por_bimestre": resumen_bim,
-            "conducta_por_bimestre": conducta_bim,
-            "ponderado_final_anual": ponderado_final_anual,
-        },
+        "descripcion": _descripcion_filtros(filas, anio, bimestre, dni),
+        "total": total,
+        "libretas": salida,
     }
+
+
+def _descripcion_filtros(filas, anio: str, bimestre: Optional[int],
+                         dni: Optional[str]) -> str:
+    """Cómo se llama la selección que se está descargando.
+
+    Se describe por lo que REALMENTE salió, no por lo que se pidió: si el
+    filtro era "todos" pero solo hay una sección con alumnos, el archivo lo
+    dice. Así el nombre del PDF no miente sobre su contenido.
+    """
+    partes = [anio]
+    niveles = {f.nivel for f in filas if f.nivel}
+    grados = {f.grado for f in filas if f.grado}
+    secciones = {f.seccion for f in filas if f.seccion}
+
+    partes.append(next(iter(niveles)) if len(niveles) == 1 else "Todos los niveles")
+    if len(grados) == 1:
+        partes.append(next(iter(grados)))
+    if len(secciones) == 1:
+        partes.append(f"Sección {next(iter(secciones))}")
+    elif len(grados) == 1:
+        partes.append(f"{len(secciones)} secciones")
+    partes.append(f"{bimestre}º bimestre" if bimestre else "Año completo")
+    if dni:
+        partes.append(f"DNI {dni.strip()}")
+    return " · ".join(p for p in partes if p)
 
 
 def _alumno_info(matricula, alumno, nivel, grado, seccion) -> dict:

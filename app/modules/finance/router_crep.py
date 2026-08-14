@@ -87,12 +87,17 @@ def resumen(db: Session = Depends(get_db),
                              func.coalesce(func.sum(fin.CuotaExterna.mora), 0))
                     .filter(fin.CuotaExterna.estado == "PENDIENTE").one())
         ultimo = (db.query(fin.LoteCobranza)
+                  .filter(fin.LoteCobranza.estado != con.ESTADO_LOTE_INICIAL)
                   .order_by(fin.LoteCobranza.id_lote.desc()).first())
+        # La puesta en marcha: se hace una sola vez y la pantalla tiene que
+        # poder decir si ya está hecha.
+        inicial = con.estado_puesta_en_marcha(db)
     except (ProgrammingError, OperationalError):
         db.rollback()
         raise _sin_tablas(Exception())
 
     return {
+        "importacion_inicial": inicial,
         "cuotas_pendientes": int(pendientes[0]) + int(externas[0]),
         "de_alumnos": int(pendientes[0]),
         "deuda_historica": int(externas[0]),
@@ -119,7 +124,10 @@ def listar_lotes(limite: int = Query(30, ge=1, le=200),
     """Historial de reportes procesados, del más reciente al más antiguo."""
     _solo_admin(current_user)
     try:
+        # Sin la puesta en marcha: no es un reporte de cobros y sus cifras
+        # significan otra cosa, así que en esta lista solo confundiría.
         filas = (db.query(fin.LoteCobranza)
+                 .filter(fin.LoteCobranza.estado != con.ESTADO_LOTE_INICIAL)
                  .order_by(fin.LoteCobranza.id_lote.desc()).limit(limite).all())
     except (ProgrammingError, OperationalError):
         db.rollback()
@@ -226,12 +234,46 @@ async def importacion_inicial(archivo: UploadFile = File(...),
     except ErrorFormatoBCP as e:
         db.rollback()
         raise HTTPException(400, str(e))
+    except ValueError as e:
+        # Reaplicar el mismo archivo de puesta en marcha.
+        db.rollback()
+        raise HTTPException(409, str(e))
     except (ProgrammingError, OperationalError):
         db.rollback()
         raise _sin_tablas(Exception())
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"No se pudo importar el archivo: {e}")
+
+
+@router.post("/ajustar-importe")
+def ajustar_importe(tipo: str = Form(...),
+                    id_cuota: int = Form(...),
+                    monto: str = Form(...),
+                    db: Session = Depends(get_db),
+                    current_user: dict = Depends(get_current_user)):
+    """Deja en una cuota el importe que trae el archivo del BCP.
+
+    Se llama desde la fila del aviso «importe distinto», una a una. OJO: esto
+    sí escribe, no hay simulación. Es a propósito: llega aquí quien ya comparó
+    los dos importes y decidió cuál es el bueno.
+    """
+    _solo_admin(current_user)
+    try:
+        valor = Decimal(monto)
+    except (InvalidOperation, ValueError):
+        raise HTTPException(400, f"«{monto}» no es un importe válido")
+    try:
+        return con.ajustar_importe(db, tipo, id_cuota, valor)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(400, str(e))
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        raise _sin_tablas(Exception())
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"No se pudo cambiar el importe: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +450,227 @@ def descargar_excel(db: Session = Depends(get_db),
     wb.save(buffer)
     buffer.seek(0)
     nombre = f"Cobranza-{dt.date.today().strftime('%d-%m-%Y')}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nombre}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reporte de deudores
+# ---------------------------------------------------------------------------
+
+# Excel no admite estos caracteres en el nombre de una hoja, y corta a 31.
+_PROHIBIDOS_HOJA = set(r"[]:*?/\'")
+
+
+def _nombre_hoja(texto: str, usados: set) -> str:
+    """Un nombre de hoja válido y único, lo más parecido posible al original."""
+    limpio = "".join(" " if c in _PROHIBIDOS_HOJA else c for c in (texto or "")).strip()
+    limpio = " ".join(limpio.split()) or "Hoja"
+    base = limpio[:31]
+    nombre, n = base, 2
+    while nombre.lower() in usados:
+        # Al recortar, dos secciones distintas pueden chocar. Se numeran.
+        sufijo = f" ({n})"
+        nombre = base[:31 - len(sufijo)] + sufijo
+        n += 1
+    usados.add(nombre.lower())
+    return nombre
+
+
+@router.get("/deudores.xlsx")
+def deudores_excel(anio: Optional[str] = Query(None, description="Año escolar; por defecto el activo"),
+                   db: Session = Depends(get_db),
+                   current_user: dict = Depends(get_current_user)):
+    """La lista de deudores en Excel: resumen, detalle y una hoja por sección.
+
+    Es el reporte que el colegio sacaba a mano del .xlsm. Lleva:
+
+      · Resumen      — cuánto debe cada sección, para ver dónde está el grueso
+      · Deudores     — un alumno por fila, con su total y su atraso
+      · Detalle      — una cuota por fila, para cuadrar importe a importe
+      · Una hoja por sección, que es lo que se le pasa a cada tutor
+      · Deuda anterior — retirados y trasladados, que no tienen sección
+    """
+    _solo_admin(current_user)
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+    except ImportError:
+        raise HTTPException(
+            503, "Falta la librería openpyxl en el servidor para exportar a Excel")
+
+    try:
+        datos = con.reporte_deudores(db, anio)
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        raise _sin_tablas(Exception())
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"No se pudo armar el reporte: {e}")
+
+    if not datos["deudores"] and not datos["externas"]:
+        raise HTTPException(
+            400, "No hay ninguna deuda pendiente: no hay nada que exportar")
+
+    GRANATE = PatternFill("solid", fgColor="701C32")
+    GRIS = PatternFill("solid", fgColor="F1F1F1")
+    BLANCO_NEGRITA = Font(bold=True, color="FFFFFF")
+    NEGRITA = Font(bold=True)
+    ROJO = Font(bold=True, color="B21E1E")
+    SOLES = '"S/ "#,##0.00'
+    FECHA = "DD/MM/YYYY"
+
+    def cabecera(hoja, titulos, anchos):
+        hoja.append(titulos)
+        for celda in hoja[1]:
+            celda.fill = GRANATE
+            celda.font = BLANCO_NEGRITA
+            celda.alignment = Alignment(horizontal="center", vertical="center",
+                                        wrap_text=True)
+        for i, ancho in enumerate(anchos, start=1):
+            hoja.column_dimensions[hoja.cell(row=1, column=i).column_letter].width = ancho
+        hoja.freeze_panes = "A2"
+
+    def formatear(hoja, columnas_soles=(), columnas_fecha=()):
+        for fila in hoja.iter_rows(min_row=2):
+            for celda in fila:
+                if celda.column_letter in columnas_soles:
+                    celda.number_format = SOLES
+                elif celda.column_letter in columnas_fecha:
+                    celda.number_format = FECHA
+
+    wb = Workbook()
+    usados: set = set()
+
+    # ------------------------------------------------------------- resumen
+    h = wb.active
+    h.title = _nombre_hoja("Resumen", usados)
+    t = datos["totales"]
+    h.append([f"Deudores del colegio · año {datos['anio'] or '—'}"])
+    h["A1"].font = Font(bold=True, size=14, color="701C32")
+    h.append([f"Generado el {datos['fecha'].strftime('%d/%m/%Y')}"])
+    h.append([])
+    for etiqueta, valor, es_dinero in (
+            ("Alumnos que deben", t["alumnos"], False),
+            ("Cuotas pendientes", t["cuotas"], False),
+            ("Deuda (sin mora)", float(t["deuda"]), True),
+            ("Mora acumulada", float(t["mora"]), True),
+            ("TOTAL a cobrar", float(t["total"]), True),
+            ("De eso, ya vencido", float(t["vencido"]), True),
+            ("Cuotas de deuda anterior", t["externas"], False),
+            ("Total de deuda anterior", float(t["total_externas"]), True)):
+        h.append([etiqueta, valor])
+        h.cell(row=h.max_row, column=1).font = NEGRITA
+        if es_dinero:
+            h.cell(row=h.max_row, column=2).number_format = SOLES
+    h.append([])
+
+    inicio = h.max_row + 1
+    h.append(["Nivel", "Grado", "Sección", "Alumnos", "Cuotas",
+              "Deuda", "Mora", "Total", "Vencido"])
+    for celda in h[inicio]:
+        celda.fill = GRANATE
+        celda.font = BLANCO_NEGRITA
+        celda.alignment = Alignment(horizontal="center", wrap_text=True)
+    for s in datos["secciones"]:
+        h.append([s["nivel"], s["grado"], s["seccion"], s["num_alumnos"],
+                  s["num_cuotas"], float(s["deuda"]), float(s["mora"]),
+                  float(s["total"]), float(s["vencido"])])
+        for col in ("F", "G", "H", "I"):
+            h[f"{col}{h.max_row}"].number_format = SOLES
+    for col, ancho in zip("ABCDEFGHI", (16, 14, 12, 10, 9, 14, 12, 14, 14)):
+        h.column_dimensions[col].width = ancho
+
+    # ------------------------------------------------------- todos los deudores
+    h = wb.create_sheet(_nombre_hoja("Deudores", usados))
+    cabecera(h, ["DNI", "Alumno", "Nivel", "Grado", "Sección", "Cuotas",
+                 "Vencidas", "Deuda", "Mora", "Total", "Debe desde",
+                 "Días de atraso"],
+             (12, 38, 14, 14, 10, 8, 9, 13, 11, 13, 14, 12))
+    for d in datos["deudores"]:
+        h.append([d["dni"], d["alumno"], d["nivel"], d["grado"], d["seccion"],
+                  d["num_cuotas"], d["num_vencidas"], float(d["deuda"]),
+                  float(d["mora"]), float(d["total"]), d["desde"], d["dias_atraso"]])
+        if d["num_vencidas"]:
+            h.cell(row=h.max_row, column=12).font = ROJO
+    formatear(h, columnas_soles=("H", "I", "J"), columnas_fecha=("K",))
+    h.auto_filter.ref = h.dimensions
+
+    # --------------------------------------------------------------- detalle
+    h = wb.create_sheet(_nombre_hoja("Detalle por cuota", usados))
+    cabecera(h, ["DNI", "Alumno", "Nivel", "Grado", "Sección", "Concepto",
+                 "Vence", "Monto", "Mora", "Total", "Estado", "Días de atraso"],
+             (12, 34, 14, 14, 10, 26, 12, 12, 11, 12, 12, 12))
+    for d in datos["deudores"]:
+        for c in d["cuotas"]:
+            h.append([d["dni"], d["alumno"], d["nivel"], d["grado"], d["seccion"],
+                      c["concepto"], c["vencimiento"], float(c["monto"]),
+                      float(c["mora"]), float(c["total"]),
+                      "VENCIDA" if c["vencida"] else "Por vencer",
+                      c["dias_atraso"]])
+            if c["vencida"]:
+                h.cell(row=h.max_row, column=11).font = ROJO
+    formatear(h, columnas_soles=("H", "I", "J"), columnas_fecha=("G",))
+    h.auto_filter.ref = h.dimensions
+
+    # ------------------------------------------------------ una hoja por sección
+    for s in datos["secciones"]:
+        titulo = f"{s['grado']} {s['seccion']}".strip() or s["seccion"]
+        h = wb.create_sheet(_nombre_hoja(titulo, usados))
+        h.append([f"{s['nivel']} · {s['grado']} · {s['seccion']}"])
+        h["A1"].font = Font(bold=True, size=12, color="701C32")
+        h.append([f"{s['num_alumnos']} alumnos deben {s['num_cuotas']} cuotas"])
+        h.append([])
+        inicio = h.max_row + 1
+        h.append(["DNI", "Alumno", "Concepto", "Vence", "Monto", "Mora",
+                  "Total", "Días de atraso"])
+        for celda in h[inicio]:
+            celda.fill = GRANATE
+            celda.font = BLANCO_NEGRITA
+            celda.alignment = Alignment(horizontal="center", wrap_text=True)
+        for d in s["alumnos"]:
+            for c in d["cuotas"]:
+                h.append([d["dni"], d["alumno"], c["concepto"], c["vencimiento"],
+                          float(c["monto"]), float(c["mora"]), float(c["total"]),
+                          c["dias_atraso"]])
+                h[f"D{h.max_row}"].number_format = FECHA
+                for col in ("E", "F", "G"):
+                    h[f"{col}{h.max_row}"].number_format = SOLES
+                if c["vencida"]:
+                    h[f"H{h.max_row}"].font = ROJO
+        h.append([])
+        h.append(["", "TOTAL DE LA SECCIÓN", "", "", float(s["deuda"]),
+                  float(s["mora"]), float(s["total"]), ""])
+        for col in ("B", "E", "F", "G"):
+            h[f"{col}{h.max_row}"].font = NEGRITA
+            h[f"{col}{h.max_row}"].fill = GRIS
+        for col in ("E", "F", "G"):
+            h[f"{col}{h.max_row}"].number_format = SOLES
+        for col, ancho in zip("ABCDEFGH", (12, 36, 26, 12, 12, 11, 12, 13)):
+            h.column_dimensions[col].width = ancho
+        h.freeze_panes = f"A{inicio + 1}"
+
+    # -------------------------------------------------------- deuda anterior
+    if datos["externas"]:
+        h = wb.create_sheet(_nombre_hoja("Deuda anterior", usados))
+        cabecera(h, ["Documento", "Nombre", "Concepto", "Vence", "Monto",
+                     "Mora", "Total", "Días de atraso", "Origen"],
+                 (14, 38, 26, 12, 12, 11, 12, 13, 26))
+        for e in datos["externas"]:
+            h.append([e["documento"], e["nombre"], e["concepto"], e["vencimiento"],
+                      float(e["monto"]), float(e["mora"]), float(e["total"]),
+                      e["dias_atraso"], e["origen"]])
+        formatear(h, columnas_soles=("E", "F", "G"), columnas_fecha=("D",))
+        h.auto_filter.ref = h.dimensions
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    nombre = (f"Deudores-{datos['anio'] or 'sin-anio'}-"
+              f"{datos['fecha'].strftime('%d-%m-%Y')}.xlsx")
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

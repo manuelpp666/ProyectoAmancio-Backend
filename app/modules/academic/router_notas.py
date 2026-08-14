@@ -39,6 +39,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -75,6 +76,26 @@ def _entero(valor: float) -> int:
 
 def _dos_decimales(valor: float) -> float:
     return float(Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _exoneraciones(db: Session, ids_matricula) -> dict:
+    """id_matricula -> {id_curso, ...} de los que está exonerado.
+
+    `exoneracion_curso` es una tabla del script 18: en una base a la que
+    todavía no se le pasó, o que viene de un respaldo anterior a ese script,
+    no existe. Sin nadie exonerado la tabla solo se traduce en un guion en vez
+    de un EXO, así que se prefiere seguir sin exoneraciones a tumbar toda la
+    pantalla de notas.
+    """
+    try:
+        exonerados: dict = {}
+        for e in (db.query(ExoneracionCurso.id_matricula, ExoneracionCurso.id_curso)
+                  .filter(ExoneracionCurso.id_matricula.in_(ids_matricula)).all()):
+            exonerados.setdefault(e.id_matricula, set()).add(e.id_curso)
+        return exonerados
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        return {}
 
 
 def _clave_curso(nombre: str) -> str:
@@ -192,24 +213,42 @@ def notas_finales(
     solo_primaria = bool(niveles_vistos) and all(
         "PRIM" in (n or "").upper() for n in niveles_vistos)
 
-    areas_info = {a.id_area: a for a in db.query(Area).all()}
+    # Se piden solo id y nombre, sin las columnas de orden: `db.query(Area).all()`
+    # trae TODAS las columnas mapeadas (incluidas orden_primaria/orden_secundaria)
+    # y revienta con "Unknown column" si la base todavía no tiene el script 19.
+    # El orden se busca aparte, con su propia caída elegante.
+    nombres_area = {id_a: nombre for id_a, nombre in
+                    db.query(Area.id_area, Area.nombre).all()}
+
+    nombre_columna = "orden_primaria" if solo_primaria else "orden_secundaria"
+    otra_columna = "orden_secundaria" if solo_primaria else "orden_primaria"
+    ordenes: dict = {}
+    columna = getattr(Area, nombre_columna, None)
+    columna_otra = getattr(Area, otra_columna, None)
+    if columna is not None:
+        try:
+            filas = db.query(Area.id_area, columna.label("o1"),
+                             columna_otra.label("o2") if columna_otra is not None
+                             else columna.label("o2")).all()
+            ordenes = {f.id_area: (f.o1, f.o2) for f in filas}
+        except Exception:
+            # La tabla real no tiene esas columnas todavía (falta el script 19):
+            # se descarta la consulta rota y se sigue con la sesión limpia.
+            db.rollback()
+            ordenes = {}
 
     def _orden_area(id_area):
-        a = areas_info.get(id_area)
-        if a is None:
+        nombre = nombres_area.get(id_area)
+        if nombre is None:
             return (9999, "")            # curso sin área: al final
-        orden = getattr(a, "orden_primaria" if solo_primaria else "orden_secundaria", None)
-        if orden is None:
-            # El área no existe en ese nivel (o falta el script 19): se usa el
-            # orden del otro nivel antes que mandarla al final sin más.
-            orden = getattr(a, "orden_secundaria" if solo_primaria else "orden_primaria", None)
-        return (orden if orden is not None else 9999, a.nombre or "")
+        o1, o2 = ordenes.get(id_area, (None, None))
+        orden = o1 if o1 is not None else o2
+        return (orden if orden is not None else 9999, nombre or "")
 
     cursos_todos.sort(key=lambda c: (_orden_area(c.id_area), _clave_curso(c.nombre)))
     columnas = [{"id_curso": c.id_curso, "curso": c.nombre,
                  "id_area": c.id_area,
-                 "area": (areas_info[c.id_area].nombre
-                          if c.id_area in areas_info else None)}
+                 "area": nombres_area.get(c.id_area)}
                 for c in cursos_todos]
 
     # id_curso -> id_area, para agrupar las notas de cada alumno por área.
@@ -243,10 +282,7 @@ def notas_finales(
     # Una casilla vacía puede ser un exonerado o una nota que nadie cargó, y
     # en la libreta no se escriben igual: el exonerado sale EXO y el otro sale
     # pendiente. Esta consulta es la que permite distinguirlos.
-    exonerados: dict = {}
-    for e in (db.query(ExoneracionCurso.id_matricula, ExoneracionCurso.id_curso)
-              .filter(ExoneracionCurso.id_matricula.in_(ids)).all()):
-        exonerados.setdefault(e.id_matricula, set()).add(e.id_curso)
+    exonerados = _exoneraciones(db, ids)
 
     alumnos = []
     for f in filas:

@@ -1,6 +1,8 @@
 from pydantic import BaseModel,Field, ConfigDict, model_validator
 from datetime import datetime
-from typing import Optional, Literal
+from typing import List, Optional, Literal
+
+MAXIMO_IMAGENES = 4
 
 class NoticiaCreate(BaseModel):
     titulo: str = Field(..., min_length=5, max_length=150)
@@ -8,6 +10,29 @@ class NoticiaCreate(BaseModel):
     id_autor: int = Field(..., gt=0)
     categoria: Optional[str] = None
     imagen_portada_url: Optional[str] = None
+    # Galería de la noticia, en el orden en que se subieron las fotos. La
+    # primera es además la portada. Las noticias de vídeo no la usan: ahí
+    # `imagen_portada_url` guarda la URL de YouTube.
+    imagenes: Optional[List[str]] = None
+
+    @model_validator(mode='after')
+    def normalizar_imagenes(self) -> 'NoticiaCreate':
+        """Limpia la galería y la deja coherente con la portada.
+
+        Quita huecos y repetidas —subir dos veces la misma foto no debe
+        pintarla dos veces—, corta en 4 y se asegura de que la portada sea la
+        primera, que es lo que ve quien entra desde el listado.
+        """
+        if self.imagenes is not None:
+            limpias: List[str] = []
+            for url in self.imagenes:
+                url = (url or "").strip()
+                if url and url not in limpias:
+                    limpias.append(url)
+            self.imagenes = limpias[:MAXIMO_IMAGENES] or None
+        if self.imagenes:
+            self.imagen_portada_url = self.imagenes[0]
+        return self
 
 class NoticiaResponse(NoticiaCreate):
     id_noticia: int
