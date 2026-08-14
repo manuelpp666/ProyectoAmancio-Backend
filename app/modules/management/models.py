@@ -70,3 +70,37 @@ class TutorSeccion(Base):
     docente = relationship("Docente")
     seccion = relationship("Seccion")
     anio_escolar = relationship("AnioEscolar")
+
+class ExoneracionCurso(Base):
+    """Alumno que no lleva un curso: en la libreta sale EXO, no una nota.
+
+    Un exonerado no suma ni divide en el promedio, así que dejarlo marcado
+    explícitamente evita la ambigüedad de antes, cuando la única señal era la
+    ausencia de nota y no había forma de distinguirla de un olvido de carga.
+
+    Es del AÑO, no del bimestre: cuelga de la matrícula, que ya es de un año
+    concreto, y en el colegio la exoneración vale para los cuatro bimestres.
+    """
+    __tablename__ = "exoneracion_curso"
+    __table_args__ = (
+        UniqueConstraint("id_matricula", "id_curso", name="uq_exo_matricula_curso"),
+    )
+    id_exoneracion_curso = Column(Integer, primary_key=True)
+    id_matricula = Column(Integer, ForeignKey("matricula.id_matricula"), nullable=False)
+    id_curso = Column(Integer, ForeignKey("curso.id_curso"), nullable=False)
+    motivo = Column(String(150))
+    id_docente = Column(Integer, ForeignKey("docente.id_docente"))
+    fecha_registro = Column(DateTime, server_default=func.now())
+
+
+class CursoNotaAutomatica(Base):
+    """Curso que sale en la libreta pero no se dicta: va con 20 fijo.
+
+    La lista la manda el colegio (Arte y Pintura, Tutoría, Cívica... según el
+    grado). Vive en la base y no en el código para que cambiarla el año que
+    viene no obligue a tocar nada ni a volver a desplegar.
+    """
+    __tablename__ = "curso_nota_automatica"
+    id_curso = Column(Integer, ForeignKey("curso.id_curso"), primary_key=True)
+    id_grado = Column(Integer, ForeignKey("grado.id_grado"), primary_key=True)
+    valor = Column(DECIMAL(4, 2), nullable=False, default=20)

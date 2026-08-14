@@ -28,6 +28,29 @@ class InscripcionUpdate(BaseModel):
     inicio_inscripcion: date
     fin_inscripcion: date
 
+# --- Bimestre ---
+class BimestreItem(BaseModel):
+    """Un bimestre suelto: su número (I a IV) y su rango de fechas."""
+    numero: int = Field(..., ge=1, le=4)
+    fecha_inicio: date
+    fecha_fin: date
+
+class BimestresUpdate(BaseModel):
+    """Los cuatro bimestres a guardar de una vez (upsert por número)."""
+    bimestres: List[BimestreItem]
+
+class BimestresResponse(BaseModel):
+    """Respuesta del calendario de bimestres de un año.
+
+    `guardado` distingue si estas fechas ya las confirmó el colegio (True) o
+    si son el reparto automático en cuatro tramos iguales que se calcula al
+    vuelo porque todavía no hay nada guardado (False): el front debe avisar
+    de que son aproximadas en ese caso.
+    """
+    id_anio_escolar: str
+    guardado: bool
+    bimestres: List[BimestreItem]
+
 # --- Seccion ---
 class SeccionBase(BaseModel):
     id_grado: int

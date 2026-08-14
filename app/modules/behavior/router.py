@@ -1,24 +1,89 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import extract, func, or_
+from sqlalchemy import extract, func, or_, text
 from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
 from app.core.util.security import get_current_user
 from app.core.util import busqueda as busqueda_util
 from . import models, schemas
+from . import bimestres as bimestres_util
 from .constants import PUNTAJE_MAXIMO, UMBRAL_OBSERVACION, UMBRAL_CRITICO, calcular_puntaje, estado_visual
-from typing import Optional
-from datetime import datetime
+from typing import Optional, Tuple
+from datetime import datetime, date
 
 router = APIRouter(prefix="/conducta", tags=["Conducta y Psicología"])
 
-def _puntos_perdidos_anio(db: Session, id_alumno: int, anio: int) -> int:
-    """Suma de puntos descontados al alumno en el año indicado."""
+
+def _periodo(db: Session, anio: int, numero_bimestre: Optional[int] = None
+             ) -> Tuple[date, date, Optional[int]]:
+    """Desde/hasta sobre los que se cuenta la conducta, y qué bimestre es.
+
+    La nota de conducta se reinicia cada bimestre, así que el periodo por
+    defecto es el bimestre en curso y no el año entero. Si la fecha de hoy cae
+    fuera del año escolar (vacaciones, o un año ya cerrado) se devuelve el año
+    completo: es preferible enseñar el acumulado a no enseñar nada.
+    """
+    from app.modules.academic.models import AnioEscolar
+
+    ae = (db.query(AnioEscolar)
+          .filter(AnioEscolar.id_anio_escolar == str(anio)).first())
+    tramos = bimestres_util.calendario(
+        db, str(anio),
+        getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None))
+
+    if tramos:
+        buscado = numero_bimestre or bimestres_util.bimestre_de(date.today(), tramos)
+        for n, desde, hasta in tramos:
+            if n == buscado:
+                return desde, hasta, n
+
+    return date(anio, 1, 1), date(anio, 12, 31), None
+
+
+def _conducta_migrada(db: Session, id_alumno: int, anio: str,
+                      numero_bimestre: Optional[int]) -> Optional[int]:
+    """La nota de conducta que ya traía el sistema antiguo, si la hay.
+
+    Los bimestres cargados desde el sistema PHP tienen la nota puesta a mano
+    por el colegio y ningún reporte detrás. Calcularla desde los reportes daría
+    20 para todos y no coincidiría con la libreta que las familias ya tienen.
+
+    Devuelve None si no hay nota migrada, si la tabla todavía no existe (base
+    sin el script 20) o si no se sabe en qué bimestre estamos.
+    """
+    if not numero_bimestre:
+        return None
+    try:
+        valor = db.execute(
+            text("SELECT nc.valor FROM nota_conducta nc "
+                 "JOIN matricula m ON m.id_matricula = nc.id_matricula "
+                 "WHERE m.id_alumno = :al AND m.id_anio_escolar = :anio "
+                 "  AND nc.bimestre = :bim LIMIT 1"),
+            {"al": id_alumno, "anio": anio, "bim": numero_bimestre},
+        ).scalar()
+    except Exception:
+        # La tabla puede no existir aún. No es motivo para tumbar la pantalla
+        # del alumno: se sigue con el puntaje calculado.
+        db.rollback()
+        return None
+    return int(round(float(valor))) if valor is not None else None
+
+
+def _puntos_perdidos_anio(db: Session, id_alumno: int, anio: int,
+                          numero_bimestre: Optional[int] = None) -> int:
+    """Suma de puntos descontados al alumno en el bimestre en curso.
+
+    Conserva el nombre por compatibilidad con quien ya lo llama, pero el
+    periodo ya no es el año: es el bimestre, porque la nota de conducta de la
+    libreta se reinicia en cada uno.
+    """
+    desde, hasta, _ = _periodo(db, anio, numero_bimestre)
     total = db.query(func.coalesce(func.sum(models.NivelConducta.puntos), 0)).select_from(
         models.ReporteConducta
     ).join(models.NivelConducta).filter(
         models.ReporteConducta.id_alumno == id_alumno,
-        extract('year', models.ReporteConducta.fecha_reporte) == anio
+        func.date(models.ReporteConducta.fecha_reporte) >= desde,
+        func.date(models.ReporteConducta.fecha_reporte) <= hasta,
     ).scalar()
     return int(total or 0)
 
@@ -156,15 +221,35 @@ def obtener_estado_por_usuario(
     ).order_by(models.ReporteConducta.fecha_reporte.desc()).all()
 
     # 4. Cálculo de puntos (los niveles guardan el descuento en positivo)
-    total_penalizacion = sum(r.nivel.puntos for r in reportes if r.nivel)
+    #
+    # El historial se sigue enseñando entero: al alumno le sirve ver todo lo
+    # del año. Pero el PUNTAJE solo cuenta los reportes del bimestre en curso,
+    # porque la nota de conducta se reinicia en cada uno.
+    desde, hasta, numero_bimestre = _periodo(db, anio)
+    del_bimestre = [r for r in reportes
+                    if r.fecha_reporte and desde <= r.fecha_reporte.date() <= hasta]
+    total_penalizacion = sum(r.nivel.puntos for r in del_bimestre if r.nivel)
     puntaje_actual = calcular_puntaje(total_penalizacion)
+    # El cambio de I.E. es una medida extrema del reglamento: no se borra al
+    # empezar un bimestre nuevo, se arrastra todo el año.
     requiere_cambio_ie = any(r.nivel.cambio_ie for r in reportes if r.nivel)
+
+    # Los bimestres que vienen del sistema antiguo traen la nota de conducta ya
+    # puesta por el colegio, y no hay reportes que la respalden: si se
+    # recalculara saldría 20 para todos y no cuadraría con la libreta impresa.
+    # Cuando existe esa nota migrada, manda ella.
+    migrada = _conducta_migrada(db, alumno.id_alumno, str(anio), numero_bimestre)
+    if migrada is not None:
+        puntaje_actual = migrada
 
     return {
         "id_usuario": id_usuario,
         "id_alumno": alumno.id_alumno,
         "nombre_alumno": f"{alumno.nombres} {alumno.apellidos}",
         "anio_consultado": anio, # Es bueno devolver qué año se calculó
+        "bimestre": numero_bimestre,
+        "reportes_del_bimestre": len(del_bimestre),
+        "nota_de_registro_anterior": migrada is not None,
         "puntaje_actual": puntaje_actual,
         "puntaje_maximo": PUNTAJE_MAXIMO,
         "umbral_observacion": UMBRAL_OBSERVACION,
@@ -586,12 +671,16 @@ def obtener_resumen_dashboard(db: Session = Depends(get_db), current_user: dict 
     anio_actual = datetime.now().year
 
     # Lógica para contar alumnos en riesgo (bajo el umbral de observación)
-    # 1. Obtener puntos perdidos por cada alumno en el año actual
+    # 1. Puntos perdidos por cada alumno EN EL BIMESTRE EN CURSO: el puntaje
+    #    se reinicia en cada uno, así que sumar el año entero daría un número
+    #    que no se corresponde con ninguna nota de conducta real.
+    desde_bim, hasta_bim, _ = _periodo(db, anio_actual)
     subquery = db.query(
         models.ReporteConducta.id_alumno,
         func.sum(models.NivelConducta.puntos).label("total_perdido")
     ).join(models.NivelConducta).filter(
-        extract('year', models.ReporteConducta.fecha_reporte) == anio_actual
+        func.date(models.ReporteConducta.fecha_reporte) >= desde_bim,
+        func.date(models.ReporteConducta.fecha_reporte) <= hasta_bim,
     ).group_by(models.ReporteConducta.id_alumno).subquery()
 
     # 2. Contar en riesgo: bajo el umbral de observación o con falta de cambio de I.E.
@@ -666,13 +755,19 @@ def obtener_alumnos_riesgo(db: Session = Depends(get_db), current_user: dict = D
     ).all()
 
     # 2. Agrupar puntos por alumno y detectar faltas con cambio de I.E.
+    #
+    # Los puntos solo cuentan dentro del bimestre en curso —se reinician en
+    # cada uno—, pero el cambio de I.E. se arrastra todo el año: es una medida
+    # extrema del reglamento y no se borra al pasar de bimestre.
+    desde_bim, hasta_bim, _ = _periodo(db, anio_actual)
     puntajes_alumnos = {}
     alumnos_cambio_ie = set()
     for r in reportes:
         if r.alumno not in puntajes_alumnos:
             puntajes_alumnos[r.alumno] = 0
         if r.nivel:
-            puntajes_alumnos[r.alumno] += r.nivel.puntos
+            if r.fecha_reporte and desde_bim <= r.fecha_reporte.date() <= hasta_bim:
+                puntajes_alumnos[r.alumno] += r.nivel.puntos
             if r.nivel.cambio_ie:
                 alumnos_cambio_ie.add(r.alumno.id_alumno)
 

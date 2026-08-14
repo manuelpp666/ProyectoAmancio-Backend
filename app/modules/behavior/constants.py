@@ -1,11 +1,21 @@
 # Sistema de puntos de conducta (Reglamento Interno 2026).
-# Todo alumno inicia el año escolar con PUNTAJE_MAXIMO; cada reporte descuenta
-# los puntos de la falta. Única fuente de verdad de los umbrales: cualquier
-# cálculo de puntaje o semáforo debe pasar por este módulo.
+#
+# El puntaje de conducta ES la nota de conducta de la libreta, y por eso va
+# sobre 20 y no sobre 100: el alumno empieza cada bimestre con 20 y cada
+# reporte le descuenta los puntos que tenga asignada esa falta en
+# `nivel_conducta.puntos`.
+#
+# Se reinicia CADA BIMESTRE, no cada año: la libreta lleva una nota de
+# conducta por bimestre, así que los descuentos de un bimestre no arrastran al
+# siguiente. Qué reporte cae en qué bimestre lo decide `bimestres.py` a partir
+# de la tabla `bimestre`.
+#
+# Única fuente de verdad de los umbrales: cualquier cálculo de puntaje o
+# semáforo debe pasar por este módulo.
 
-PUNTAJE_MAXIMO = 100
-UMBRAL_OBSERVACION = 75  # por debajo: el alumno entra en observación (Amarillo)
-UMBRAL_CRITICO = 40      # por debajo: conducta crítica (Rojo)
+PUNTAJE_MAXIMO = 20
+UMBRAL_OBSERVACION = 15  # por debajo: el alumno entra en observación (Amarillo)
+UMBRAL_CRITICO = 8       # por debajo: conducta crítica (Rojo)
 
 
 def calcular_puntaje(puntos_perdidos: int) -> int:

@@ -1089,7 +1089,12 @@ def dashboard_admin(
     # ── CONDUCTA ────────────────────────────────────────────────────────────
     # Se replica el criterio de behavior/constants: cada reporte descuenta
     # puntos y por debajo del umbral el alumno entra en observación.
+    #
+    # El puntaje se reinicia cada bimestre (es la nota de conducta de la
+    # libreta, sobre 20), así que solo cuentan los reportes del bimestre en
+    # curso. El cambio de I.E., en cambio, se arrastra todo el año.
     from app.modules.behavior.constants import calcular_puntaje, UMBRAL_OBSERVACION, UMBRAL_CRITICO
+    from app.modules.behavior import bimestres as bimestres_util
 
     en_observacion = en_critico = 0
     if ids_alumno:
@@ -1102,15 +1107,25 @@ def dashboard_admin(
             )
             .all()
         )
+        tramos = bimestres_util.calendario(db, str(anio))
+        actual = bimestres_util.bimestre_de(hoy, tramos) if tramos else None
         perdidos, cambio_ie = {}, set()
         for r in reportes:
             if not r.nivel:
                 continue
-            perdidos[r.id_alumno] = perdidos.get(r.id_alumno, 0) + r.nivel.puntos
+            del_bimestre = (
+                actual is None
+                or bimestres_util.bimestre_de(r.fecha_reporte, tramos) == actual
+            )
+            if del_bimestre:
+                perdidos[r.id_alumno] = perdidos.get(r.id_alumno, 0) + r.nivel.puntos
             if r.nivel.cambio_ie:
                 cambio_ie.add(r.id_alumno)
-        for id_al, pts in perdidos.items():
-            puntaje = calcular_puntaje(pts)
+        # Se recorre la unión de los dos conjuntos: un alumno con una falta de
+        # cambio de I.E. en un bimestre anterior no tiene puntos descontados en
+        # el actual, y si solo se mirase `perdidos` se quedaría fuera del conteo.
+        for id_al in set(perdidos) | cambio_ie:
+            puntaje = calcular_puntaje(perdidos.get(id_al, 0))
             if puntaje < UMBRAL_CRITICO or id_al in cambio_ie:
                 en_critico += 1
             elif puntaje < UMBRAL_OBSERVACION:

@@ -112,3 +112,104 @@ class TipoPago(Base):
         default=PeriodoAcademico.REGULAR,
         nullable=False
     )
+
+# ===========================================================================
+# CONCILIACIÓN CON EL BCP (servicio CREP)
+#
+# El BCP entrega cada día un "Reporte de cobros" con lo que se pagó, y espera
+# de vuelta un archivo CREP con lo que queda por cobrar. Antes ese circuito se
+# hacía a mano con un .xlsm de macros; estas tablas lo dejan dentro del sistema.
+#
+# Las cuotas pendientes NO viven aquí: viven en `pago`, que es la que manda.
+# Aquí solo se guarda el rastro de qué archivo trajo qué pago, para poder
+# auditar después y para no aplicar dos veces el mismo cobro.
+# ===========================================================================
+
+class LoteCobranza(Base):
+    """Un archivo 'Reporte de cobros' procesado."""
+    __tablename__ = "lote_cobranza"
+
+    id_lote = Column(Integer, primary_key=True, index=True)
+    nombre_archivo = Column(String(255), nullable=False)
+    # Fecha que declara la cabecera del archivo. Es la que ordena el proceso:
+    # los reportes SIEMPRE se aplican del más antiguo al más nuevo, porque la
+    # mora de un mes depende de quién ya había pagado.
+    fecha_reporte = Column(Date, nullable=True, index=True)
+    registros_declarados = Column(Integer, default=0)
+    monto_declarado = Column(Numeric(12, 2), default=0)
+    # Huella del contenido: impide cargar dos veces el mismo archivo aunque le
+    # cambien el nombre.
+    huella = Column(String(64), nullable=False, unique=True)
+    aplicados = Column(Integer, default=0)
+    sin_coincidencia = Column(Integer, default=0)
+    extornados = Column(Integer, default=0)
+    repetidos = Column(Integer, default=0)
+    estado = Column(String(20), default="PROCESADO")   # PROCESADO | SIMULADO
+    fecha_carga = Column(DateTime, server_default=func.now())
+    id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=True)
+
+    movimientos = relationship("MovimientoCobranza", back_populates="lote",
+                               cascade="all, delete-orphan")
+
+
+class MovimientoCobranza(Base):
+    """Una línea del reporte y qué se hizo con ella."""
+    __tablename__ = "movimiento_cobranza"
+
+    id_movimiento = Column(Integer, primary_key=True, index=True)
+    id_lote = Column(Integer, ForeignKey("lote_cobranza.id_lote"), nullable=False)
+    id_pago = Column(Integer, ForeignKey("pago.id_pago"), nullable=True)
+    id_cuota_externa = Column(Integer, ForeignKey("cuota_externa.id_cuota_externa"),
+                              nullable=True)
+
+    documento = Column(String(20), nullable=False, index=True)
+    fecha_vencimiento = Column(Date, nullable=True, index=True)
+    fecha_pago = Column(Date, nullable=True)
+    monto_pagado = Column(Numeric(10, 2), default=0)
+    mora_pagada = Column(Numeric(10, 2), default=0)
+    monto_total = Column(Numeric(10, 2), default=0)
+    operacion = Column(String(30), nullable=True)
+    medio_atencion = Column(String(10), nullable=True)
+
+    # APLICADO · EXTORNADO · SIN_COINCIDENCIA · REPETIDO · MONTO_DISTINTO · AMBIGUO
+    resultado = Column(String(20), nullable=False, index=True)
+    detalle = Column(String(255), nullable=True)
+
+    # Qué pasó DESPUÉS con este cobro. `resultado` dice qué pudo hacer el
+    # sistema solo; `estado` dice si una persona ya lo atendió. Sin esto, los
+    # cobros que no cuadran se acumulan sin que nadie sepa cuáles quedan.
+    # PENDIENTE_REVISION · RESUELTO · DESCARTADO
+    estado = Column(String(20), nullable=False, default="PENDIENTE_REVISION",
+                    server_default="PENDIENTE_REVISION", index=True)
+    nota = Column(String(255), nullable=True)
+    id_usuario_resolucion = Column(Integer, nullable=True)
+    fecha_resolucion = Column(DateTime, nullable=True)
+
+    lote = relationship("LoteCobranza", back_populates="movimientos")
+    pago = relationship("Pago")
+
+
+class CuotaExterna(Base):
+    """Deuda de alguien que ya no está matriculado.
+
+    En el CREP que venía usando el colegio hay 193 cuotas de 2022 a 2025 de
+    alumnos retirados o trasladados que no existen en `alumno`. Si el archivo
+    se generara solo con la tabla `pago`, esas deudas dejarían de cobrarse en
+    el BCP. Se guardan aquí para que sigan viajando en el archivo sin ensuciar
+    el padrón de alumnos ni las matrículas.
+    """
+    __tablename__ = "cuota_externa"
+
+    id_cuota_externa = Column(Integer, primary_key=True, index=True)
+    codigo_depositante = Column(String(20), nullable=False, index=True)
+    documento = Column(String(20), nullable=False, index=True)
+    nombre = Column(String(120), nullable=False)
+    concepto = Column(String(150), nullable=True)
+    fecha_emision = Column(Date, nullable=False)
+    fecha_vencimiento = Column(Date, nullable=False, index=True)
+    monto = Column(Numeric(10, 2), nullable=False)
+    mora = Column(Numeric(10, 2), default=0)
+    estado = Column(String(20), default="PENDIENTE", index=True)
+    fecha_pago = Column(DateTime, nullable=True)
+    codigo_operacion_bcp = Column(String(50), nullable=True)
+    origen = Column(String(120), nullable=True)   # de qué archivo salió

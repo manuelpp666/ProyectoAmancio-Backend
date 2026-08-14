@@ -25,8 +25,12 @@ from app.modules.chatbot import router as chatbot_router
 # Resto de módulos
 from app.modules.perfil import router as perfil_router
 from app.modules.academic import router as academic_router
+from app.modules.academic import router_notas as academic_notas_router
+from app.modules.academic import router_exoneracion as academic_exoneracion_router
+from app.modules.academic import router_libreta as academic_libreta_router
 from app.modules.enrollment import router as enrollment_router
 from app.modules.finance import router as finance_router
+from app.modules.finance import router_crep as finance_crep_router
 from app.modules.management import router as management_router
 from app.modules.virtual import router as virtual_router
 from app.modules.behavior import router as behavior_router
@@ -118,8 +122,12 @@ app.include_router(familiar_router.router)
 app.include_router(docente_router.router)
 app.include_router(perfil_router.router)
 app.include_router(academic_router.router)
+app.include_router(academic_notas_router.router)
+app.include_router(academic_exoneracion_router.router)
+app.include_router(academic_libreta_router.router)
 app.include_router(enrollment_router.router)
 app.include_router(finance_router.router)
+app.include_router(finance_crep_router.router)
 app.include_router(management_router.router)
 app.include_router(virtual_router.router)
 app.include_router(behavior_router.router)

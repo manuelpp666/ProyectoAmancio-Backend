@@ -4,7 +4,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db.database import get_db
 from . import models, schemas, consultas
 from typing import List, Optional
-from datetime import date
+from datetime import date, timedelta
 from pydantic import BaseModel  # <--- NUEVO: Importación para el endpoint de edición
 from app.core.util.security import get_current_user
 from app.modules.management.models import CargaAcademica  # <--- Importar CargaAcademica
@@ -262,6 +262,163 @@ def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db
     
     db.commit()
     return {"message": "Fechas de inscripción actualizadas correctamente"}
+
+# --- BIMESTRES ---
+# Números romanos para mensajes de error legibles por un administrador del
+# colegio, que no tiene por qué saber qué es un índice de lista.
+_ROMANO_BIMESTRE = {1: "I", 2: "II", 3: "III", 4: "IV"}
+
+
+def _reparto_automatico_bimestres(inicio: date, fin: date) -> list[schemas.BimestreItem]:
+    """El año escolar en cuatro tramos iguales, calculado al vuelo.
+
+    Solo se usa como propuesta cuando el colegio todavía no guardó fechas
+    reales (ver GET /bimestres/{anio_id}): nunca se escribe en la base desde
+    aquí. Misma idea que `_repartido` en app/modules/behavior/bimestres.py,
+    pero sin importar ese módulo para no acoplar un router a otro dominio.
+    """
+    dias = (fin - inicio).days
+    tramos = []
+    for n in range(1, 5):
+        desde = inicio + timedelta(days=dias * (n - 1) // 4)
+        hasta = inicio + timedelta(days=dias * n // 4)
+        tramos.append(schemas.BimestreItem(numero=n, fecha_inicio=desde, fecha_fin=hasta))
+    return tramos
+
+
+@router.get("/bimestres/{anio_id}", response_model=schemas.BimestresResponse)
+def obtener_bimestres(anio_id: str, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
+    """Los cuatro bimestres del año, para la pestaña Estructura Escolar.
+
+    Si el colegio ya los guardó, se devuelven esos. Si no hay ninguno
+    guardado todavía, se calcula al vuelo un reparto en cuatro tramos
+    iguales (sin tocar la base) y se marca `guardado=False` para que el
+    front avise de que son aproximados y hay que revisarlos.
+    """
+    anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
+    if not anio:
+        raise HTTPException(status_code=404, detail="El año escolar indicado no existe")
+
+    guardados = db.query(models.Bimestre).filter(
+        models.Bimestre.id_anio_escolar == anio_id
+    ).order_by(models.Bimestre.numero).all()
+
+    if guardados:
+        return schemas.BimestresResponse(
+            id_anio_escolar=anio_id,
+            guardado=True,
+            bimestres=[
+                schemas.BimestreItem(numero=b.numero, fecha_inicio=b.fecha_inicio, fecha_fin=b.fecha_fin)
+                for b in guardados
+            ],
+        )
+
+    if not anio.fecha_fin or anio.fecha_fin <= anio.fecha_inicio:
+        raise HTTPException(
+            status_code=400,
+            detail="El año escolar no tiene un periodo de clases válido (falta la fecha de fin, o es anterior al inicio). "
+                   "Corrígelo primero en 'Editar Fechas' del año académico.",
+        )
+
+    return schemas.BimestresResponse(
+        id_anio_escolar=anio_id,
+        guardado=False,
+        bimestres=_reparto_automatico_bimestres(anio.fecha_inicio, anio.fecha_fin),
+    )
+
+
+@router.put("/bimestres/{anio_id}", response_model=schemas.BimestresResponse)
+def guardar_bimestres(anio_id: str, datos: schemas.BimestresUpdate, db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)):
+    """Guarda (upsert por número) las fechas reales de los cuatro bimestres.
+
+    Todos los mensajes de error están pensados para que los lea un
+    administrador del colegio, no un programador: dicen qué bimestre está
+    mal y por qué.
+    """
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
+    anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
+    if not anio:
+        raise HTTPException(status_code=404, detail="El año escolar indicado no existe")
+
+    if not anio.fecha_fin:
+        raise HTTPException(
+            status_code=400,
+            detail="El año escolar no tiene fecha de fin configurada. Complétala en 'Editar Fechas' antes de guardar los bimestres.",
+        )
+
+    # 1) Deben venir los cuatro números 1-4, cada uno una sola vez.
+    numeros = sorted(b.numero for b in datos.bimestres)
+    if numeros != [1, 2, 3, 4]:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes enviar los cuatro bimestres (I, II, III y IV), cada uno exactamente una vez.",
+        )
+
+    ordenados = sorted(datos.bimestres, key=lambda b: b.numero)
+
+    # 2) En cada bimestre, la fecha de inicio debe ser anterior a la de fin.
+    for b in ordenados:
+        if b.fecha_inicio >= b.fecha_fin:
+            raise HTTPException(
+                status_code=400,
+                detail=f"En el bimestre {_ROMANO_BIMESTRE[b.numero]}, la fecha de inicio ({b.fecha_inicio.isoformat()}) "
+                       f"debe ser anterior a la fecha de fin ({b.fecha_fin.isoformat()}).",
+            )
+
+    # 3) No pueden solaparse: cada bimestre debe empezar en la fecha en que
+    # termina el anterior, o después (tocarse el mismo día está permitido —
+    # es como sale el reparto automático, y así lo interpreta
+    # `bimestre_de` en app/modules/behavior/bimestres.py: ese día pasa a
+    # contar para el bimestre que empieza). Solo se rechaza si de verdad
+    # empieza ANTES de que el anterior termine. Comparar pares consecutivos
+    # ya ordenados por número basta para garantizar que ninguno se cruza.
+    for anterior, actual in zip(ordenados, ordenados[1:]):
+        if actual.fecha_inicio < anterior.fecha_fin:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El bimestre {_ROMANO_BIMESTRE[actual.numero]} empieza el {actual.fecha_inicio.isoformat()}, "
+                       f"antes de que termine el bimestre {_ROMANO_BIMESTRE[anterior.numero]} "
+                       f"({anterior.fecha_fin.isoformat()}). Ajusta las fechas para que no se crucen.",
+            )
+
+    # 4) Deben caer dentro del año escolar.
+    for b in ordenados:
+        if b.fecha_inicio < anio.fecha_inicio or b.fecha_fin > anio.fecha_fin:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El bimestre {_ROMANO_BIMESTRE[b.numero]} ({b.fecha_inicio.isoformat()} a {b.fecha_fin.isoformat()}) "
+                       f"se sale del periodo del año escolar ({anio.fecha_inicio.isoformat()} a {anio.fecha_fin.isoformat()}). "
+                       "Ajusta la fecha para que quede dentro de ese rango.",
+            )
+
+    # Upsert por número: actualiza si ya existe la fila de ese bimestre, la
+    # crea si no.
+    existentes = {
+        b.numero: b for b in db.query(models.Bimestre).filter(
+            models.Bimestre.id_anio_escolar == anio_id
+        ).all()
+    }
+    for b in ordenados:
+        fila = existentes.get(b.numero)
+        if fila:
+            fila.fecha_inicio = b.fecha_inicio
+            fila.fecha_fin = b.fecha_fin
+        else:
+            db.add(models.Bimestre(
+                id_anio_escolar=anio_id,
+                numero=b.numero,
+                fecha_inicio=b.fecha_inicio,
+                fecha_fin=b.fecha_fin,
+            ))
+
+    db.commit()
+
+    return schemas.BimestresResponse(id_anio_escolar=anio_id, guardado=True, bimestres=ordenados)
+
 
 # NOTA: el cierre de año ya NO es manual. Ocurre automáticamente cuando pasa la
 # fecha de fin del año (ver `actualizar_estado_anios` -> `_procesar_cierre_automatico`),

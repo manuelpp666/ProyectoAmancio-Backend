@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, Boolean
+from sqlalchemy import (Column, Integer, String, ForeignKey, DateTime, Text, Boolean,
+                        DECIMAL, UniqueConstraint)
 from sqlalchemy.sql import func
 from app.db.database import Base
 from sqlalchemy.orm import relationship
@@ -40,3 +41,29 @@ class CitaPsicologia(Base):
     fecha_cita = Column(DateTime, nullable=False)
     estado = Column(String(20), default='PROGRAMADA')
     resultado_reunion = Column(Text)
+
+class NotaConducta(Base):
+    """La nota de conducta de un alumno en un bimestre, sobre 20.
+
+    Existe porque hay dos formas de llegar a ese número y no se pueden mezclar:
+
+      MIGRADO   la puso el colegio en el sistema antiguo. No hay reportes
+                detrás, así que calcularla daría 20 para todos y no cuadraría
+                con la libreta que las familias ya tienen impresa.
+      CALCULADO la deduce el sistema restando a 20 los puntos de cada reporte
+                del bimestre.
+
+    Cuando hay fila migrada, manda ella. No va en la tabla `nota` a propósito:
+    en la libreta la conducta ocupa su propia fila y no entra ni en el puntaje
+    acumulado ni en el promedio de áreas.
+    """
+    __tablename__ = "nota_conducta"
+    __table_args__ = (
+        UniqueConstraint("id_matricula", "bimestre", name="uq_conducta_matricula_bim"),
+    )
+    id_nota_conducta = Column(Integer, primary_key=True)
+    id_matricula = Column(Integer, ForeignKey("matricula.id_matricula"), nullable=False)
+    bimestre = Column(Integer, nullable=False)
+    valor = Column(DECIMAL(4, 2), nullable=False)
+    origen = Column(String(20), nullable=False, default="MIGRADO")
+    fecha_registro = Column(DateTime, server_default=func.now())

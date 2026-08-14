@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, Date, ForeignKey, CHAR
+from sqlalchemy import Column, Integer, String, Boolean, Date, ForeignKey, CHAR, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.db.database import Base
 
@@ -17,6 +17,28 @@ class AnioEscolar(Base):
     inicio_inscripcion = Column(Date, nullable=True)
     fin_inscripcion = Column(Date, nullable=True)
     # -------------------------------
+
+class Bimestre(Base):
+    """Fechas de inicio y fin de cada uno de los 4 bimestres de un año escolar.
+
+    Hace falta porque la nota de conducta de la libreta se reinicia cada
+    bimestre: sin estas fechas no se sabe a qué tramo pertenece un reporte.
+    La tabla ya existía (creada por el script 18) con un reparto aproximado;
+    este modelo es lo que usa el panel para que el colegio la corrija.
+    Lo consume `app/modules/behavior/bimestres.py` con SQL directo (no ORM);
+    esta tabla no se toca desde ahí, solo se lee.
+    """
+    __tablename__ = "bimestre"
+    __table_args__ = (
+        UniqueConstraint("id_anio_escolar", "numero", name="uq_bimestre_anio_numero"),
+    )
+
+    id_bimestre = Column(Integer, primary_key=True)
+    id_anio_escolar = Column(CHAR(6), ForeignKey("anio_escolar.id_anio_escolar"), nullable=False)
+    numero = Column(Integer, nullable=False)          # 1, 2, 3 o 4
+    fecha_inicio = Column(Date, nullable=False)
+    fecha_fin = Column(Date, nullable=False)
+
 
 class Nivel(Base):
     __tablename__ = "nivel"
@@ -58,6 +80,13 @@ class Area(Base):
     __tablename__ = "area"
     id_area = Column(Integer, primary_key=True)
     nombre = Column(String(100), nullable=False)
+    # En qué posición sale el área en la libreta. Son dos columnas porque el
+    # orden NO es el mismo en los dos niveles: en primaria Inglés va tercero y
+    # en secundaria va el último. NULL significa que el área no aparece en ese
+    # nivel (Personal Social solo en primaria; Ciencias Sociales y Desarrollo
+    # Personal solo en secundaria). Las crea el script 19.
+    orden_primaria = Column(Integer)
+    orden_secundaria = Column(Integer)
 
 class Curso(Base):
     __tablename__ = "curso"
