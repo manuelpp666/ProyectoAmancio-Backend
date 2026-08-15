@@ -659,7 +659,7 @@ def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db),
     Este endpoint ahora coincide con la ruta: /academic/secciones/2025-1
     """
     return db.query(models.Seccion)\
-             .options(joinedload(models.Seccion.grado))\
+             .options(joinedload(models.Seccion.grado).joinedload(models.Grado.nivel))\
              .filter(models.Seccion.id_anio_escolar == anio_id).all()
 
 @router.get("/cursos-por-seccion/{seccion_id}", response_model=List[schemas.CursoResponse])

@@ -798,3 +798,370 @@ def obtener_alumnos_riesgo(db: Session = Depends(get_db), current_user: dict = D
     alumnos_riesgo.sort(key=lambda x: x["puntaje"])
     
     return alumnos_riesgo
+
+
+# =========================================================================
+# GESTIÓN Y LISTADO DE NOTAS DE CONDUCTA (PANEL AUXILIAR / ADMIN)
+# =========================================================================
+
+@router.get("/filtros")
+def filtros_conducta(
+    anio: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Opciones de filtros para la gestión de notas de conducta."""
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN", "DOCENTE", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver estos filtros")
+
+    from app.modules.academic.models import AnioEscolar, Seccion, Grado, Nivel
+
+    anios = [{"id": a.id_anio_escolar, "tipo": a.tipo, "activo": bool(a.activo)}
+             for a in db.query(AnioEscolar).order_by(AnioEscolar.id_anio_escolar.desc()).all()]
+    
+    if not anio:
+        activo = next((a for a in anios if a["activo"]), None)
+        anio = activo["id"] if activo else (anios[0]["id"] if anios else "2026")
+
+    secciones = []
+    if anio:
+        secciones = [{"id_seccion": s.id_seccion, "seccion": s.nombre,
+                      "id_grado": g.id_grado, "grado": g.nombre,
+                      "orden": g.orden or 0, "nivel": n.nombre}
+                     for s, g, n in db.query(Seccion, Grado, Nivel)
+                     .join(Grado, Grado.id_grado == Seccion.id_grado)
+                     .join(Nivel, Nivel.id_nivel == Grado.id_nivel)
+                     .filter(Seccion.id_anio_escolar == anio)
+                     .order_by(Nivel.nombre, Grado.orden, Seccion.nombre).all()]
+
+    bimestres = [1, 2, 3, 4]
+    
+    # Determinar bimestre actual
+    ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == anio).first()
+    bim_actual = bimestres_util.bimestre_actual(
+        db, anio, getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
+    ) or 1
+
+    return {
+        "anios": anios,
+        "anio": anio,
+        "bimestres": bimestres,
+        "bimestre_actual": bim_actual,
+        "secciones": secciones
+    }
+
+
+@router.get("/notas", response_model=schemas.RespuestaListaConducta)
+def listar_notas_conducta(
+    anio: Optional[str] = Query(None, description="Año escolar; por defecto el activo"),
+    bimestre: int = Query(1, ge=1, le=4, description="Número de bimestre (1-4)"),
+    nivel: Optional[str] = Query(None),
+    id_grado: Optional[int] = Query(None),
+    id_seccion: Optional[int] = Query(None),
+    q: Optional[str] = Query(None, description="Búsqueda por nombre, apellido o DNI"),
+    pagina: int = Query(1, ge=1),
+    por_pagina: int = Query(25, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Lista las notas de conducta de los alumnos para un bimestre y año escolar.
+
+    Permite al auxiliar y administrador visualizar:
+      - Reportes de conducta en el bimestre y puntos descontados.
+      - Nota calculada según reglamento (20 - puntos).
+      - Nota manual o migrada guardada en la base.
+      - Nota final efectiva e indicador de si coincide con el cálculo.
+    """
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN", "DOCENTE", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver las notas de conducta")
+
+    from app.modules.academic.models import AnioEscolar, Seccion, Grado, Nivel
+    from app.modules.enrollment.models import Matricula
+
+    # 1. Determinar año
+    if not anio:
+        activo = (db.query(AnioEscolar).filter(AnioEscolar.activo.is_(True))
+                  .order_by(AnioEscolar.id_anio_escolar.desc()).first())
+        anio = activo.id_anio_escolar if activo else "2026"
+
+    ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == anio).first()
+    fecha_inicio = getattr(ae, "fecha_inicio", None)
+    fecha_fin = getattr(ae, "fecha_fin", None)
+
+    # Rango de fechas del bimestre
+    rango_bim = bimestres_util.rango(db, anio, bimestre, fecha_inicio, fecha_fin)
+    if rango_bim:
+        desde, hasta = rango_bim
+    else:
+        # Fallback
+        tramos = bimestres_util.calendario(db, anio, fecha_inicio, fecha_fin)
+        if tramos:
+            desde, hasta = next(((d, h) for n, d, h in tramos if n == bimestre), (date(int(anio), 1, 1), date(int(anio), 12, 31)))
+        else:
+            desde, hasta = date(int(anio), 1, 1), date(int(anio), 12, 31)
+
+    # 2. Matrículas filtradas
+    consulta = (
+        db.query(
+            Matricula.id_matricula,
+            Matricula.id_alumno,
+            alumno_models.Alumno.dni,
+            alumno_models.Alumno.apellidos,
+            alumno_models.Alumno.nombres,
+            Nivel.nombre.label("nivel"),
+            Grado.nombre.label("grado"),
+            Grado.id_grado.label("id_grado"),
+            Grado.orden.label("orden_grado"),
+            Seccion.nombre.label("seccion"),
+            Seccion.id_seccion.label("id_seccion"),
+        )
+        .join(alumno_models.Alumno, alumno_models.Alumno.id_alumno == Matricula.id_alumno)
+        .join(Seccion, Seccion.id_seccion == Matricula.id_seccion)
+        .join(Grado, Grado.id_grado == Seccion.id_grado)
+        .join(Nivel, Nivel.id_nivel == Grado.id_nivel)
+        .filter(Matricula.id_anio_escolar == anio)
+    )
+
+    if nivel:
+        consulta = consulta.filter(Nivel.nombre == nivel)
+    if id_grado:
+        consulta = consulta.filter(Grado.id_grado == id_grado)
+    if id_seccion:
+        consulta = consulta.filter(Seccion.id_seccion == id_seccion)
+
+    termino = (q or "").strip()
+    if termino:
+        consulta = busqueda_util.filtrar(
+            consulta, termino,
+            alumno_models.Alumno.nombres,
+            alumno_models.Alumno.apellidos,
+            alumno_models.Alumno.dni,
+        )
+
+    total = consulta.count()
+
+    filas = (
+        consulta.order_by(
+            Nivel.nombre.asc(),
+            Grado.orden.asc(),
+            Seccion.nombre.asc(),
+            alumno_models.Alumno.apellidos.asc(),
+            alumno_models.Alumno.nombres.asc(),
+        )
+        .offset((pagina - 1) * por_pagina)
+        .limit(por_pagina)
+        .all()
+    )
+
+    if not filas:
+        return {
+            "anio": anio,
+            "bimestre": bimestre,
+            "total": total,
+            "pagina": pagina,
+            "por_pagina": por_pagina,
+            "alumnos": []
+        }
+
+    ids_alumno = [f.id_alumno for f in filas]
+    ids_matricula = [f.id_matricula for f in filas]
+
+    # 3. Consultar reportes del bimestre para estos alumnos
+    reportes_q = (
+        db.query(
+            models.ReporteConducta.id_alumno,
+            func.count(models.ReporteConducta.id_reporte).label("num_reportes"),
+            func.coalesce(func.sum(models.NivelConducta.puntos), 0).label("total_puntos"),
+        )
+        .join(models.NivelConducta, models.NivelConducta.id_nivel_conducta == models.ReporteConducta.id_nivel_conducta)
+        .filter(
+            models.ReporteConducta.id_alumno.in_(ids_alumno),
+            func.date(models.ReporteConducta.fecha_reporte) >= desde,
+            func.date(models.ReporteConducta.fecha_reporte) <= hasta,
+        )
+        .group_by(models.ReporteConducta.id_alumno)
+        .all()
+    )
+
+    stats_reportes = {
+        r.id_alumno: {
+            "total_reportes": int(r.num_reportes or 0),
+            "puntos_descontados": int(r.total_puntos or 0),
+        }
+        for r in reportes_q
+    }
+
+    # 4. Consultar notas de conducta guardadas (manuales o migradas)
+    notas_guardadas_q = (
+        db.query(models.NotaConducta)
+        .filter(
+            models.NotaConducta.id_matricula.in_(ids_matricula),
+            models.NotaConducta.bimestre == bimestre,
+        )
+        .all()
+    )
+    notas_dict = {
+        n.id_matricula: {
+            "valor": float(n.valor),
+            "origen": n.origen or "MANUAL"
+        }
+        for n in notas_guardadas_q
+    }
+
+    # 5. Construir respuesta
+    alumnos_resultado = []
+    for f in filas:
+        rep = stats_reportes.get(f.id_alumno, {"total_reportes": 0, "puntos_descontados": 0})
+        puntos_descontados = rep["puntos_descontados"]
+        total_reportes = rep["total_reportes"]
+        nota_calc = calcular_puntaje(puntos_descontados)
+
+        guardada = notas_dict.get(f.id_matricula)
+        if guardada is not None:
+            nota_manual = guardada["valor"]
+            origen = guardada["origen"]
+            nota_final = nota_manual
+            es_modificado = True
+        else:
+            nota_manual = None
+            origen = "CALCULADO"
+            nota_final = float(nota_calc)
+            es_modificado = False
+
+        cuadra = (round(nota_final) == nota_calc)
+
+        nombre_completo = f"{f.apellidos or ''} {f.nombres or ''}".strip()
+
+        alumnos_resultado.append({
+            "id_matricula": f.id_matricula,
+            "id_alumno": f.id_alumno,
+            "dni": f.dni or "—",
+            "alumno": nombre_completo,
+            "nivel": f.nivel,
+            "grado": f.grado,
+            "id_grado": f.id_grado,
+            "seccion": f.seccion,
+            "id_seccion": f.id_seccion,
+            "total_reportes": total_reportes,
+            "puntos_descontados": puntos_descontados,
+            "nota_calculada": nota_calc,
+            "nota_manual": nota_manual,
+            "nota_final": nota_final,
+            "origen": origen,
+            "es_modificado": es_modificado,
+            "cuadra_con_calculo": cuadra,
+        })
+
+    return {
+        "anio": anio,
+        "bimestre": bimestre,
+        "total": total,
+        "pagina": pagina,
+        "por_pagina": por_pagina,
+        "alumnos": alumnos_resultado,
+    }
+
+
+@router.post("/notas")
+def guardar_nota_conducta(
+    datos: schemas.NotaConductaUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Guarda o actualiza manualmente la nota de conducta de un estudiante."""
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para modificar notas de conducta")
+
+    if not (0 <= datos.nota <= 20):
+        raise HTTPException(status_code=400, detail="La nota de conducta debe estar entre 0 y 20")
+
+    from app.modules.enrollment.models import Matricula
+    from app.modules.academic.models import AnioEscolar
+
+    mat = db.query(Matricula).filter(Matricula.id_matricula == datos.id_matricula).first()
+    if not mat:
+        raise HTTPException(status_code=404, detail="Matrícula no encontrada")
+
+    # Calcular puntos y nota esperada para validar
+    ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == mat.id_anio_escolar).first()
+    rango_bim = bimestres_util.rango(
+        db, mat.id_anio_escolar, datos.bimestre,
+        getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
+    )
+    if rango_bim:
+        desde, hasta = rango_bim
+    else:
+        desde, hasta = date(int(mat.id_anio_escolar or 2026), 1, 1), date(int(mat.id_anio_escolar or 2026), 12, 31)
+
+    puntos_perdidos = db.query(func.coalesce(func.sum(models.NivelConducta.puntos), 0)).select_from(
+        models.ReporteConducta
+    ).join(models.NivelConducta).filter(
+        models.ReporteConducta.id_alumno == mat.id_alumno,
+        func.date(models.ReporteConducta.fecha_reporte) >= desde,
+        func.date(models.ReporteConducta.fecha_reporte) <= hasta,
+    ).scalar() or 0
+
+    nota_calc = calcular_puntaje(int(puntos_perdidos))
+
+    # Guardar en base de datos
+    registro = (
+        db.query(models.NotaConducta)
+        .filter(
+            models.NotaConducta.id_matricula == datos.id_matricula,
+            models.NotaConducta.bimestre == datos.bimestre,
+        )
+        .first()
+    )
+
+    if registro:
+        registro.valor = datos.nota
+        registro.origen = "MANUAL"
+        registro.fecha_registro = datetime.now()
+    else:
+        registro = models.NotaConducta(
+            id_matricula=datos.id_matricula,
+            bimestre=datos.bimestre,
+            valor=datos.nota,
+            origen="MANUAL",
+        )
+        db.add(registro)
+
+    db.commit()
+    db.refresh(registro)
+
+    return {
+        "mensaje": "Nota de conducta guardada con éxito",
+        "id_matricula": datos.id_matricula,
+        "bimestre": datos.bimestre,
+        "nota_guardada": float(registro.valor),
+        "nota_calculada": nota_calc,
+        "puntos_descontados": int(puntos_perdidos),
+        "coincide": (round(float(registro.valor)) == nota_calc),
+    }
+
+
+@router.delete("/nota/{id_matricula}/{bimestre}")
+def restablecer_nota_conducta(
+    id_matricula: int,
+    bimestre: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Elimina la nota manual de conducta para que vuelva al cálculo automático."""
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para modificar notas de conducta")
+
+    registro = (
+        db.query(models.NotaConducta)
+        .filter(
+            models.NotaConducta.id_matricula == id_matricula,
+            models.NotaConducta.bimestre == bimestre,
+        )
+        .first()
+    )
+
+    if registro:
+        db.delete(registro)
+        db.commit()
+
+    return {"mensaje": "Nota de conducta restablecida al cálculo automático"}

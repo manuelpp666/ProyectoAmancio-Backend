@@ -113,7 +113,7 @@ def _clave_curso(nombre: str) -> str:
 
 def _base(db: Session, anio: str, nivel, id_grado, id_seccion, dni):
     """Matrículas que cumplen los filtros. Es la misma para contar y para listar."""
-    q = (db.query(Matricula.id_matricula, Alumno.dni, Alumno.apellidos, Alumno.nombres,
+    q = (db.query(Matricula.id_matricula, Matricula.id_alumno, Alumno.dni, Alumno.apellidos, Alumno.nombres,
                   Nivel.nombre.label("nivel"), Grado.nombre.label("grado"),
                   Grado.orden.label("orden_grado"), Seccion.nombre.label("seccion"))
          .join(Alumno, Alumno.id_alumno == Matricula.id_alumno)
@@ -235,8 +235,6 @@ def notas_finales(
             # La tabla real no tiene esas columnas todavía (falta el script 19):
             # se descarta la consulta rota y se sigue con la sesión limpia.
             db.rollback()
-            ordenes = {}
-
     def _orden_area(id_area):
         nombre = nombres_area.get(id_area)
         if nombre is None:
@@ -265,6 +263,8 @@ def notas_finales(
 
     # --- las notas de esos alumnos, en UNA consulta ---
     ids = [f.id_matricula for f in filas]
+    ids_alumno = [f.id_alumno for f in filas]
+
     q_notas = (db.query(Nota.id_matricula, Nota.id_curso, Nota.bimestre, Nota.valor)
                .filter(Nota.id_matricula.in_(ids)))
     if bimestre:
@@ -284,11 +284,81 @@ def notas_finales(
     # pendiente. Esta consulta es la que permite distinguirlos.
     exonerados = _exoneraciones(db, ids)
 
+    # --- notas de conducta de los alumnos en la página ---
+    from app.modules.behavior.models import NotaConducta, ReporteConducta, NivelConducta
+    from app.modules.behavior.constants import calcular_puntaje
+    from app.modules.behavior import bimestres as bimestres_util
+    from sqlalchemy import func
+    from datetime import date
+
+    conducta_por_matricula: dict = {}
+    puntos_perdidos_dict: dict = {}
+
+    if not es_verano:
+        try:
+            # 1. Notas de conducta guardadas (manuales o migradas)
+            q_conducta = (db.query(NotaConducta.id_matricula, NotaConducta.bimestre, NotaConducta.valor)
+                          .filter(NotaConducta.id_matricula.in_(ids)))
+            if bimestre:
+                q_conducta = q_conducta.filter(NotaConducta.bimestre == bimestre)
+            for c in q_conducta.all():
+                actual = conducta_por_matricula.get(c.id_matricula)
+                if actual is None or c.bimestre >= actual[1]:
+                    conducta_por_matricula[c.id_matricula] = (float(c.valor), c.bimestre)
+
+            # 2. Reportes de demérito para cálculo automático
+            bimestre_eval = (
+                bimestre
+                or bimestres_util.bimestre_actual(
+                    db, anio, getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
+                )
+                or 1
+            )
+            rango_bim = bimestres_util.rango(
+                db, anio, bimestre_eval, getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
+            )
+            if rango_bim:
+                desde, hasta = rango_bim
+            else:
+                desde, hasta = date(int(anio or 2026), 1, 1), date(int(anio or 2026), 12, 31)
+
+            q_rep = (
+                db.query(
+                    ReporteConducta.id_alumno,
+                    func.coalesce(func.sum(NivelConducta.puntos), 0),
+                )
+                .join(NivelConducta, NivelConducta.id_nivel_conducta == ReporteConducta.id_nivel_conducta)
+                .filter(
+                    ReporteConducta.id_alumno.in_(ids_alumno),
+                    func.date(ReporteConducta.fecha_reporte) >= desde,
+                    func.date(ReporteConducta.fecha_reporte) <= hasta,
+                )
+                .group_by(ReporteConducta.id_alumno)
+                .all()
+            )
+            puntos_perdidos_dict = {r[0]: int(r[1] or 0) for r in q_rep}
+        except Exception:
+            db.rollback()
+            conducta_por_matricula = {}
+            puntos_perdidos_dict = {}
+
     alumnos = []
     for f in filas:
         notas = por_alumno.get(f.id_matricula, {})
         valores = [v for v, _ in notas.values()]
         exo = exonerados.get(f.id_matricula, set())
+
+        # Resolución de nota de conducta:
+        # Prioridad: Nota manual/migrada > Cálculo automático (20 - puntos de reportes)
+        if es_verano:
+            conducta_valor = None
+        else:
+            cond_info = conducta_por_matricula.get(f.id_matricula)
+            if cond_info is not None:
+                conducta_valor = cond_info[0]
+            else:
+                pts_perdidos = puntos_perdidos_dict.get(f.id_alumno, 0)
+                conducta_valor = float(calcular_puntaje(pts_perdidos))
 
         # --- ponderado de áreas, exactamente como la libreta ---
         # Se agrupa por área, se promedia dentro de cada una y se redondea a
@@ -312,6 +382,8 @@ def notas_finales(
             # dejar la casilla en blanco.
             "exonerados": [str(c) for c in sorted(exo)],
             "cursos_con_nota": len(valores),
+            # Nota de conducta del bimestre o más reciente
+            "conducta": conducta_valor,
             # Suma de los promedios de área: es el "PUNTAJE ACUMULADO" que sale
             # impreso en el pie de la libreta.
             "puntaje_acumulado": sum(promedios_area) if promedios_area else None,

@@ -34,6 +34,7 @@ from app.modules.finance.crep import (
     generar_crep, parsear_reporte_cobros,
 )
 from app.modules.users.alumno.models import Alumno
+from app.modules.users.relacion_familiar.models import RelacionFamiliar
 
 # Estados de `pago` que representan una deuda viva: son las que viajan al BCP.
 PENDIENTES = ("PENDIENTE", "VENCIDO")
@@ -1320,20 +1321,48 @@ def reporte_deudores(db: Session, anio: Optional[str] = None,
                      hasta: Optional[dt.date] = None) -> dict:
     """Todo el que debe algo, con su desglose y agrupado por sección.
 
-    `hasta` acota qué se considera deuda: por omisión entra todo lo pendiente,
-    incluidas las cuotas que aún no han vencido. Se informa aparte de lo YA
-    vencido, que es lo que de verdad se reclama.
+    Solo incluye a los alumnos que efectivamente tienen deuda vencida o exigible
+    hasta la fecha de corte (por defecto hoy). Excluye a quienes tienen sus
+    pagos al día y no deben ninguna cuota vencida.
     """
     hoy = dt.date.today()
-    hasta = hasta or None
+    limite = hasta or hoy
 
     ubicacion, anio = _seccion_de_cada_alumno(db, anio)
 
-    # --- cuotas vivas de alumnos ---
+    # --- información de apoderados y teléfonos ---
+    relaciones = (
+        db.query(RelacionFamiliar)
+        .options(joinedload(RelacionFamiliar.familiar))
+        .all()
+    )
+    info_apoderados: Dict[int, dict] = {}
+    for rel in relaciones:
+        f = rel.familiar
+        if not f:
+            continue
+        id_al = rel.id_alumno
+        tel = (f.telefono or "").strip()
+        nom = (str(f.apellidos or "") + ", " + str(f.nombres or "")).strip(", ")
+        parentesco = (rel.tipo_parentesco or "").strip()
+        if id_al in info_apoderados:
+            if not info_apoderados[id_al]["telefono"] and tel:
+                info_apoderados[id_al]["telefono"] = tel
+                info_apoderados[id_al]["apoderado"] = nom
+                info_apoderados[id_al]["parentesco"] = parentesco
+            elif tel and tel not in info_apoderados[id_al]["telefono"]:
+                info_apoderados[id_al]["telefono"] += f" / {tel}"
+        else:
+            info_apoderados[id_al] = {
+                "telefono": tel,
+                "apoderado": nom,
+                "parentesco": parentesco,
+            }
+
+    # --- cuotas vivas de alumnos exigibles a la fecha de corte ---
     q = (db.query(fin.Pago).options(joinedload(fin.Pago.alumno))
-         .filter(fin.Pago.estado.in_(PENDIENTES)))
-    if hasta:
-        q = q.filter(fin.Pago.fecha_vencimiento <= hasta)
+         .filter(fin.Pago.estado.in_(PENDIENTES))
+         .filter(fin.Pago.fecha_vencimiento <= limite))
 
     SIN_SECCION = {"nivel": "—", "grado": "—", "seccion": "SIN SECCIÓN", "orden_grado": 999}
     deudores: Dict[int, dict] = {}
@@ -1341,28 +1370,40 @@ def reporte_deudores(db: Session, anio: Optional[str] = None,
     for p in q.all():
         if not p.alumno:
             continue                        # cuota huérfana: no hay a quién cobrarle
+        monto = Decimal(str(p.monto or 0))
+        mora = Decimal(str(p.mora or 0))
+        total = monto + mora
+        if total <= Decimal("0"):
+            continue                        # registro sin saldo deudor
+
         donde = ubicacion.get(p.alumno.id_alumno, SIN_SECCION)
+        fam = info_apoderados.get(p.alumno.id_alumno, {"telefono": "", "apoderado": "", "parentesco": ""})
+
         d = deudores.setdefault(p.alumno.id_alumno, {
             "dni": p.alumno.dni or "",
-            "alumno": f"{p.alumno.apellidos or ''}, {p.alumno.nombres or ''}".strip(", "),
+            "alumno": (str(p.alumno.apellidos or "") + ", " + str(p.alumno.nombres or "")).strip(", "),
+            "apoderado": fam["apoderado"],
+            "telefono": fam["telefono"],
+            "parentesco": fam["parentesco"],
             **donde,
             "cuotas": [],
         })
-        monto = Decimal(str(p.monto or 0))
-        mora = Decimal(str(p.mora or 0))
         vencida = bool(p.fecha_vencimiento and p.fecha_vencimiento < hoy)
         d["cuotas"].append({
             "concepto": p.concepto or "",
             "vencimiento": p.fecha_vencimiento,
             "monto": monto,
             "mora": mora,
-            "total": monto + mora,
+            "total": total,
             "vencida": vencida,
             "dias_atraso": (hoy - p.fecha_vencimiento).days if vencida else 0,
         })
 
-    # --- totales de cada alumno ---
-    for d in deudores.values():
+    # --- totales de cada alumno (solo alumnos con deuda real > 0) ---
+    deudores_activos: Dict[int, dict] = {}
+    for id_al, d in deudores.items():
+        if not d["cuotas"]:
+            continue
         # Lo más antiguo primero: es el orden en que se reclama.
         d["cuotas"].sort(key=lambda c: (c["vencimiento"] or dt.date.max, c["concepto"]))
         vencidas = [c for c in d["cuotas"] if c["vencida"]]
@@ -1371,11 +1412,14 @@ def reporte_deudores(db: Session, anio: Optional[str] = None,
         d["deuda"] = sum((c["monto"] for c in d["cuotas"]), Decimal("0"))
         d["mora"] = sum((c["mora"] for c in d["cuotas"]), Decimal("0"))
         d["total"] = d["deuda"] + d["mora"]
+        if d["total"] <= Decimal("0"):
+            continue                        # sin deuda real
         d["vencido"] = sum((c["total"] for c in vencidas), Decimal("0"))
         d["dias_atraso"] = max((c["dias_atraso"] for c in vencidas), default=0)
         d["desde"] = vencidas[0]["vencimiento"] if vencidas else None
+        deudores_activos[id_al] = d
 
-    lista = sorted(deudores.values(),
+    lista = sorted(deudores_activos.values(),
                    key=lambda d: (d["nivel"] or "", d["orden_grado"],
                                   d["seccion"] or "", d["alumno"]))
 
@@ -1398,8 +1442,7 @@ def reporte_deudores(db: Session, anio: Optional[str] = None,
 
     # --- deuda anterior: gente que ya no está matriculada ---
     q_ext = db.query(fin.CuotaExterna).filter(fin.CuotaExterna.estado == "PENDIENTE")
-    if hasta:
-        q_ext = q_ext.filter(fin.CuotaExterna.fecha_vencimiento <= hasta)
+    q_ext = q_ext.filter(fin.CuotaExterna.fecha_vencimiento <= limite)
     externas = []
     for c in q_ext.all():
         monto = Decimal(str(c.monto or 0))

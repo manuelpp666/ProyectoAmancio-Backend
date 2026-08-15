@@ -51,6 +51,31 @@ class BimestresResponse(BaseModel):
     guardado: bool
     bimestres: List[BimestreItem]
 
+# --- Nivel ---
+class NivelBase(BaseModel):
+    nombre: str = Field(..., min_length=1, max_length=100)
+
+class NivelCreate(NivelBase):
+    pass
+
+class NivelSimpleResponse(NivelBase):
+    id_nivel: int
+    model_config = ConfigDict(from_attributes=True)
+
+# --- Grado ---
+class GradoBase(BaseModel):
+    nombre: str = Field(..., min_length=1, max_length=100)
+    orden: int
+    id_nivel: int
+
+class GradoCreate(GradoBase):
+    pass
+
+class GradoResponse(GradoBase):
+    id_grado: int
+    nivel: Optional[NivelSimpleResponse] = None
+    model_config = ConfigDict(from_attributes=True)
+
 # --- Seccion ---
 class SeccionBase(BaseModel):
     id_grado: int
@@ -63,6 +88,12 @@ class SeccionCreate(SeccionBase): pass
 class SeccionResponse(SeccionBase):
     id_seccion: int
     ocupadas: int = 0
+    grado: Optional[GradoResponse] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class GradoConSecciones(GradoBase):
+    id_grado: int
+    secciones: List[SeccionResponse] = []
     model_config = ConfigDict(from_attributes=True)
 
 # --- Curso ---
@@ -93,46 +124,21 @@ class PlanEstudioResponse(BaseModel):
     curso: CursoResponse # Para que al consultar el plan, veamos el nombre del curso
     model_config = ConfigDict(from_attributes=True)
 
-# --- Grado ---
-
-class GradoBase(BaseModel):
-    nombre: str = Field(..., min_length=1, max_length=100)
-    orden: int
-    id_nivel: int
-
-class GradoConSecciones(GradoBase):
-    id_grado: int
-    secciones: List[SeccionResponse] = []
-
-class GradoCreate(GradoBase):
-    pass
-
-class GradoResponse(GradoBase):
-    id_grado: int
-    model_config = ConfigDict(from_attributes=True)
-
 class GradoConCursos(GradoBase):
     id_grado: int
     planes_estudio: List[PlanEstudioResponse] = [] # Trae los cursos asignados a este grado
     model_config = ConfigDict(from_attributes=True)
 
-
-# --- Nivel ---
-class NivelBase(BaseModel):
-    nombre: str = Field(..., min_length=1, max_length=100)
-
-class NivelCreate(NivelBase):
-    pass
-
 class NivelResponse(NivelBase):
     id_nivel: int
-    grados: List["GradoConSecciones"] = []
+    grados: List[GradoConSecciones] = []
     model_config = ConfigDict(from_attributes=True)
 
 class NivelConCursosResponse(NivelBase):
     id_nivel: int
     grados: List[GradoConCursos] = [] # Aquí está la clave
     model_config = ConfigDict(from_attributes=True)
+
 # --- Area ---
 class AreaBase(BaseModel):
     nombre: str

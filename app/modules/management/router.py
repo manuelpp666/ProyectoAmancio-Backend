@@ -14,6 +14,7 @@ from app.modules.management import models as models_mn
 from app.modules.finance import models as models_fi
 from app.modules.web import models as models_web
 from app.modules.behavior import models as models_psi
+from app.modules.horario import models as models_hr
 from app.modules.users.relacion_familiar import models as models_rel
 from app.core.util.security import get_current_user, ensure_owner_or_roles
 from .service import enviar_notificaciones_asistencia, ESTADOS_NOTIFICABLES
@@ -32,6 +33,20 @@ def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db), cur
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="No tienes permisos para ejecutar esto"
         )
+    
+    # Si ya existe una asignación para esta sección, curso y año, actualizar el docente
+    existente = db.query(models.CargaAcademica).filter(
+        models.CargaAcademica.id_anio_escolar == carga.id_anio_escolar,
+        models.CargaAcademica.id_seccion == carga.id_seccion,
+        models.CargaAcademica.id_curso == carga.id_curso
+    ).first()
+
+    if existente:
+        existente.id_docente = carga.id_docente
+        db.commit()
+        db.refresh(existente)
+        return existente
+
     nueva = models.CargaAcademica(**carga.model_dump())
     db.add(nueva)
     db.commit()
@@ -567,8 +582,40 @@ def eliminar_carga(carga_id: int, db: Session = Depends(get_db), current_user: d
     if not db_carga:
         raise HTTPException(status_code=404, detail="Asignación no encontrada")
     
-    db.delete(db_carga)
-    db.commit()
+    # 1. Verificar si existen notas registradas en esta sección y curso
+    tiene_notas = (
+        db.query(models.Nota.id_nota)
+        .join(models_en.Matricula, models_en.Matricula.id_matricula == models.Nota.id_matricula)
+        .filter(
+            models.Nota.id_curso == db_carga.id_curso,
+            models_en.Matricula.id_seccion == db_carga.id_seccion,
+            models_en.Matricula.id_anio_escolar == db_carga.id_anio_escolar
+        )
+        .first()
+    )
+    if tiene_notas:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Una asignación que tiene notas registradas no se puede borrar, solo se puede actualizar."
+        )
+
+    # 2. Verificar si tiene tareas o evaluaciones asociadas
+    tiene_tareas = db.query(models_vr.Tarea.id_tarea).filter(models_vr.Tarea.id_carga_academica == carga_id).first()
+    if tiene_tareas:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Una asignación que tiene tareas o evaluaciones no se puede borrar, solo se puede actualizar."
+        )
+
+    try:
+        db.delete(db_carga)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Una asignación con registros asociados no se puede borrar, solo se puede actualizar."
+        )
     return None
 
 @router.patch("/carga/{carga_id}", response_model=schemas.CargaResponse)

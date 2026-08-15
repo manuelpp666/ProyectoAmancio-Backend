@@ -29,3 +29,39 @@ class CitaResultado(BaseModel):
     query param se rompería con los saltos de línea y los acentos.
     """
     resultado: str = Field(min_length=10, max_length=1000)
+
+
+class NotaConductaUpdate(BaseModel):
+    id_matricula: int
+    bimestre: int = Field(ge=1, le=4)
+    nota: float = Field(ge=0, le=20)
+    forzar: bool = False
+
+
+class NotaConductaItem(BaseModel):
+    id_matricula: int
+    id_alumno: int
+    dni: str
+    alumno: str
+    nivel: str
+    grado: str
+    id_grado: int
+    seccion: str
+    id_seccion: int
+    total_reportes: int
+    puntos_descontados: int
+    nota_calculada: int
+    nota_manual: Optional[float] = None
+    nota_final: float
+    origen: str
+    es_modificado: bool
+    cuadra_con_calculo: bool
+
+
+class RespuestaListaConducta(BaseModel):
+    anio: str
+    bimestre: int
+    total: int
+    pagina: int
+    por_pagina: int
+    alumnos: list[NotaConductaItem]
