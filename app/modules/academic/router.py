@@ -108,20 +108,30 @@ def obtener_ultimo_anio_creado(db: Session = Depends(get_db),
     return anio
 
 def _generar_estructura_para_anio(db: Session, anio_id: str) -> int:
-    """Crea automáticamente las secciones de un año nuevo.
+    """Crea automáticamente las secciones de un año nuevo respetando su tipo (REGULAR vs VERANO).
     - Si ya tiene secciones, no hace nada.
-    - Si existe un año previo con secciones, replica su estructura (grados + secciones).
-    - Si no hay ningún año previo con secciones, crea una sección 'A' por cada grado.
+    - Si es de tipo REGULAR:
+      * Busca el año REGULAR previo más reciente que tenga secciones como plantilla.
+      * Si no hay año regular previo, crea una sección 'A' por cada grado (1-11).
+    - Si es de tipo VERANO:
+      * Busca el año VERANO previo más reciente como plantilla.
+      * Si no hay año de verano previo, inicializa las secciones exclusivas de los 7 grupos de verano
+        (3 en Primaria, 3 en Secundaria y 1 en Pre Academia).
     Devuelve cuántas secciones se crearon."""
     ya_tiene = db.query(models.Seccion).filter_by(id_anio_escolar=anio_id).count()
     if ya_tiene:
         return 0
 
-    # Buscar el año más reciente (distinto de este) que tenga secciones, como plantilla
+    anio_actual = db.query(models.AnioEscolar).filter_by(id_anio_escolar=anio_id).first()
+    tipo_actual = anio_actual.tipo if anio_actual else "REGULAR"
+
+    # Buscar año previo del MISMO TIPO como plantilla
     plantilla = None
     otros = db.query(models.AnioEscolar).filter(
-        models.AnioEscolar.id_anio_escolar != anio_id
+        models.AnioEscolar.id_anio_escolar != anio_id,
+        models.AnioEscolar.tipo == tipo_actual
     ).order_by(models.AnioEscolar.fecha_inicio.desc()).all()
+
     for a in otros:
         if db.query(models.Seccion).filter_by(id_anio_escolar=a.id_anio_escolar).count() > 0:
             plantilla = a.id_anio_escolar
@@ -138,15 +148,38 @@ def _generar_estructura_para_anio(db: Session, anio_id: str) -> int:
             ))
             count += 1
     else:
-        # Sin plantilla: una sección "A" por cada grado existente
-        for grado in db.query(models.Grado).all():
-            db.add(models.Seccion(
-                id_grado=grado.id_grado,
-                id_anio_escolar=anio_id,
-                nombre="A",
-                vacantes=30,
-            ))
-            count += 1
+        if tipo_actual == "VERANO":
+            # Estructura inicial limpia exclusiva para los 7 grupos de Verano:
+            # Primaria agrupada (id_grado: 1, 3, 5) con nombres de color
+            # Secundaria individual 1º a 3º (id_grado: 7, 8, 9)
+            # Pre Academia (id_grado: 10)
+            secciones_verano_default = [
+                (1, "Amarillo", 30), # 1ro y 2do Primaria
+                (3, "Amarillo", 30), # 3ro y 4to Primaria
+                (5, "Amarillo", 30), # 5to y 6to Primaria
+                (7, "A", 30),        # 1ro Secundaria
+                (8, "A", 30),        # 2do Secundaria
+                (9, "A", 30),        # 3ro Secundaria
+                (10, "A", 30),       # Pre Academia
+            ]
+            for id_grado, nombre, vacantes in secciones_verano_default:
+                db.add(models.Seccion(
+                    id_grado=id_grado,
+                    id_anio_escolar=anio_id,
+                    nombre=nombre,
+                    vacantes=vacantes,
+                ))
+                count += 1
+        else:
+            # Regular: una sección 'A' por cada grado existente (1 a 11)
+            for grado in db.query(models.Grado).all():
+                db.add(models.Seccion(
+                    id_grado=grado.id_grado,
+                    id_anio_escolar=anio_id,
+                    nombre="A",
+                    vacantes=30,
+                ))
+                count += 1
 
     db.commit()
     return count
@@ -300,6 +333,14 @@ def obtener_bimestres(anio_id: str, db: Session = Depends(get_db),
     if not anio:
         raise HTTPException(status_code=404, detail="El año escolar indicado no existe")
 
+    # En años de verano no aplican bimestres (clases continuas)
+    if anio.tipo == "VERANO":
+        return schemas.BimestresResponse(
+            id_anio_escolar=anio_id,
+            guardado=True,
+            bimestres=[],
+        )
+
     guardados = db.query(models.Bimestre).filter(
         models.Bimestre.id_anio_escolar == anio_id
     ).order_by(models.Bimestre.numero).all()
@@ -343,6 +384,12 @@ def guardar_bimestres(anio_id: str, datos: schemas.BimestresUpdate, db: Session 
     anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == anio_id).first()
     if not anio:
         raise HTTPException(status_code=404, detail="El año escolar indicado no existe")
+
+    if anio.tipo == "VERANO":
+        raise HTTPException(
+            status_code=400,
+            detail="Los años de ciclo verano no utilizan calendario de bimestres ya que sus clases son continuas.",
+        )
 
     if not anio.fecha_fin:
         raise HTTPException(
@@ -631,7 +678,7 @@ def listar_secciones(
 
 
 def _adjuntar_ocupacion(db: Session, secciones):
-    """Calcula y adjunta el atributo 'ocupadas' (matrículas activas) a cada sección."""
+    """Calcula y adjunta el atributo 'ocupadas' (matrículas activas) y el 'desglose_grados' a cada sección."""
     from sqlalchemy import func
     from app.modules.enrollment import models as enrollment_models
 
@@ -639,6 +686,7 @@ def _adjuntar_ocupacion(db: Session, secciones):
     if not ids:
         return
 
+    # 1. Conteo total de matrículas activas por sección
     conteos = dict(
         db.query(
             enrollment_models.Matricula.id_seccion,
@@ -649,8 +697,34 @@ def _adjuntar_ocupacion(db: Session, secciones):
         ).group_by(enrollment_models.Matricula.id_seccion).all()
     )
 
+    # 2. Desglose de inscritos por grado para cada sección
+    grados_dict = {g.id_grado: g.nombre for g in db.query(models.Grado).all()}
+
+    desglose_filas = db.query(
+        enrollment_models.Matricula.id_seccion,
+        enrollment_models.Matricula.id_grado,
+        func.count(enrollment_models.Matricula.id_matricula)
+    ).filter(
+        enrollment_models.Matricula.id_seccion.in_(ids),
+        enrollment_models.Matricula.estado.notin_(["RETIRADO", "ANULADO"])
+    ).group_by(
+        enrollment_models.Matricula.id_seccion,
+        enrollment_models.Matricula.id_grado
+    ).all()
+
+    desglose_por_seccion: Dict[int, list] = {}
+    for id_sec, id_gra, total in desglose_filas:
+        if id_sec not in desglose_por_seccion:
+            desglose_por_seccion[id_sec] = []
+        desglose_por_seccion[id_sec].append({
+            "id_grado": id_gra,
+            "nombre": grados_dict.get(id_gra, f"Grado {id_gra}"),
+            "conteo": total
+        })
+
     for s in secciones:
         s.ocupadas = conteos.get(s.id_seccion, 0)
+        s.desglose_grados = desglose_por_seccion.get(s.id_seccion, [])
 
 @router.get("/secciones/{anio_id}", response_model=List[schemas.SeccionResponse])
 def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db),
@@ -658,22 +732,48 @@ def listar_secciones_por_anio_url(anio_id: str, db: Session = Depends(get_db),
     """
     Este endpoint ahora coincide con la ruta: /academic/secciones/2025-1
     """
-    return db.query(models.Seccion)\
-             .options(joinedload(models.Seccion.grado).joinedload(models.Grado.nivel))\
-             .filter(models.Seccion.id_anio_escolar == anio_id).all()
+    secciones = (
+        db.query(models.Seccion)
+        .options(joinedload(models.Seccion.grado).joinedload(models.Grado.nivel))
+        .filter(models.Seccion.id_anio_escolar == anio_id)
+        .all()
+    )
+    _adjuntar_ocupacion(db, secciones)
+    return secciones
 
 @router.get("/cursos-por-seccion/{seccion_id}", response_model=List[schemas.CursoResponse])
 def obtener_cursos_de_seccion(seccion_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     # 1. Buscamos la sección para saber qué grado es
-    seccion = db.query(models.Seccion).filter(models.Seccion.id_seccion == seccion_id).first()
+    seccion = (
+        db.query(models.Seccion)
+        .options(joinedload(models.Seccion.grado).joinedload(models.Grado.nivel))
+        .filter(models.Seccion.id_seccion == seccion_id)
+        .first()
+    )
     if not seccion:
         raise HTTPException(status_code=404, detail="Sección no encontrada")
-    
-    # 2. Buscamos los cursos vinculados a ese grado en el Plan de Estudios
-    cursos = db.query(models.Curso)\
-               .join(models.PlanEstudio, models.PlanEstudio.id_curso == models.Curso.id_curso)\
-               .filter(models.PlanEstudio.id_grado == seccion.id_grado).all()
+
+    anio = db.query(models.AnioEscolar).filter(models.AnioEscolar.id_anio_escolar == seccion.id_anio_escolar).first()
+    if anio and anio.tipo == "VERANO":
+        from app.modules.verano import service as verano_service
+        grupo_clave, _ = verano_service.grupo_por_grado(seccion.grado)
+        query_cursos = db.query(models.Curso).filter(models.Curso.es_verano == True)
+        if grupo_clave:
+            cursos = query_cursos.filter(
+                (models.Curso.grupo_verano == grupo_clave) | (models.Curso.tipo_verano == "TALLER")
+            ).all()
+        else:
+            cursos = query_cursos.all()
+        return cursos
+
+    # 2. Año regular: Buscamos los cursos vinculados a ese grado en el Plan de Estudios
+    cursos = (
+        db.query(models.Curso)
+        .join(models.PlanEstudio, models.PlanEstudio.id_curso == models.Curso.id_curso)
+        .filter(models.PlanEstudio.id_grado == seccion.id_grado)
+        .all()
+    )
     
     return cursos
 
@@ -713,22 +813,55 @@ def eliminar_seccion(seccion_id: int, db: Session = Depends(get_db),
 
 
 # --- ÁREAS ---
+def _asegurar_columnas_area(db: Session):
+    """Garantiza que la tabla `area` tenga las columnas `orden_primaria` y `orden_secundaria`."""
+    try:
+        db.execute(text("ALTER TABLE `area` ADD COLUMN IF NOT EXISTS `orden_primaria` INT NULL AFTER `nombre`, ADD COLUMN IF NOT EXISTS `orden_secundaria` INT NULL AFTER `orden_primaria`"))
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            res1 = db.execute(text("SHOW COLUMNS FROM `area` LIKE 'orden_primaria'")).fetchone()
+            if not res1:
+                db.execute(text("ALTER TABLE `area` ADD COLUMN `orden_primaria` INT NULL AFTER `nombre`"))
+                db.commit()
+            res2 = db.execute(text("SHOW COLUMNS FROM `area` LIKE 'orden_secundaria'")).fetchone()
+            if not res2:
+                db.execute(text("ALTER TABLE `area` ADD COLUMN `orden_secundaria` INT NULL AFTER `orden_primaria`"))
+                db.commit()
+        except Exception:
+            db.rollback()
+
 @router.post("/areas/", response_model=schemas.AreaResponse)
 def crear_area(area: schemas.AreaCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
 
-    nuevo = models.Area(**area.model_dump())
-    db.add(nuevo)
-    db.commit()
-    db.refresh(nuevo)
-    return nuevo
+    try:
+        nuevo = models.Area(**area.model_dump())
+        db.add(nuevo)
+        db.commit()
+        db.refresh(nuevo)
+        return nuevo
+    except Exception:
+        db.rollback()
+        _asegurar_columnas_area(db)
+        nuevo = models.Area(**area.model_dump())
+        db.add(nuevo)
+        db.commit()
+        db.refresh(nuevo)
+        return nuevo
 
 @router.get("/areas/", response_model=List[schemas.AreaResponse])
 def listar_areas(db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
-    return db.query(models.Area).all()
+    try:
+        return db.query(models.Area).all()
+    except Exception:
+        db.rollback()
+        _asegurar_columnas_area(db)
+        return db.query(models.Area).all()
 
 
 # --- CURSOS ---
@@ -889,11 +1022,13 @@ def obtener_secciones_para_constructor(anio_id: str, db: Session = Depends(get_d
     current_user: dict = Depends(get_current_user)):
     """
     Endpoint exclusivo para el constructor de horarios.
-    Trae las secciones de un año específico incluyendo la info del grado.
+    Trae las secciones de un año específico incluyendo la info del grado y ordenadas por nivel y grado.
     """
     secciones = db.query(models.Seccion)\
+        .join(models.Grado, models.Grado.id_grado == models.Seccion.id_grado)\
         .options(joinedload(models.Seccion.grado))\
         .filter(models.Seccion.id_anio_escolar == anio_id)\
+        .order_by(models.Grado.id_nivel, models.Grado.orden, models.Seccion.nombre)\
         .all()
     
     return secciones

@@ -528,21 +528,47 @@ def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db),
     """
     Obtiene todos los cursos por sección de un año escolar
     y muestra qué docente tienen asignado (si lo hay).
+    Soporta años regulares (por Plan de Estudio) y de verano (por Cursos de Verano).
     """
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes acceder a esta información.")
-    # 1. Buscamos todas las secciones del año escolar
-    secciones = db.query(models_ac.Seccion).filter(models_ac.Seccion.id_anio_escolar == anio_id).all()
+
+    anio = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.id_anio_escolar == anio_id).first()
+    es_verano = bool(anio and anio.tipo == "VERANO")
+
+    # 1. Buscamos todas las secciones del año escolar con su grado y nivel
+    secciones = (
+        db.query(models_ac.Seccion)
+        .options(joinedload(models_ac.Seccion.grado).joinedload(models_ac.Grado.nivel))
+        .filter(models_ac.Seccion.id_anio_escolar == anio_id)
+        .all()
+    )
+
+    from app.modules.verano import service as verano_service
     
     resultado = []
     for seccion in secciones:
-        # 2. Por cada sección, vemos qué cursos le corresponden según su grado (Plan de Estudio)
-        cursos_plan = db.query(models_ac.Curso).join(
-            models_ac.PlanEstudio, models_ac.PlanEstudio.id_curso == models_ac.Curso.id_curso
-        ).filter(models_ac.PlanEstudio.id_grado == seccion.id_grado).all()
+        if es_verano:
+            grupo_clave, grupo_etiqueta = verano_service.grupo_por_grado(seccion.grado)
+            query_cursos = db.query(models_ac.Curso).filter(models_ac.Curso.es_verano == True)
+            if grupo_clave:
+                cursos_asignables = query_cursos.filter(
+                    (models_ac.Curso.grupo_verano == grupo_clave) | (models_ac.Curso.tipo_verano == "TALLER")
+                ).all()
+            else:
+                cursos_asignables = query_cursos.all()
+            nombre_grado_mostrar = grupo_etiqueta or (seccion.grado.nombre if seccion.grado else "General")
+        else:
+            # Año regular: según Plan de Estudio
+            cursos_asignables = (
+                db.query(models_ac.Curso)
+                .join(models_ac.PlanEstudio, models_ac.PlanEstudio.id_curso == models_ac.Curso.id_curso)
+                .filter(models_ac.PlanEstudio.id_grado == seccion.id_grado)
+                .all()
+            )
+            nombre_grado_mostrar = seccion.grado.nombre if seccion.grado else "Grado"
 
-        for curso in cursos_plan:
-            # 3. Buscamos si ya existe una carga académica (docente asignado)
+        for curso in cursos_asignables:
             carga = db.query(models.CargaAcademica).filter(
                 models.CargaAcademica.id_seccion == seccion.id_seccion,
                 models.CargaAcademica.id_curso == curso.id_curso,
@@ -556,11 +582,11 @@ def listar_vinculos_para_asignacion(anio_id: str, db: Session = Depends(get_db),
             resultado.append({
                 "id_seccion": seccion.id_seccion,
                 "seccion_nombre": seccion.nombre,
-                "grado_nombre": seccion.grado.nombre, # Asumiendo relación en el modelo
+                "grado_nombre": nombre_grado_mostrar,
                 "id_curso": curso.id_curso,
                 "curso_nombre": curso.nombre,
                 "id_carga_academica": carga.id_carga_academica if carga else None,
-                "docente": docente # Puede ser None
+                "docente": docente
             })
     
     return resultado
@@ -654,6 +680,9 @@ def obtener_cursos_docente(
         raise HTTPException(status_code=404, detail="Docente no encontrado")
 
     # 2. Query para obtener los cursos asignados y contar alumnos activos
+    anio_obj = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.id_anio_escolar == anio).first()
+    es_verano = anio_obj is not None and anio_obj.tipo == "VERANO"
+
     # Subquery para contar alumnos por sección
     subquery_alumnos = (
         db.query(
@@ -673,6 +702,7 @@ def obtener_cursos_docente(
         db.query(
             models.CargaAcademica.id_carga_academica,
             models_ac.Curso.nombre.label("curso_nombre"),
+            models_ac.Grado.id_grado.label("id_grado"),
             models_ac.Grado.nombre.label("grado_nombre"),
             models_ac.Seccion.nombre.label("seccion_nombre"),
             func.coalesce(subquery_alumnos.c.total_alumnos, 0).label("num_alumnos")
@@ -688,13 +718,25 @@ def obtener_cursos_docente(
         .all()
     )
 
+    def _formatear_grado(id_grado: int, nombre_orig: str) -> str:
+        if es_verano:
+            if id_grado == 1: return "1ro y 2do de Primaria"
+            if id_grado == 3: return "3ro y 4to de Primaria"
+            if id_grado == 5: return "5to y 6to de Primaria"
+            if id_grado == 7: return "1ro de Secundaria"
+            if id_grado == 8: return "2do de Secundaria"
+            if id_grado == 9: return "3ro de Secundaria"
+            if id_grado in (10, 11): return "Pre Academia"
+        return nombre_orig or ""
+
     return [
         schemas.CursoDocenteResponse(
-            id_carga_academica=c.id_carga_academica,
+            id_carga=c.id_carga_academica,
             curso_nombre=c.curso_nombre,
-            grado_nombre=c.grado_nombre,
+            grado_nombre=_formatear_grado(c.id_grado, c.grado_nombre),
             seccion_nombre=c.seccion_nombre,
-            num_alumnos=c.num_alumnos
+            alumnos=int(c.num_alumnos or 0),
+            img=""
         )
         for c in cursos_query
     ]
@@ -709,6 +751,8 @@ def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_
     if not anio_activo:
         raise HTTPException(status_code=404, detail="No hay año escolar activo")
     
+    es_verano = anio_activo.tipo == "VERANO"
+
     # 2. Buscar docente
     docente = db.query(models_doc.Docente).filter(models_doc.Docente.id_usuario == id_usuario).first()
     if not docente:
@@ -719,6 +763,7 @@ def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_
         db.query(
             models_mn.CargaAcademica.id_carga_academica,
             models_ac.Curso.nombre.label("curso_nombre"),
+            models_ac.Grado.id_grado.label("id_grado"),
             models_ac.Grado.nombre.label("grado_nombre"),
             models_ac.Seccion.nombre.label("seccion_nombre"),
         )
@@ -732,11 +777,22 @@ def obtener_cursos_docente_dashboard(id_usuario: int, db: Session = Depends(get_
         .all()
     )
 
+    def _formatear_grado_dash(id_grado: int, nombre_orig: str, sec_nom: str) -> str:
+        if es_verano:
+            if id_grado == 1: return f"1ro y 2do Primaria {sec_nom}"
+            if id_grado == 3: return f"3ro y 4to Primaria {sec_nom}"
+            if id_grado == 5: return f"5to y 6to Primaria {sec_nom}"
+            if id_grado == 7: return f"1ro Secundaria {sec_nom}"
+            if id_grado == 8: return f"2do Secundaria {sec_nom}"
+            if id_grado == 9: return f"3ro Secundaria {sec_nom}"
+            if id_grado in (10, 11): return f"Pre Academia {sec_nom}"
+        return f"{nombre_orig} {sec_nom}"
+
     return [
         {
             "id_carga": c.id_carga_academica,
             "curso_nombre": c.curso_nombre,
-            "grado_nombre": f"{c.grado_nombre} {c.seccion_nombre}",
+            "grado_nombre": _formatear_grado_dash(c.id_grado, c.grado_nombre, c.seccion_nombre),
         }
         for c in cursos_query
     ]

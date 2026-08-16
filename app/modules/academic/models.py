@@ -34,7 +34,7 @@ class Bimestre(Base):
     )
 
     id_bimestre = Column(Integer, primary_key=True)
-    id_anio_escolar = Column(CHAR(6), ForeignKey("anio_escolar.id_anio_escolar"), nullable=False)
+    id_anio_escolar = Column(String(6), ForeignKey("anio_escolar.id_anio_escolar"), nullable=False)
     numero = Column(Integer, nullable=False)          # 1, 2, 3 o 4
     fecha_inicio = Column(Date, nullable=False)
     fecha_fin = Column(Date, nullable=False)

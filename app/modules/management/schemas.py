@@ -88,10 +88,10 @@ class CargaUpdate(BaseModel):
 class CursoDocenteResponse(BaseModel):
     id_carga: int
     curso_nombre: str
-    grado_nombre: str
-    seccion_nombre: str
-    alumnos: int
-    img: str
+    grado_nombre: Optional[str] = ""
+    seccion_nombre: Optional[str] = ""
+    alumnos: int = 0
+    img: Optional[str] = ""
 
     model_config = ConfigDict(from_attributes=True)
 
