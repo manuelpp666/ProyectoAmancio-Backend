@@ -48,18 +48,28 @@ def enviar_confirmacion_postulacion(email: str, nombre_alumno: str, es_verano: b
 
 @router.post("/postular", status_code=status.HTTP_201_CREATED)
 def postular_alumno(datos: schemas.AdmisionPostulante, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    # 0. Control de duplicados: un alumno no puede inscribirse dos veces
+    # 0. Control de duplicados y Reincorporación de Retirados
     ya_existe = db.query(Alumno).filter(Alumno.dni == datos.alumno.dni).first()
     if ya_existe:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Ya existe un alumno registrado con el DNI {datos.alumno.dni}. No es posible postular dos veces."
-        )
+        if ya_existe.estado_ingreso in ("RETIRADO", "RECHAZADO"):
+            # Permitir postulación como reingreso/readmisión
+            for key, val in datos.alumno.model_dump(exclude={"id_alumno", "dni"}).items():
+                if val is not None:
+                    setattr(ya_existe, key, val)
+            ya_existe.estado_ingreso = "POSTULANTE"
+            ya_existe.motivo_rechazo = None
+            nuevo_alumno = ya_existe
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Ya existe un alumno activo o con postulación en curso con el DNI {datos.alumno.dni}."
+            )
     try:
-        # 1. Crear Alumno
-        nuevo_alumno = Alumno(**datos.alumno.model_dump())
-        db.add(nuevo_alumno)
-        db.flush() # Para obtener nuevo_alumno.id_alumno
+        if not ya_existe:
+            # 1. Crear Alumno
+            nuevo_alumno = Alumno(**datos.alumno.model_dump())
+            db.add(nuevo_alumno)
+            db.flush() # Para obtener nuevo_alumno.id_alumno
 
         # 2. Familiar (se reutiliza si ya existe por DNI)
         familiar = resolver_familiar(db, datos.familiar.model_dump(), datos.alumno.direccion)

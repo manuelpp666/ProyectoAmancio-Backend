@@ -81,6 +81,13 @@ class AlumnoConFamiliarCreate(BaseModel):
     alumno: AlumnoCreate
     familiar: FamiliarAlumnoCreate
 
+
+class ReincorporarAlumnoRequest(BaseModel):
+    id_grado: int
+    id_seccion: Optional[int] = None
+    generar_pagos: Optional[bool] = True
+
+
 # 3. RESPONSE: Lo que se envía al Frontend
 class AlumnoResponse(AlumnoBase):
     id_alumno: int

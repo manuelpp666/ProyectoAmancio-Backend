@@ -213,3 +213,25 @@ class CuotaExterna(Base):
     fecha_pago = Column(DateTime, nullable=True)
     codigo_operacion_bcp = Column(String(50), nullable=True)
     origen = Column(String(120), nullable=True)   # de qué archivo salió
+
+
+class RegistroCREP(Base):
+    """Historial de archivos CREP generados / incorporados oficialmente.
+
+    Permite saber la fecha y hora de la última generación y comparar el estado de la
+    base de datos para detectar bajas por retiros de alumnos, altas y modificaciones
+    pendientes de sincronizar con el BCP.
+    """
+    __tablename__ = "registro_crep"
+
+    id_registro_crep = Column(Integer, primary_key=True, index=True)
+    nombre_archivo = Column(String(255), nullable=False)
+    fecha_generacion = Column(DateTime, server_default=func.now(), index=True)
+    id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=True)
+    total_cuotas = Column(Integer, default=0)
+    total_alumnos = Column(Integer, default=0)
+    monto_total = Column(Numeric(12, 2), default=0)
+    mora_total = Column(Numeric(12, 2), default=0)
+    estado = Column(String(20), default="INCORPORADO", index=True)  # INCORPORADO | DESCARGADO
+    # Lista de cuotas serializadas en JSON para la comparación delta exacta
+    cuotas_json = Column(Text().with_variant(Text(4294967295), "mysql"), nullable=True)

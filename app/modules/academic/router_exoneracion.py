@@ -101,7 +101,8 @@ def listar_por_carga(id_carga: int, db: Session = Depends(get_db),
              .join(Alumno, Alumno.id_alumno == Matricula.id_alumno)
              .filter(ExoneracionCurso.id_curso == carga.id_curso,
                      Matricula.id_seccion == carga.id_seccion,
-                     Matricula.id_anio_escolar == carga.id_anio_escolar)
+                     Matricula.id_anio_escolar == carga.id_anio_escolar,
+                     Alumno.estado_ingreso != "RETIRADO")
              .all())
 
     return {

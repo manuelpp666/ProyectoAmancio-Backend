@@ -454,13 +454,20 @@ def procesar_pago_verano(db: Session, pago) -> bool:
     if not alumno:
         return False
 
-    # Crear usuario si es externo y no tiene (login = dni)
-    if not alumno.id_usuario:
+    # Crear usuario si no tiene o reactivarlo si estaba inactivo (login = dni)
+    if alumno.id_usuario:
+        usr = db.query(usuario_models.Usuario).filter(
+            usuario_models.Usuario.id_usuario == alumno.id_usuario
+        ).first()
+        if usr:
+            usr.activo = True
+    else:
         username_alumno = generar_username(alumno.dni, "ALUMNO")
         user_existente = db.query(usuario_models.Usuario).filter(
             usuario_models.Usuario.username == username_alumno
         ).first()
         if user_existente:
+            user_existente.activo = True
             alumno.id_usuario = user_existente.id_usuario
         else:
             nuevo = usuario_models.Usuario(
@@ -472,7 +479,7 @@ def procesar_pago_verano(db: Session, pago) -> bool:
             db.add(nuevo)
             db.flush()
             alumno.id_usuario = nuevo.id_usuario
-        alumno.estado_ingreso = estados_alumno.ESTUDIANTE
+    alumno.estado_ingreso = estados_alumno.ESTUDIANTE
 
     # Crear matrícula de verano (si no existe)
     matricula = db.query(en_models.Matricula).filter(

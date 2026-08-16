@@ -439,12 +439,13 @@ def cerrar_notas_bimestre(
         models_vr.Tarea.estado == "ACTIVO"
     ).all()
 
-    # 4. Obtener alumnos matriculados en esa sección y año
+    # 4. Obtener alumnos matriculados en esa sección y año (excluyendo retirados)
     alumnos_matriculados = db.query(models_al.Alumno, models_en.Matricula).join(
         models_en.Matricula, models_al.Alumno.id_alumno == models_en.Matricula.id_alumno
     ).filter(
         models_en.Matricula.id_seccion == carga.id_seccion,
-        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
+        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar,
+        models_al.Alumno.estado_ingreso != "RETIRADO"
     ).all()
 
     # 5. Procesar cada alumno
@@ -652,14 +653,18 @@ def obtener_cursos_docente(
     if not docente:
         raise HTTPException(status_code=404, detail="Docente no encontrado")
 
-    # 2. Query para obtener los cursos asignados y contar alumnos
+    # 2. Query para obtener los cursos asignados y contar alumnos activos
     # Subquery para contar alumnos por sección
     subquery_alumnos = (
         db.query(
             models_en.Matricula.id_seccion, 
             func.count(models_en.Matricula.id_alumno).label("total_alumnos")
         )
-        .filter(models_en.Matricula.id_anio_escolar == anio)
+        .join(models_al.Alumno, models_al.Alumno.id_alumno == models_en.Matricula.id_alumno)
+        .filter(
+            models_en.Matricula.id_anio_escolar == anio,
+            models_al.Alumno.estado_ingreso != "RETIRADO"
+        )
         .group_by(models_en.Matricula.id_seccion)
         .subquery()
     )
@@ -684,15 +689,13 @@ def obtener_cursos_docente(
     )
 
     return [
-        {
-            "id_carga": c.id_carga_academica,
-            "curso_nombre": c.curso_nombre,
-            "grado_nombre": c.grado_nombre,
-            "seccion_nombre": c.seccion_nombre,
-            "alumnos": c.num_alumnos,
-            # Puedes asignar una imagen por defecto o lógica según el nombre
-            "img": "/matematicas.png" if "Matem" in c.curso_nombre else "/cienciasS.png"
-        }
+        schemas.CursoDocenteResponse(
+            id_carga_academica=c.id_carga_academica,
+            curso_nombre=c.curso_nombre,
+            grado_nombre=c.grado_nombre,
+            seccion_nombre=c.seccion_nombre,
+            num_alumnos=c.num_alumnos
+        )
         for c in cursos_query
     ]
 
@@ -757,9 +760,16 @@ def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db), curr
     # 3. Cursos asignados (es la cantidad de cargas)
     num_cursos = len(cargas)
 
-    # 4. Alumnos totales: Matrículas en esas secciones
-    # Filtramos por las secciones que el docente tiene asignadas
-    num_alumnos = db.query(models_en.Matricula).filter(models_en.Matricula.id_seccion.in_(ids_secciones)).count()
+    # 4. Alumnos totales: Matrículas activas en esas secciones (excluyendo retirados)
+    num_alumnos = (
+        db.query(models_en.Matricula)
+        .join(models_al.Alumno, models_al.Alumno.id_alumno == models_en.Matricula.id_alumno)
+        .filter(
+            models_en.Matricula.id_seccion.in_(ids_secciones),
+            models_al.Alumno.estado_ingreso != "RETIRADO"
+        )
+        .count()
+    )
 
     # 5. Pendientes de calificar
     # Usamos las IDs de carga académica para buscar las tareas de esas secciones
@@ -1011,6 +1021,65 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
 
 # --- NUEVO: GESTIÓN DE TUTORES DE SECCIÓN ---
 
+def es_curso_excluido_tutor(nombre_curso: str | None) -> bool:
+    """Verifica si un curso debe excluirse de la asignación automática al tutor
+    (Violín, Inglés, Computación y Ajedrez)."""
+    if not nombre_curso:
+        return False
+    import unicodedata
+    n = unicodedata.normalize('NFKD', str(nombre_curso)).encode('ASCII', 'ignore').decode('utf-8').lower()
+    excluidos = {'violin', 'ingles', 'computacion', 'ajedrez'}
+    return any(exc in n for exc in excluidos)
+
+
+def sincronizar_cursos_tutor(db: Session, id_anio_escolar: str, id_seccion: int, id_docente: int):
+    """Asigna automáticamente al docente tutor todos los cursos del grado y sección,
+    excepto los cursos de Violín, Inglés, Computación y Ajedrez."""
+    seccion = db.query(models_ac.Seccion).filter(models_ac.Seccion.id_seccion == id_seccion).first()
+    if not seccion:
+        return
+
+    # 1. Cursos del plan de estudio para este grado
+    cursos_plan = (
+        db.query(models_ac.Curso)
+        .join(models_ac.PlanEstudio, models_ac.PlanEstudio.id_curso == models_ac.Curso.id_curso)
+        .filter(models_ac.PlanEstudio.id_grado == seccion.id_grado)
+        .all()
+    )
+
+    # 2. Cargas académicas ya existentes para esta sección y año
+    cargas_existentes = (
+        db.query(models.CargaAcademica)
+        .filter(
+            models.CargaAcademica.id_anio_escolar == id_anio_escolar,
+            models.CargaAcademica.id_seccion == id_seccion,
+        )
+        .all()
+    )
+    mapa_cargas = {c.id_curso: c for c in cargas_existentes}
+
+    # Consolidar catálogo de cursos a considerar
+    cursos_dict = {c.id_curso: c for c in cursos_plan}
+    for c in cargas_existentes:
+        if c.curso and c.id_curso not in cursos_dict:
+            cursos_dict[c.id_curso] = c.curso
+
+    for id_curso, curso in cursos_dict.items():
+        if es_curso_excluido_tutor(curso.nombre):
+            continue
+
+        if id_curso in mapa_cargas:
+            mapa_cargas[id_curso].id_docente = id_docente
+        else:
+            db.add(models.CargaAcademica(
+                id_anio_escolar=id_anio_escolar,
+                id_seccion=id_seccion,
+                id_curso=id_curso,
+                id_docente=id_docente,
+            ))
+    db.flush()
+
+
 @router.get("/tutores/{anio_id}", response_model=List[schemas.TutorResponse])
 def listar_tutores(anio_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     tutores = db.query(models.TutorSeccion).filter(models.TutorSeccion.id_anio_escolar == anio_id).all()
@@ -1019,8 +1088,8 @@ def listar_tutores(anio_id: str, db: Session = Depends(get_db), current_user: di
         resultado.append({
             "id_tutor_seccion": t.id_tutor_seccion,
             "id_seccion": t.id_seccion,
-            "seccion_nombre": t.seccion.nombre,
-            "grado_nombre": t.seccion.grado.nombre,
+            "seccion_nombre": t.seccion.nombre if t.seccion else "—",
+            "grado_nombre": t.seccion.grado.nombre if t.seccion and t.seccion.grado else "—",
             "docente": t.docente
         })
     return resultado
@@ -1031,26 +1100,66 @@ def asignar_tutor(data: schemas.TutorSeccionCreate, db: Session = Depends(get_db
     if current_user.get("rol") != "ADMIN" :
         raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
     
-    existe = db.query(models.TutorSeccion).filter(
+    # Si ya existe asignación de tutor para esta sección y año, se actualiza el docente
+    tutor_existente = db.query(models.TutorSeccion).filter(
         models.TutorSeccion.id_anio_escolar == data.id_anio_escolar,
         models.TutorSeccion.id_seccion == data.id_seccion,
-        models.TutorSeccion.id_docente == data.id_docente
     ).first()
     
-    if existe:
-        raise HTTPException(status_code=400, detail="Este docente ya es tutor de esta sección.")
+    if tutor_existente:
+        tutor_existente.id_docente = data.id_docente
+        tutor_obj = tutor_existente
+    else:
+        tutor_obj = models.TutorSeccion(**data.model_dump())
+        db.add(tutor_obj)
+        db.flush()
     
-    nuevo = models.TutorSeccion(**data.model_dump())
-    db.add(nuevo)
+    # Sincronizar automáticamente todos los cursos del aula excepto Violín, Inglés, Computación y Ajedrez
+    sincronizar_cursos_tutor(db, data.id_anio_escolar, data.id_seccion, data.id_docente)
     db.commit()
-    db.refresh(nuevo)
+    db.refresh(tutor_obj)
     
     return {
-        "id_tutor_seccion": nuevo.id_tutor_seccion,
-        "id_seccion": nuevo.id_seccion,
-        "seccion_nombre": nuevo.seccion.nombre,
-        "grado_nombre": nuevo.seccion.grado.nombre,
-        "docente": nuevo.docente
+        "id_tutor_seccion": tutor_obj.id_tutor_seccion,
+        "id_seccion": tutor_obj.id_seccion,
+        "seccion_nombre": tutor_obj.seccion.nombre if tutor_obj.seccion else "—",
+        "grado_nombre": tutor_obj.seccion.grado.nombre if tutor_obj.seccion and tutor_obj.seccion.grado else "—",
+        "docente": tutor_obj.docente
+    }
+
+@router.put("/tutores/{id_tutor_seccion}", response_model=schemas.TutorResponse)
+def actualizar_tutor(
+    id_tutor_seccion: int,
+    data: schemas.TutorSeccionCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
+
+    tutor = db.query(models.TutorSeccion).filter(models.TutorSeccion.id_tutor_seccion == id_tutor_seccion).first()
+    if not tutor:
+        raise HTTPException(status_code=404, detail="Asignación de tutor no encontrada")
+
+    tutor.id_docente = data.id_docente
+    if data.id_seccion:
+        tutor.id_seccion = data.id_seccion
+    if data.id_anio_escolar:
+        tutor.id_anio_escolar = data.id_anio_escolar
+
+    db.flush()
+
+    # Reasignar automáticamente los cursos no excluidos al nuevo tutor
+    sincronizar_cursos_tutor(db, tutor.id_anio_escolar, tutor.id_seccion, tutor.id_docente)
+    db.commit()
+    db.refresh(tutor)
+
+    return {
+        "id_tutor_seccion": tutor.id_tutor_seccion,
+        "id_seccion": tutor.id_seccion,
+        "seccion_nombre": tutor.seccion.nombre if tutor.seccion else "—",
+        "grado_nombre": tutor.seccion.grado.nombre if tutor.seccion and tutor.seccion.grado else "—",
+        "docente": tutor.docente
     }
 
 @router.delete("/tutores/{id_tutor_seccion}", status_code=status.HTTP_204_NO_CONTENT)

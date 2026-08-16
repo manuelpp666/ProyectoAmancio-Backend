@@ -737,7 +737,7 @@ def buscar_alumnos(
     if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tienes permisos para buscar alumnos")
     alumnos = busqueda_util.filtrar(
-        db.query(alumno_models.Alumno), q,
+        db.query(alumno_models.Alumno).filter(alumno_models.Alumno.estado_ingreso != "RETIRADO"), q,
         alumno_models.Alumno.nombres,
         alumno_models.Alumno.apellidos,
         alumno_models.Alumno.dni,
@@ -759,7 +759,8 @@ def obtener_alumnos_riesgo(db: Session = Depends(get_db), current_user: dict = D
     ).join(
         alumno_models.Alumno, models.ReporteConducta.id_alumno == alumno_models.Alumno.id_alumno
     ).filter(
-        extract('year', models.ReporteConducta.fecha_reporte) == anio_actual
+        extract('year', models.ReporteConducta.fecha_reporte) == anio_actual,
+        alumno_models.Alumno.estado_ingreso != "RETIRADO"
     ).all()
 
     # 2. Agrupar puntos por alumno y detectar faltas con cambio de I.E.
@@ -801,8 +802,30 @@ def obtener_alumnos_riesgo(db: Session = Depends(get_db), current_user: dict = D
 
 
 # =========================================================================
-# GESTIÓN Y LISTADO DE NOTAS DE CONDUCTA (PANEL AUXILIAR / ADMIN)
+# GESTIÓN Y LISTADO DE NOTAS DE CONDUCTA (PANEL AUXILIAR / DOCENTE TUTOR / ADMIN)
 # =========================================================================
+
+def _obtener_secciones_tutor(db: Session, current_user: dict, anio: str) -> Optional[list[int]]:
+    """Si el usuario es DOCENTE, retorna la lista de id_seccion donde es tutor en ese año.
+    Para otros roles (ADMIN, AUXILIAR, PSICOLOGO) retorna None (sin restricción)."""
+    if current_user.get("rol") != "DOCENTE":
+        return None
+    from app.modules.users.docente import models as doc_models
+    from app.modules.management import models as mng_models
+
+    doc = db.query(doc_models.Docente).filter(doc_models.Docente.id_usuario == current_user.get("id")).first()
+    if not doc:
+        return []
+    tutorias = (
+        db.query(mng_models.TutorSeccion.id_seccion)
+        .filter(
+            mng_models.TutorSeccion.id_docente == doc.id_docente,
+            mng_models.TutorSeccion.id_anio_escolar == anio,
+        )
+        .all()
+    )
+    return [t[0] for t in tutorias]
+
 
 @router.get("/filtros")
 def filtros_conducta(
@@ -834,6 +857,12 @@ def filtros_conducta(
                      .filter(Seccion.id_anio_escolar == anio)
                      .order_by(Nivel.nombre, Grado.orden, Seccion.nombre).all()]
 
+    secciones_tutor = _obtener_secciones_tutor(db, current_user, anio)
+    es_tutor = True
+    if secciones_tutor is not None:
+        secciones = [s for s in secciones if s["id_seccion"] in secciones_tutor]
+        es_tutor = len(secciones_tutor) > 0
+
     bimestres = [1, 2, 3, 4]
     
     # Determinar bimestre actual
@@ -847,7 +876,8 @@ def filtros_conducta(
         "anio": anio,
         "bimestres": bimestres,
         "bimestre_actual": bim_actual,
-        "secciones": secciones
+        "secciones": secciones,
+        "es_tutor": es_tutor,
     }
 
 
@@ -866,7 +896,7 @@ def listar_notas_conducta(
 ):
     """Lista las notas de conducta de los alumnos para un bimestre y año escolar.
 
-    Permite al auxiliar y administrador visualizar:
+    Permite al auxiliar, docente tutor y administrador visualizar:
       - Reportes de conducta en el bimestre y puntos descontados.
       - Nota calculada según reglamento (20 - puntos).
       - Nota manual o migrada guardada en la base.
@@ -883,6 +913,21 @@ def listar_notas_conducta(
         activo = (db.query(AnioEscolar).filter(AnioEscolar.activo.is_(True))
                   .order_by(AnioEscolar.id_anio_escolar.desc()).first())
         anio = activo.id_anio_escolar if activo else "2026"
+
+    # Restricción por tutoría si es docente
+    secciones_tutor = _obtener_secciones_tutor(db, current_user, anio)
+    if secciones_tutor is not None:
+        if not secciones_tutor:
+            return {
+                "anio": anio,
+                "bimestre": bimestre,
+                "total": 0,
+                "pagina": pagina,
+                "por_pagina": por_pagina,
+                "alumnos": [],
+            }
+        if id_seccion and id_seccion not in secciones_tutor:
+            raise HTTPException(status_code=403, detail="Solo puedes consultar la conducta de la(s) sección(es) donde eres tutor.")
 
     ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == anio).first()
     fecha_inicio = getattr(ae, "fecha_inicio", None)
@@ -919,17 +964,23 @@ def listar_notas_conducta(
         .join(Seccion, Seccion.id_seccion == Matricula.id_seccion)
         .join(Grado, Grado.id_grado == Seccion.id_grado)
         .join(Nivel, Nivel.id_nivel == Grado.id_nivel)
-        .filter(Matricula.id_anio_escolar == anio)
+        .filter(
+            Matricula.id_anio_escolar == anio,
+            alumno_models.Alumno.estado_ingreso != "RETIRADO"
+        )
     )
 
-    if nivel:
+    if secciones_tutor is not None and not id_seccion:
+        consulta = consulta.filter(Seccion.id_seccion.in_(secciones_tutor))
+
+    if isinstance(nivel, str) and nivel:
         consulta = consulta.filter(Nivel.nombre == nivel)
-    if id_grado:
+    if isinstance(id_grado, int) and id_grado:
         consulta = consulta.filter(Grado.id_grado == id_grado)
-    if id_seccion:
+    if isinstance(id_seccion, int) and id_seccion:
         consulta = consulta.filter(Seccion.id_seccion == id_seccion)
 
-    termino = (q or "").strip()
+    termino = q.strip() if isinstance(q, str) else ""
     if termino:
         consulta = busqueda_util.filtrar(
             consulta, termino,
@@ -1069,7 +1120,7 @@ def guardar_nota_conducta(
     current_user: dict = Depends(get_current_user),
 ):
     """Guarda o actualiza manualmente la nota de conducta de un estudiante."""
-    if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN", "DOCENTE"]:
         raise HTTPException(status_code=403, detail="No tienes permisos para modificar notas de conducta")
 
     if not (0 <= datos.nota <= 20):
@@ -1081,6 +1132,15 @@ def guardar_nota_conducta(
     mat = db.query(Matricula).filter(Matricula.id_matricula == datos.id_matricula).first()
     if not mat:
         raise HTTPException(status_code=404, detail="Matrícula no encontrada")
+
+    # Si es docente, verificar que sea tutor de la sección de este alumno
+    if current_user.get("rol") == "DOCENTE":
+        secciones_tutor = _obtener_secciones_tutor(db, current_user, mat.id_anio_escolar)
+        if not secciones_tutor or mat.id_seccion not in secciones_tutor:
+            raise HTTPException(
+                status_code=403,
+                detail="Solo el docente tutor de la sección puede modificar las notas de conducta de sus alumnos"
+            )
 
     # Calcular puntos y nota esperada para validar
     ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == mat.id_anio_escolar).first()
@@ -1148,8 +1208,22 @@ def restablecer_nota_conducta(
     current_user: dict = Depends(get_current_user),
 ):
     """Elimina la nota manual de conducta para que vuelva al cálculo automático."""
-    if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN", "DOCENTE"]:
         raise HTTPException(status_code=403, detail="No tienes permisos para modificar notas de conducta")
+
+    from app.modules.enrollment.models import Matricula
+    mat = db.query(Matricula).filter(Matricula.id_matricula == id_matricula).first()
+    if not mat:
+        raise HTTPException(status_code=404, detail="Matrícula no encontrada")
+
+    # Si es docente, verificar que sea tutor de la sección de este alumno
+    if current_user.get("rol") == "DOCENTE":
+        secciones_tutor = _obtener_secciones_tutor(db, current_user, mat.id_anio_escolar)
+        if not secciones_tutor or mat.id_seccion not in secciones_tutor:
+            raise HTTPException(
+                status_code=403,
+                detail="Solo el docente tutor de la sección puede modificar las notas de conducta de sus alumnos"
+            )
 
     registro = (
         db.query(models.NotaConducta)

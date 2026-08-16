@@ -10,6 +10,7 @@ from app.core.util.security import get_current_user
 
 # Importamos modelos de alumno para asegurar relaciones si es necesario
 from app.modules.users.alumno import models as alumno_models
+from app.modules.users import models as users_models
 from app.modules.academic import models as academic_models
 from app.modules.finance import models as finance_models
 
@@ -48,11 +49,11 @@ def listar_matriculas(
     Lista las matrículas filtrando por Año y Grado.
     Esencial para la pantalla de 'Asignación de Estudiantes'.
     """
-    query = db.query(models.Matricula).options(
+    query = db.query(models.Matricula).join(models.Matricula.alumno).options(
         joinedload(models.Matricula.alumno), # Cargar datos del alumno
         joinedload(models.Matricula.grado),
         joinedload(models.Matricula.seccion)
-    )
+    ).filter(alumno_models.Alumno.estado_ingreso != "RETIRADO")
 
     if anio_id:
         query = query.filter(models.Matricula.id_anio_escolar == anio_id)
@@ -150,9 +151,37 @@ def _info_renovacion(db: Session, id_usuario: int):
     condicion_academica = evaluacion.resultado if evaluacion else None
     repite = bool(evaluacion and evaluacion.resultado == "REPITE")
 
+    # Validar si el alumno requiere reincorporación asistida
+    # (por estar en RETIRADO o por tener una brecha de años sin matrícula en el año activo)
+    ultima_mat_regular = db.query(models.Matricula).options(
+        joinedload(models.Matricula.grado)
+    ).filter(
+        models.Matricula.id_alumno == alumno.id_alumno,
+        models.Matricula.tipo_matricula == "REGULAR"
+    ).order_by(models.Matricula.id_matricula.desc()).first()
+
+    requiere_reincorporacion = False
+    motivo_reincorporacion = None
+
+    if alumno.estado_ingreso == "RETIRADO":
+        requiere_reincorporacion = True
+        motivo_reincorporacion = (
+            "Tu cuenta se encuentra en condición de RETIRADO. Para ingresar al nuevo año lectivo, "
+            "debes realizar tu proceso de Reincorporación directamente con la Administración del colegio."
+        )
+    elif not matricula:
+        requiere_reincorporacion = True
+        anio_ult = ultima_mat_regular.id_anio_escolar if ultima_mat_regular else "años anteriores"
+        motivo_reincorporacion = (
+            f"Tu última matrícula regular registrada corresponde al año {anio_ult}. "
+            "Al haber una interrupción en tus periodos lectivos o no contar con matrícula en el año activo, "
+            "tu grado de ingreso debe ser verificado por la Administración con tu Certificado Oficial de Estudios. "
+            "Por favor acércate a Secretaría / Dirección para tu Reincorporación."
+        )
+
     grado_destino = None
     egresa = False
-    if matricula and matricula.grado:
+    if matricula and matricula.grado and not requiere_reincorporacion:
         if repite:
             # Repite el año: se queda en el mismo grado
             grado_destino = matricula.grado.nombre
@@ -178,9 +207,6 @@ def _info_renovacion(db: Session, id_usuario: int):
     )
 
     # --- VENTANA DE INSCRIPCIÓN DEL AÑO DESTINO ---
-    # La renovación solo se habilita cuando el admin ha abierto las inscripciones
-    # del próximo año: debe existir el año destino con fechas configuradas y hoy
-    # debe estar dentro de ese rango.
     hoy = date.today()
     anio_destino_obj = db.query(academic_models.AnioEscolar).filter(
         academic_models.AnioEscolar.id_anio_escolar == anio_destino
@@ -203,13 +229,6 @@ def _info_renovacion(db: Session, id_usuario: int):
             inscripciones_abiertas = True
 
     # --- ESTAR AL DÍA EN LOS PAGOS ---
-    # Solo bloquean los cargos YA VENCIDOS. Las pensiones de los meses que aún
-    # no llegan siguen en PENDIENTE y no deben impedir la renovación: si se
-    # exigiera el año completo pagado, nadie podría renovar hasta diciembre.
-    #
-    # Se detecta el vencimiento de dos formas para no depender de que un
-    # proceso haya marcado el estado: por estado VENCIDO, o por fecha de
-    # vencimiento ya pasada aunque siga como PENDIENTE.
     pagos_vencidos = db.query(finance_models.Pago).filter(
         finance_models.Pago.id_alumno == alumno.id_alumno,
         or_(
@@ -254,10 +273,12 @@ def _info_renovacion(db: Session, id_usuario: int):
         "al_dia": al_dia,
         "deuda_vencida": float(deuda_vencida),
         "pagos_vencidos": detalle_deuda,
+        "requiere_reincorporacion": requiere_reincorporacion,
+        "motivo_reincorporacion": motivo_reincorporacion,
         "puede_solicitar": (
             bool(matricula) and not egresa and not ya_matriculado_destino
             and not solicitud_en_curso and inscripciones_abiertas
-            and al_dia
+            and al_dia and not requiere_reincorporacion
         )
     }
 
@@ -293,6 +314,8 @@ def obtener_info_renovacion(id_usuario: int, db: Session = Depends(get_db), curr
         "condicion_academica": info["condicion_academica"],
         "ya_matriculado_destino": info["ya_matriculado_destino"],
         "puede_solicitar": info["puede_solicitar"],
+        "requiere_reincorporacion": info["requiere_reincorporacion"],
+        "motivo_reincorporacion": info["motivo_reincorporacion"],
         "inscripcion_estado": info["inscripcion_estado"],
         "inscripciones_abiertas": info["inscripciones_abiertas"],
         "inscripcion_inicio": info["inscripcion_inicio"],
@@ -314,6 +337,12 @@ def solicitar_renovacion(data: schemas.SolicitudMatriculaCreate, db: Session = D
 
     info = _info_renovacion(db, data.id_usuario)
 
+    if info.get("requiere_reincorporacion"):
+        raise HTTPException(
+            status_code=400,
+            detail=info.get("motivo_reincorporacion") or "Tu situación académica requiere un proceso de reincorporación asistido por Administración."
+        )
+
     if not info["matricula"]:
         raise HTTPException(status_code=400, detail="No tienes una matrícula activa este año, no es posible renovar")
     if info["egresa"]:
@@ -329,8 +358,6 @@ def solicitar_renovacion(data: schemas.SolicitudMatriculaCreate, db: Session = D
             raise HTTPException(status_code=400, detail="El periodo de inscripciones para el próximo año ya cerró")
         else:
             raise HTTPException(status_code=400, detail="Las inscripciones del próximo año aún no han sido habilitadas por el colegio")
-    # No se renueva con deuda vencida. Se valida también aquí y no solo en el
-    # front: alguien podría llamar al endpoint directamente.
     if not info["al_dia"]:
         cantidad = len(info["pagos_vencidos"])
         raise HTTPException(
@@ -522,3 +549,221 @@ def crear_exoneracion(exoneracion: schemas.ExoneracionCreate, db: Session = Depe
     db.commit()
     db.refresh(nueva)
     return nueva
+
+
+# --- CONTROL Y RETIRO DE NO RENOVADOS (ADMIN) ---
+
+@router.get("/no-renovados/")
+def listar_no_renovados(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Lista todos los alumnos que estuvieron como ESTUDIANTE en el año activo
+    pero que no tienen matrícula registrada para el siguiente año escolar (excluyendo egresados).
+    """
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver esta información")
+
+    anio_activo = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.activo == True,
+        academic_models.AnioEscolar.tipo == "REGULAR"
+    ).first()
+    if not anio_activo:
+        anio_activo = db.query(academic_models.AnioEscolar).filter(academic_models.AnioEscolar.activo == True).first()
+    if not anio_activo:
+        return {
+            "anio_activo": None,
+            "anio_destino": None,
+            "inscripcion_estado": "NO_CONFIGURADO",
+            "fin_inscripcion": None,
+            "total_no_renovados": 0,
+            "alumnos": []
+        }
+
+    try:
+        anio_destino = str(int(str(anio_activo.id_anio_escolar)[:4]) + 1)
+        anio_anterior = str(int(str(anio_activo.id_anio_escolar)[:4]) - 1)
+    except ValueError:
+        anio_destino = None
+        anio_anterior = None
+
+    anio_destino_obj = None
+    inscripcion_estado = "NO_CONFIGURADO"
+    fin_inscripcion = None
+    if anio_destino:
+        anio_destino_obj = db.query(academic_models.AnioEscolar).filter(
+            academic_models.AnioEscolar.id_anio_escolar == anio_destino
+        ).first()
+
+    hoy = date.today()
+    if anio_destino_obj and anio_destino_obj.inicio_inscripcion and anio_destino_obj.fin_inscripcion:
+        fin_inscripcion = anio_destino_obj.fin_inscripcion.isoformat()
+        if hoy < anio_destino_obj.inicio_inscripcion:
+            inscripcion_estado = "PROXIMAMENTE"
+        elif hoy > anio_destino_obj.fin_inscripcion:
+            inscripcion_estado = "CERRADA"
+        else:
+            inscripcion_estado = "ABIERTA"
+
+    # Evaluamos si el periodo de inscripciones del próximo año ya cerró:
+    if inscripcion_estado == "CERRADA":
+        # CASO 1: El periodo de inscripciones para el próximo año (ej: 2027) YA CERRÓ formalmente.
+        # Identificamos qué alumnos del año activo no renovaron.
+        anio_origen_eval = anio_activo.id_anio_escolar
+        anio_destino_eval = anio_destino
+        mensaje = f"Periodo de renovación para {anio_destino} cerrado el {fin_inscripcion}. Los siguientes estudiantes no registraron matrícula."
+    elif anio_anterior and db.query(models.Matricula).filter(models.Matricula.id_anio_escolar == anio_anterior).first():
+        # CASO 2: Revisar rezagados del año anterior (ej: 2025) que nunca se matricularon en el año activo actual (2026).
+        anio_origen_eval = anio_anterior
+        anio_destino_eval = anio_activo.id_anio_escolar
+        mensaje = f"Alumnos matriculados en {anio_anterior} que no registraron matrícula para el año activo {anio_activo.id_anio_escolar}."
+    else:
+        # CASO 3: Las inscripciones para el próximo año aún no existen o están abiertas/por abrir.
+        # Los estudiantes activos del año en curso no deben marcarse como no renovados para no retirarlos prematuramente.
+        return {
+            "anio_activo": anio_activo.id_anio_escolar,
+            "anio_destino": anio_destino,
+            "inscripcion_estado": inscripcion_estado,
+            "fin_inscripcion": fin_inscripcion,
+            "total_no_renovados": 0,
+            "mensaje": (
+                f"El periodo de inscripciones para {anio_destino or 'el próximo año'} se encuentra '{inscripcion_estado}'. "
+                "Los estudiantes activos continúan cursando sus clases normalmente hasta que venza el plazo de renovación."
+            ),
+            "alumnos": []
+        }
+
+    # 1. Obtener todas las matrículas del año origen de alumnos que siguen como ESTUDIANTE
+    matriculas_origen = (
+        db.query(models.Matricula)
+        .options(
+            joinedload(models.Matricula.alumno).joinedload(alumno_models.Alumno.usuario),
+            joinedload(models.Matricula.grado),
+            joinedload(models.Matricula.seccion),
+        )
+        .join(alumno_models.Alumno, alumno_models.Alumno.id_alumno == models.Matricula.id_alumno)
+        .filter(
+            models.Matricula.id_anio_escolar == anio_origen_eval,
+            alumno_models.Alumno.estado_ingreso == "ESTUDIANTE"
+        )
+        .all()
+    )
+
+    # 2. Ids de alumnos que ya tienen matrícula en el año destino
+    ids_matriculados_destino = set()
+    if anio_destino_eval:
+        ids_matriculados_destino = {
+            m.id_alumno for m in db.query(models.Matricula.id_alumno)
+            .filter(models.Matricula.id_anio_escolar == anio_destino_eval)
+            .all()
+        }
+
+    alumnos_no_renovados = []
+    for m in matriculas_origen:
+        alumno = m.alumno
+        if not alumno or alumno.id_alumno in ids_matriculados_destino:
+            continue
+
+        # Verificar si egresa (si terminó el último grado de secundaria)
+        if m.grado:
+            siguiente_grado = _calcular_siguiente_grado(db, m.grado)
+            if siguiente_grado is None:
+                # Egresó del colegio (terminó 5to secundaria) -> no cuenta como no renovado
+                continue
+
+        grado_nombre = m.grado.nombre if m.grado else "—"
+        seccion_nombre = m.seccion.nombre if m.seccion else "—"
+
+        alumnos_no_renovados.append({
+            "id_alumno": alumno.id_alumno,
+            "id_matricula": m.id_matricula,
+            "dni": alumno.dni or "—",
+            "nombres": alumno.nombres or "",
+            "apellidos": alumno.apellidos or "",
+            "nombre_completo": f"{alumno.apellidos or ''}, {alumno.nombres or ''}".strip(),
+            "grado_actual": grado_nombre,
+            "seccion_actual": seccion_nombre,
+            "anio_origen": anio_origen_eval,
+            "anio_destino": anio_destino_eval,
+            "tiene_usuario": alumno.id_usuario is not None,
+        })
+
+    # Ordenar alfabéticamente por apellidos
+    alumnos_no_renovados.sort(key=lambda a: a["nombre_completo"])
+
+    return {
+        "anio_activo": anio_activo.id_anio_escolar,
+        "anio_destino": anio_destino_eval,
+        "anio_origen": anio_origen_eval,
+        "inscripcion_estado": inscripcion_estado,
+        "fin_inscripcion": fin_inscripcion,
+        "total_no_renovados": len(alumnos_no_renovados),
+        "mensaje": mensaje,
+        "alumnos": alumnos_no_renovados
+    }
+
+
+@router.post("/procesar-no-renovados/")
+def procesar_retiro_no_renovados(
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Procesa el retiro de los alumnos no renovados:
+    - Marca su estado_ingreso como 'RETIRADO'
+    - Desactiva su cuenta de usuario
+    - Elimina pagos pendientes no vencidos
+    """
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos para esta operación")
+
+    ids_alumnos_solicitados = (payload or {}).get("ids_alumnos")
+
+    # Obtener el listado de no renovados
+    data_no_renovados = listar_no_renovados(db=db, current_user=current_user)
+    lista_candidatos = data_no_renovados.get("alumnos", [])
+
+    if ids_alumnos_solicitados:
+        ids_set = set(ids_alumnos_solicitados)
+        candidatos_a_procesar = [a for a in lista_candidatos if a["id_alumno"] in ids_set]
+    else:
+        candidatos_a_procesar = lista_candidatos
+
+    if not candidatos_a_procesar:
+        return {
+            "message": "No hay alumnos pendientes por procesar",
+            "procesados": 0
+        }
+
+    ids_a_retirar = [a["id_alumno"] for a in candidatos_a_procesar]
+    hoy = date.today()
+
+    alumnos_db = db.query(alumno_models.Alumno).filter(alumno_models.Alumno.id_alumno.in_(ids_a_retirar)).all()
+    
+    # 1. Eliminar pagos pendientes no vencidos de estos alumnos
+    db.query(finance_models.Pago).filter(
+        finance_models.Pago.id_alumno.in_(ids_a_retirar),
+        finance_models.Pago.estado == "PENDIENTE",
+        or_(
+            finance_models.Pago.fecha_vencimiento >= hoy,
+            finance_models.Pago.fecha_vencimiento.is_(None)
+        )
+    ).delete(synchronize_session=False)
+
+    # 2. Desactivar usuarios y cambiar estado a RETIRADO
+    for al in alumnos_db:
+        al.estado_ingreso = "RETIRADO"
+        if al.id_usuario:
+            usuario = db.query(users_models.Usuario).filter(users_models.Usuario.id_usuario == al.id_usuario).first()
+            if usuario:
+                usuario.activo = False
+
+    db.commit()
+
+    return {
+        "message": f"Se procesó el retiro de {len(alumnos_db)} estudiante(s) no renovados exitosamente.",
+        "procesados": len(alumnos_db),
+        "ids_procesados": ids_a_retirar
+    }

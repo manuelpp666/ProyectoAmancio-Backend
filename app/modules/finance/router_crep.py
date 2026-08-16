@@ -89,9 +89,16 @@ def resumen(db: Session = Depends(get_db),
         ultimo = (db.query(fin.LoteCobranza)
                   .filter(fin.LoteCobranza.estado != con.ESTADO_LOTE_INICIAL)
                   .order_by(fin.LoteCobranza.id_lote.desc()).first())
-        # La puesta en marcha: se hace una sola vez y la pantalla tiene que
-        # poder decir si ya está hecha.
+        ultimo_lote = None if not ultimo else {
+            "id_lote": ultimo.id_lote,
+            "archivo": ultimo.nombre_archivo,
+            "fecha_reporte": ultimo.fecha_reporte.isoformat() if ultimo.fecha_reporte else None,
+            "fecha_carga": ultimo.fecha_carga.isoformat() if ultimo.fecha_carga else None,
+            "aplicados": ultimo.aplicados,
+            "sin_coincidencia": ultimo.sin_coincidencia,
+        }
         inicial = con.estado_puesta_en_marcha(db)
+        sincronizacion = con.obtener_estado_crep_y_cambios(db)
     except (ProgrammingError, OperationalError):
         db.rollback()
         raise _sin_tablas(Exception())
@@ -106,14 +113,8 @@ def resumen(db: Session = Depends(get_db),
         "vencimientos_sin_mora": con.vencimientos_sin_mora(db),
         "cobros_por_revisar": db.query(func.count(fin.MovimientoCobranza.id_movimiento))
             .filter(fin.MovimientoCobranza.estado == "PENDIENTE_REVISION").scalar() or 0,
-        "ultimo_lote": None if not ultimo else {
-            "id_lote": ultimo.id_lote,
-            "archivo": ultimo.nombre_archivo,
-            "fecha_reporte": ultimo.fecha_reporte.isoformat() if ultimo.fecha_reporte else None,
-            "fecha_carga": ultimo.fecha_carga.isoformat() if ultimo.fecha_carga else None,
-            "aplicados": ultimo.aplicados,
-            "sin_coincidencia": ultimo.sin_coincidencia,
-        },
+        "ultimo_lote": ultimo_lote,
+        "sincronizacion_crep": sincronizacion,
     }
 
 
@@ -366,6 +367,37 @@ def cargar_mora(fecha_vencimiento: str = Form(...),
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"No se pudo aplicar la mora: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Sincronización y Control de Cambios del CREP
+# ---------------------------------------------------------------------------
+
+@router.get("/estado-sincronizacion")
+def estado_sincronizacion(db: Session = Depends(get_db),
+                          current_user: dict = Depends(get_current_user)):
+    """Compara el último CREP oficial contra el estado actual de la BD."""
+    _solo_admin(current_user)
+    try:
+        return con.obtener_estado_crep_y_cambios(db)
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        raise _sin_tablas(Exception())
+
+
+@router.post("/incorporar-cambios")
+def incorporar_cambios(db: Session = Depends(get_db),
+                       current_user: dict = Depends(get_current_user)):
+    """Incorpora formalmente las bajas/altas al padrón de cobranza oficial del CREP."""
+    _solo_admin(current_user)
+    try:
+        res = con.incorporar_cambios_al_crep(db, id_usuario=current_user.get("id"))
+        return res
+    except ErrorFormatoBCP as e:
+        raise HTTPException(400, str(e))
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        raise _sin_tablas(Exception())
 
 
 # ---------------------------------------------------------------------------

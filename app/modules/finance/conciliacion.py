@@ -26,6 +26,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import func
+from sqlalchemy.exc import ProgrammingError, OperationalError
 from sqlalchemy.orm import Session, joinedload
 
 from app.modules.finance import models as fin
@@ -912,6 +913,229 @@ def generar_archivo_crep(db: Session, fecha: Optional[dt.date] = None) -> Tuple[
         "bytes": len(contenido),
     }
     return contenido, resumen
+
+
+def obtener_estado_crep_y_cambios(db: Session) -> dict:
+    """Compara el último CREP oficial sincronizado contra la base de datos actual.
+    
+    Identifica:
+      - Bajas: Cuotas que estaban en el último CREP pero ya no existen como deudas pendientes
+        (por retiro de estudiantes o eliminación/anulación de cuotas).
+      - Altas: Nuevas cuotas pendientes generadas en el sistema.
+      - Modificaciones: Cuotas cuyo monto o mora fue alterado.
+    """
+    try:
+        ultimo = (
+            db.query(fin.RegistroCREP)
+            .order_by(fin.RegistroCREP.id_registro_crep.desc())
+            .first()
+        )
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        try:
+            fin.RegistroCREP.__table__.create(bind=db.get_bind(), checkfirst=True)
+            ultimo = (
+                db.query(fin.RegistroCREP)
+                .order_by(fin.RegistroCREP.id_registro_crep.desc())
+                .first()
+            )
+        except Exception:
+            db.rollback()
+            ultimo = None
+
+    cuotas_actuales = cuotas_para_crep(db)
+    actuales_map: Dict[Tuple[str, str], CuotaCREP] = {
+        (c.documento, c.fecha_vencimiento.strftime("%Y-%m-%d")): c
+        for c in cuotas_actuales
+    }
+
+    if not ultimo or not ultimo.cuotas_json:
+        # Si aún no se ha registrado ningún snapshot oficial, tomamos el estado actual como base
+        return {
+            "fecha_ultimo_crep": ultimo.fecha_generacion.isoformat() if ultimo and ultimo.fecha_generacion else None,
+            "nombre_archivo_ultimo_crep": ultimo.nombre_archivo if ultimo else None,
+            "total_cuotas_ultimo_crep": ultimo.total_cuotas if ultimo else len(cuotas_actuales),
+            "monto_ultimo_crep": float(ultimo.monto_total) if ultimo else float(sum(c.monto for c in cuotas_actuales)),
+            "total_cambios_pendientes": 0,
+            "bajas": [],
+            "altas": [],
+            "modificaciones": [],
+            "al_dia": True,
+        }
+
+    try:
+        snapshot_cuotas = json.loads(ultimo.cuotas_json)
+    except Exception:
+        snapshot_cuotas = []
+
+    snap_map: Dict[Tuple[str, str], dict] = {
+        (c.get("doc", ""), c.get("vencimiento", "")): c
+        for c in snapshot_cuotas
+    }
+
+    # Indexar alumnos por DNI para diagnosticar retiros
+    alumnos_db = {
+        _doc(a.dni): a
+        for a in db.query(Alumno).filter(Alumno.dni.isnot(None)).all()
+    }
+
+    bajas = []
+    altas = []
+    modificaciones = []
+
+    # 1. Bajas (estaban en el CREP previo pero ya no están pendientes en la BD)
+    for (doc, venc), snap_c in snap_map.items():
+        if (doc, venc) not in actuales_map:
+            al = alumnos_db.get(doc)
+            nombre = snap_c.get("nombre") or (f"{al.apellidos} {al.nombres}" if al else doc)
+            monto = float(snap_c.get("monto") or 0)
+            mora = float(snap_c.get("mora") or 0)
+
+            if al and al.estado_ingreso == "RETIRADO":
+                bajas.append({
+                    "documento": doc,
+                    "nombre": nombre,
+                    "vencimiento": venc,
+                    "monto": monto,
+                    "mora": mora,
+                    "tipo": "BAJA_RETIRO",
+                    "motivo": f"Estudiante retirado ({al.nombres} {al.apellidos}) — Cuota cancelada en el sistema",
+                })
+            else:
+                # Verificar si fue pagada normalmente
+                try:
+                    fecha_venc_dt = dt.datetime.strptime(venc, "%Y-%m-%d").date()
+                except Exception:
+                    fecha_venc_dt = None
+
+                pago_pagado = None
+                if fecha_venc_dt:
+                    pago_pagado = (
+                        db.query(fin.Pago)
+                        .join(Alumno, fin.Pago.id_alumno == Alumno.id_alumno)
+                        .filter(
+                            Alumno.dni == doc,
+                            fin.Pago.fecha_vencimiento == fecha_venc_dt,
+                            fin.Pago.estado == "PAGADO",
+                        )
+                        .first()
+                    )
+
+                if not pago_pagado:
+                    bajas.append({
+                        "documento": doc,
+                        "nombre": nombre,
+                        "vencimiento": venc,
+                        "monto": monto,
+                        "mora": mora,
+                        "tipo": "BAJA_ELIMINACION",
+                        "motivo": "Cuota eliminada o anulada en el sistema",
+                    })
+
+    # 2. Altas (están en la BD actual pero no estaban en el CREP previo)
+    for (doc, venc), curr_c in actuales_map.items():
+        if (doc, venc) not in snap_map:
+            altas.append({
+                "documento": doc,
+                "nombre": curr_c.nombre,
+                "vencimiento": venc,
+                "monto": float(curr_c.monto),
+                "mora": float(curr_c.mora),
+                "tipo": "ALTA_NUEVA",
+                "motivo": "Nueva cuota pendiente generada en el sistema",
+            })
+
+    # 3. Modificaciones (cambio de importe o mora)
+    for (doc, venc), curr_c in actuales_map.items():
+        if (doc, venc) in snap_map:
+            snap_c = snap_map[(doc, venc)]
+            snap_monto = float(snap_c.get("monto") or 0)
+            curr_monto = float(curr_c.monto)
+            snap_mora = float(snap_c.get("mora") or 0)
+            curr_mora = float(curr_c.mora)
+
+            if abs(snap_monto - curr_monto) > 0.009 or abs(snap_mora - curr_mora) > 0.009:
+                modificaciones.append({
+                    "documento": doc,
+                    "nombre": curr_c.nombre,
+                    "vencimiento": venc,
+                    "monto_anterior": snap_monto,
+                    "monto_actual": curr_monto,
+                    "mora_anterior": snap_mora,
+                    "mora_actual": curr_mora,
+                    "tipo": "MODIFICACION",
+                    "motivo": f"Importe modificado (Anterior S/ {snap_monto + snap_mora:.2f} -> Actual S/ {curr_monto + curr_mora:.2f})",
+                })
+
+    total_cambios = len(bajas) + len(altas) + len(modificaciones)
+
+    return {
+        "fecha_ultimo_crep": ultimo.fecha_generacion.isoformat() if ultimo and ultimo.fecha_generacion else None,
+        "nombre_archivo_ultimo_crep": ultimo.nombre_archivo,
+        "total_cuotas_ultimo_crep": ultimo.total_cuotas,
+        "monto_ultimo_crep": float(ultimo.monto_total),
+        "mora_ultimo_crep": float(ultimo.mora_total),
+        "total_cambios_pendientes": total_cambios,
+        "bajas": bajas,
+        "altas": altas,
+        "modificaciones": modificaciones,
+        "al_dia": total_cambios == 0,
+    }
+
+
+def incorporar_cambios_al_crep(db: Session, id_usuario: Optional[int] = None) -> dict:
+    """Crea una nueva versión oficial de referencia del CREP con las cuotas actuales.
+    
+    Deja los cambios pendientes en cero y sincroniza el padrón para la generación del CREP.
+    """
+    cuotas = cuotas_para_crep(db)
+    if not cuotas:
+        raise ErrorFormatoBCP("No hay cuotas pendientes para sincronizar en el CREP")
+
+    cuotas_data = [
+        {
+            "doc": c.documento,
+            "codigo_depositante": c.codigo_depositante,
+            "nombre": c.nombre,
+            "vencimiento": c.fecha_vencimiento.strftime("%Y-%m-%d"),
+            "emision": c.fecha_emision.strftime("%Y-%m-%d"),
+            "monto": float(c.monto),
+            "mora": float(c.mora),
+        }
+        for c in cuotas
+    ]
+
+    nombre = f"CREP-{dt.date.today().strftime('%d-%m-%Y')}.txt"
+    nuevo = fin.RegistroCREP(
+        nombre_archivo=nombre,
+        id_usuario=id_usuario,
+        total_cuotas=len(cuotas),
+        total_alumnos=len({c.documento for c in cuotas}),
+        monto_total=sum((c.monto for c in cuotas), Decimal("0.00")),
+        mora_total=sum((c.mora for c in cuotas), Decimal("0.00")),
+        estado="INCORPORADO",
+        cuotas_json=json.dumps(cuotas_data, ensure_ascii=False),
+    )
+    try:
+        db.add(nuevo)
+        db.commit()
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        fin.RegistroCREP.__table__.create(bind=db.get_bind(), checkfirst=True)
+        db.add(nuevo)
+        db.commit()
+    db.refresh(nuevo)
+
+    return {
+        "id_registro_crep": nuevo.id_registro_crep,
+        "nombre_archivo": nuevo.nombre_archivo,
+        "fecha_generacion": nuevo.fecha_generacion.isoformat(),
+        "total_cuotas": nuevo.total_cuotas,
+        "total_alumnos": nuevo.total_alumnos,
+        "monto_total": float(nuevo.monto_total),
+        "mora_total": float(nuevo.mora_total),
+        "message": "Cambios incorporados exitosamente al CREP oficial.",
+    }
 
 
 # ---------------------------------------------------------------------------

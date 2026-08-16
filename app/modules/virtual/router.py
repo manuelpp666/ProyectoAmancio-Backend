@@ -491,11 +491,17 @@ def obtener_detalle_curso_docente(id_carga: int, db: Session = Depends(get_db), 
     if not carga:
         raise HTTPException(status_code=404, detail="Carga académica no encontrada")
 
-    # 2. Total de alumnos matriculados en la sección
-    num_alumnos = db.query(func.count(models_en.Matricula.id_alumno)).filter(
-        models_en.Matricula.id_seccion == carga.id_seccion,
-        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
-    ).scalar() or 0
+    # 2. Total de alumnos matriculados activos en la sección
+    num_alumnos = (
+        db.query(func.count(models_en.Matricula.id_alumno))
+        .join(models_al.Alumno, models_al.Alumno.id_alumno == models_en.Matricula.id_alumno)
+        .filter(
+            models_en.Matricula.id_seccion == carga.id_seccion,
+            models_en.Matricula.id_anio_escolar == carga.id_anio_escolar,
+            models_al.Alumno.estado_ingreso != "RETIRADO"
+        )
+        .scalar() or 0
+    )
 
     # 3. Todas las tareas/evaluaciones activas del curso (los 4 bimestres)
     tareas = db.query(models.Tarea).filter(
@@ -755,12 +761,13 @@ def obtener_sabana_notas(id_carga: int, bimestre: int, db: Session = Depends(get
     if not carga:
         raise HTTPException(status_code=404, detail="Carga académica no encontrada")
 
-    # 2. Obtener los alumnos matriculados
+    # 2. Obtener los alumnos matriculados activos (no retirados)
     alumnos = db.query(models_al.Alumno).join(
         models_en.Matricula, models_al.Alumno.id_alumno == models_en.Matricula.id_alumno
     ).filter(
         models_en.Matricula.id_seccion == carga.id_seccion,
-        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar
+        models_en.Matricula.id_anio_escolar == carga.id_anio_escolar,
+        models_al.Alumno.estado_ingreso != "RETIRADO"
     ).order_by(models_al.Alumno.apellidos).all()
 
     # Condición de matrícula por alumno (NORMAL / CONDICIONADA / REPITE)

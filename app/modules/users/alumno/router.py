@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 from typing import List
 from datetime import date, datetime
@@ -10,7 +10,7 @@ from app.modules.users import models as al_models
 from app.modules.users.familiar.models import Familiar
 from app.modules.users.familiar import schemas as familiar_schemas
 from app.modules.users.familiar import services as familiar_services
-from app.modules.academic.models import Grado
+from app.modules.academic.models import Grado, Seccion
 from app.modules.users.alumno import estados
 from app.modules.finance import models as finance_models
 from app.core.util.security import get_current_user
@@ -54,13 +54,19 @@ def asegurar_usuario(db: Session, alumno: models.Alumno) -> Usuario | None:
 
     No hace commit: lo deja en la transacción de quien llama.
     """
-    if alumno.id_usuario or alumno.estado_ingreso not in estados.ACTIVOS:
+    if alumno.id_usuario:
+        usuario = db.query(Usuario).filter(Usuario.id_usuario == alumno.id_usuario).first()
+        if usuario:
+            usuario.activo = True
+            return usuario
+
+    if alumno.estado_ingreso not in estados.ACTIVOS:
         return None
 
     username = generar_username(alumno.dni, "ALUMNO")
 
     # Si ya existe la cuenta (un alumno que vuelve, o una carga previa), se
-    # reutiliza en vez de chocar contra el UNIQUE de usuario.username.
+    # reutiliza y reactiva en vez de chocar contra el UNIQUE de usuario.username.
     usuario = db.query(Usuario).filter(Usuario.username == username).first()
     if not usuario:
         usuario = Usuario(
@@ -73,6 +79,8 @@ def asegurar_usuario(db: Session, alumno: models.Alumno) -> Usuario | None:
         )
         db.add(usuario)
         db.flush()
+    else:
+        usuario.activo = True
 
     alumno.id_usuario = usuario.id_usuario
     return usuario
@@ -165,9 +173,13 @@ def crear_alumno_con_familiar(
     }
 
 @router.get("/", response_model=List[schemas.AlumnoResponse])
-def listar_alumnos(busqueda: str = None, dni: str = None, db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)):
-
+def listar_alumnos(
+    busqueda: str = None,
+    dni: str = None,
+    estado: str = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
 
@@ -179,6 +191,15 @@ def listar_alumnos(busqueda: str = None, dni: str = None, db: Session = Depends(
         .options(joinedload(models.Alumno.usuario), joinedload(models.Alumno.grado_ingreso))
         .filter(models.Alumno.estado_ingreso != estados.RECHAZADO)
     )
+
+    if estado:
+        val_estado = estado.upper().strip()
+        if val_estado == "ESTUDIANTE":
+            query = query.filter(models.Alumno.estado_ingreso == estados.ESTUDIANTE)
+        elif val_estado == "RETIRADO":
+            query = query.filter(models.Alumno.estado_ingreso == estados.RETIRADO)
+        elif val_estado in [estados.ADMITIDO, estados.POSTULANTE]:
+            query = query.filter(models.Alumno.estado_ingreso == val_estado)
 
     # `dni` se sigue aceptando por compatibilidad con llamadas antiguas
     termino = (busqueda or dni or "").strip()
@@ -500,3 +521,174 @@ def eliminar_familiar_alumno(
     mensaje = familiar_services.desvincular_familiar(db, id_alumno, id_familiar)
     db.commit()
     return {"message": mensaje}
+
+
+@router.post("/retirar/{id_alumno}")
+def retirar_estudiante(
+    id_alumno: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Retira a un estudiante del colegio.
+
+    - Cambia su estado_ingreso a 'RETIRADO'.
+    - Inactiva su cuenta de usuario para impedir el acceso al campus.
+    - Elimina todos los pagos 'PENDIENTE' que NO estén vencidos (fecha_vencimiento >= hoy o sin fecha).
+      Los pagos vencidos se conservan como deuda histórica.
+    """
+    _solo_admin(current_user)
+    alumno = _obtener_alumno(db, id_alumno)
+
+    # 1. Cambiar estado a RETIRADO
+    alumno.estado_ingreso = estados.RETIRADO
+
+    # 2. Desactivar cuenta de usuario asociada
+    if alumno.id_usuario:
+        usr = db.query(Usuario).filter(Usuario.id_usuario == alumno.id_usuario).first()
+        if usr:
+            usr.activo = False
+    elif alumno.usuario:
+        alumno.usuario.activo = False
+
+    # 3. Eliminar únicamente pagos pendientes NO vencidos (futuros o sin vencimiento)
+    hoy = date.today()
+    pagos_eliminados = (
+        db.query(finance_models.Pago)
+        .filter(
+            finance_models.Pago.id_alumno == id_alumno,
+            finance_models.Pago.estado == "PENDIENTE",
+            or_(
+                finance_models.Pago.fecha_vencimiento >= hoy,
+                finance_models.Pago.fecha_vencimiento.is_(None),
+            ),
+        )
+        .delete(synchronize_session=False)
+    )
+
+    db.commit()
+
+    return {
+        "message": f"Estudiante {alumno.nombres} {alumno.apellidos} retirado con éxito",
+        "id_alumno": id_alumno,
+        "estado": estados.RETIRADO,
+        "pagos_pendientes_eliminados": pagos_eliminados,
+    }
+
+
+@router.post("/reincorporar/{id_alumno}")
+def reincorporar_estudiante(
+    id_alumno: int,
+    datos: schemas.ReincorporarAlumnoRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Reincorpora a un estudiante previamente RETIRADO.
+
+    - Cambia su estado_ingreso a 'ESTUDIANTE'.
+    - Reactiva su cuenta de usuario (o la crea si no existía).
+    - Crea o actualiza su matrícula para el año escolar activo con el grado y sección indicados.
+    - Genera la pensión / matrícula del año escolar activo según corresponda.
+    """
+    _solo_admin(current_user)
+    alumno = _obtener_alumno(db, id_alumno)
+
+    if alumno.estado_ingreso != estados.RETIRADO:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se puede reincorporar a estudiantes en estado RETIRADO (estado actual: {alumno.estado_ingreso})"
+        )
+
+    # 1. Validar Grado
+    grado = db.query(Grado).filter(Grado.id_grado == datos.id_grado).first()
+    if not grado:
+        raise HTTPException(status_code=404, detail="El grado seleccionado no existe.")
+
+    # 2. Validar Sección si se envió
+    if datos.id_seccion:
+        seccion = db.query(Seccion).filter(Seccion.id_seccion == datos.id_seccion).first()
+        if not seccion:
+            raise HTTPException(status_code=404, detail="La sección seleccionada no existe.")
+
+    # 3. Obtener año escolar activo
+    from app.modules.academic import models as academic_models
+    from app.modules.enrollment import models as enrollment_models
+    from app.modules.finance.service import FinanceService
+
+    anio_activo = db.query(academic_models.AnioEscolar).filter(
+        academic_models.AnioEscolar.activo == True,
+        academic_models.AnioEscolar.tipo == "REGULAR"
+    ).first()
+    if not anio_activo:
+        anio_activo = db.query(academic_models.AnioEscolar).filter(academic_models.AnioEscolar.activo == True).first()
+
+    if not anio_activo:
+        raise HTTPException(status_code=400, detail="No hay un año escolar activo para matricular al estudiante.")
+
+    # 4. Cambiar estado a ESTUDIANTE y actualizar grado de ingreso
+    alumno.estado_ingreso = estados.ESTUDIANTE
+    alumno.id_grado_ingreso = datos.id_grado
+
+    # 5. Reactivar o asegurar usuario
+    if alumno.id_usuario:
+        usr = db.query(Usuario).filter(Usuario.id_usuario == alumno.id_usuario).first()
+        if usr:
+            usr.activo = True
+    else:
+        asegurar_usuario(db, alumno)
+
+    # 6. Crear o actualizar matrícula en el año activo
+    matricula_existente = db.query(enrollment_models.Matricula).filter(
+        enrollment_models.Matricula.id_alumno == id_alumno,
+        enrollment_models.Matricula.id_anio_escolar == anio_activo.id_anio_escolar
+    ).first()
+
+    if matricula_existente:
+        matricula_existente.id_grado = datos.id_grado
+        matricula_existente.id_seccion = datos.id_seccion
+        matricula_existente.estado = "MATRICULADO"
+        matricula_actual = matricula_existente
+    else:
+        matricula_actual = enrollment_models.Matricula(
+            id_alumno=id_alumno,
+            id_anio_escolar=anio_activo.id_anio_escolar,
+            id_grado=datos.id_grado,
+            id_seccion=datos.id_seccion,
+            estado="MATRICULADO",
+            tipo_matricula="REGULAR",
+            condicion="NORMAL"
+        )
+        db.add(matricula_actual)
+        db.flush()
+
+    # 7. Generar pagos correspondientes al año escolar activo (si está habilitado)
+    if datos.generar_pagos:
+        hoy = date.today()
+        # Generar pensión mensual para el mes actual y meses restantes si el año escolar está en curso
+        if anio_activo.fecha_inicio and anio_activo.fecha_fin:
+            inicio_mes = max(hoy.month, anio_activo.fecha_inicio.month)
+            fin_mes = anio_activo.fecha_fin.month
+            for m in range(inicio_mes, fin_mes + 1):
+                try:
+                    FinanceService.generar_pension_mensual(
+                        db=db,
+                        id_alumno=id_alumno,
+                        id_matricula=matricula_actual.id_matricula,
+                        tipo_periodo="REGULAR",
+                        mes=m,
+                        anio=hoy.year
+                    )
+                except Exception as ex:
+                    print(f"Aviso al generar pensión mes {m}: {ex}")
+
+    db.commit()
+    db.refresh(alumno)
+
+    return {
+        "message": f"Estudiante {alumno.nombres} {alumno.apellidos} reincorporado exitosamente.",
+        "id_alumno": alumno.id_alumno,
+        "estado": alumno.estado_ingreso,
+        "id_grado": datos.id_grado,
+        "id_seccion": datos.id_seccion,
+        "id_matricula": matricula_actual.id_matricula
+    }
+
