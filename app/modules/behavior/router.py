@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import extract, func, or_, text
 from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
+from app.modules.academic import models as academic_models
+from app.modules.enrollment import models as matricula_models
 from app.core.util.security import get_current_user
 from app.core.util import busqueda as busqueda_util
 from . import models, schemas
@@ -87,11 +89,114 @@ def _puntos_perdidos_anio(db: Session, id_alumno: int, anio: int,
     ).scalar()
     return int(total or 0)
 
+def _recalcular_nota_conducta_alumno_bimestre(
+    db: Session,
+    id_alumno: int,
+    fecha_reporte: Optional[datetime] = None
+) -> dict:
+    """
+    Recalcula automáticamente la nota de conducta sobre 20 del alumno
+    en el bimestre correspondiente a la fecha del reporte, y actualiza
+    el registro en `nota_conducta` (tabla oficial de notas de conducta).
+    """
+    from app.modules.enrollment.models import Matricula
+    from app.modules.academic.models import AnioEscolar
+
+    if not fecha_reporte:
+        fecha_reporte = datetime.now()
+
+    fecha_dt = fecha_reporte.date() if isinstance(fecha_reporte, datetime) else fecha_reporte
+    anio_str = str(fecha_dt.year)
+
+    # 1. Buscar matrícula activa del alumno en el año del reporte
+    matricula = db.query(Matricula).filter(
+        Matricula.id_alumno == id_alumno,
+        Matricula.id_anio_escolar == anio_str
+    ).first()
+
+    if not matricula:
+        matricula = db.query(Matricula).filter(
+            Matricula.id_alumno == id_alumno
+        ).order_by(Matricula.id_matricula.desc()).first()
+
+    if not matricula:
+        puntos_perdidos = db.query(func.coalesce(func.sum(models.NivelConducta.puntos), 0)).select_from(
+            models.ReporteConducta
+        ).join(models.NivelConducta).filter(
+            models.ReporteConducta.id_alumno == id_alumno,
+            extract('year', models.ReporteConducta.fecha_reporte) == fecha_dt.year
+        ).scalar() or 0
+        nueva_nota = calcular_puntaje(int(puntos_perdidos))
+        return {
+            "bimestre": None,
+            "puntos_descontados": int(puntos_perdidos),
+            "nota_calculada": nueva_nota,
+            "id_matricula": None
+        }
+
+    ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == matricula.id_anio_escolar).first()
+    tramos = bimestres_util.calendario(
+        db, matricula.id_anio_escolar,
+        getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
+    )
+
+    num_bimestre = bimestres_util.bimestre_de(fecha_dt, tramos) or 1
+    rango_bim = bimestres_util.rango(
+        db, matricula.id_anio_escolar, num_bimestre,
+        getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
+    )
+
+    if rango_bim:
+        desde, hasta = rango_bim
+    else:
+        desde = date(fecha_dt.year, 1, 1)
+        hasta = date(fecha_dt.year, 12, 31)
+
+    # 2. Sumar todos los puntos de reportes del alumno en el bimestre
+    puntos_perdidos = db.query(func.coalesce(func.sum(models.NivelConducta.puntos), 0)).select_from(
+        models.ReporteConducta
+    ).join(models.NivelConducta).filter(
+        models.ReporteConducta.id_alumno == id_alumno,
+        func.date(models.ReporteConducta.fecha_reporte) >= desde,
+        func.date(models.ReporteConducta.fecha_reporte) <= hasta,
+    ).scalar() or 0
+
+    nueva_nota = calcular_puntaje(int(puntos_perdidos))
+
+    # 3. Actualizar o insertar en `nota_conducta`
+    reg = db.query(models.NotaConducta).filter(
+        models.NotaConducta.id_matricula == matricula.id_matricula,
+        models.NotaConducta.bimestre == num_bimestre,
+    ).first()
+
+    if reg:
+        reg.valor = nueva_nota
+        reg.origen = "CALCULADO"
+        reg.fecha_registro = datetime.now()
+    else:
+        reg = models.NotaConducta(
+            id_matricula=matricula.id_matricula,
+            bimestre=num_bimestre,
+            valor=nueva_nota,
+            origen="CALCULADO",
+        )
+        db.add(reg)
+
+    return {
+        "bimestre": num_bimestre,
+        "puntos_descontados": int(puntos_perdidos),
+        "nota_calculada": nueva_nota,
+        "id_matricula": matricula.id_matricula
+    }
+
 def _serializar_reporte(r: "models.ReporteConducta") -> dict:
     """Forma común de un reporte para las bandejas del auxiliar y del psicólogo."""
     return {
         "id_reporte": r.id_reporte,
-        "fecha": r.fecha_reporte.strftime("%d/%m/%Y %H:%M"),
+        "id_alumno": r.id_alumno,
+        "id_nivel_conducta": r.id_nivel_conducta,
+        "id_tipo_falta": r.nivel.id_tipo_falta if r.nivel else None,
+        "fecha": r.fecha_reporte.strftime("%d/%m/%Y %H:%M") if r.fecha_reporte else "",
         "alumno": f"{r.alumno.nombres} {r.alumno.apellidos}" if r.alumno else "Alumno no disponible",
         "dni": r.alumno.dni if r.alumno else None,
         "falta": r.nivel.nombre if r.nivel else "Falta registrada",
@@ -112,7 +217,7 @@ def _tiene_cambio_ie(db: Session, id_alumno: int, anio: int) -> bool:
 
 @router.post("/reportes/")
 def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    if current_user.get("rol") != "AUXILIAR":
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tienes permisos para registrar reportes")
 
     alumno = db.query(alumno_models.Alumno).filter(
@@ -136,10 +241,13 @@ def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends
     db.commit()
     db.refresh(nuevo_reporte)
 
-    # Estado resultante del alumno, para que el auxiliar vea el impacto de inmediato
+    # Recalcular automáticamente nota de conducta del bimestre y actualizar en BD
+    recalc = _recalcular_nota_conducta_alumno_bimestre(db, nuevo_reporte.id_alumno, nuevo_reporte.fecha_reporte)
+    db.commit()
+
     anio_actual = datetime.now().year
-    _, _, numero_bimestre = _periodo(db, anio_actual)
-    puntaje = calcular_puntaje(_puntos_perdidos_anio(db, reporte.id_alumno, anio_actual))
+    puntaje = recalc["nota_calculada"]
+    numero_bimestre = recalc["bimestre"]
     requiere_cambio_ie = bool(nivel.cambio_ie) or _tiene_cambio_ie(db, reporte.id_alumno, anio_actual)
 
     return {
@@ -152,13 +260,107 @@ def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends
         "puntaje_actual": puntaje,
         "estado_color": estado_visual(puntaje, requiere_cambio_ie),
         "requiere_cambio_ie": requiere_cambio_ie,
-        # La escala viaja con la respuesta para que la pantalla del auxiliar no
-        # la lleve escrita a mano: cuando cambió de 100 a 20 se quedó
-        # desactualizada y mostraba rangos que ya no existían.
         "bimestre": numero_bimestre,
         "puntaje_maximo": PUNTAJE_MAXIMO,
         "umbral_observacion": UMBRAL_OBSERVACION,
         "umbral_critico": UMBRAL_CRITICO,
+    }
+
+@router.put("/reportes/{id_reporte}")
+def actualizar_reporte_auxiliar(
+    id_reporte: int,
+    datos: schemas.ReporteUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Permite editar un reporte de conducta y recalcula automáticamente
+    la nota de conducta del bimestre correspondiente del estudiante.
+    """
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para editar reportes de conducta")
+
+    reporte = db.query(models.ReporteConducta).filter(
+        models.ReporteConducta.id_reporte == id_reporte
+    ).first()
+    if not reporte:
+        raise HTTPException(status_code=404, detail="Reporte no encontrado")
+
+    nivel = db.query(models.NivelConducta).filter(
+        models.NivelConducta.id_nivel_conducta == datos.id_nivel_conducta
+    ).first()
+    if not nivel:
+        raise HTTPException(status_code=404, detail="El tipo de falta seleccionado no existe")
+
+    reporte.id_nivel_conducta = datos.id_nivel_conducta
+    reporte.descripcion_suceso = datos.descripcion_suceso
+    db.commit()
+    db.refresh(reporte)
+
+    # Recalcular automáticamente la nota de conducta del bimestre
+    recalc = _recalcular_nota_conducta_alumno_bimestre(db, reporte.id_alumno, reporte.fecha_reporte)
+    db.commit()
+
+    puntaje = recalc["nota_calculada"]
+    numero_bimestre = recalc["bimestre"]
+    anio_actual = reporte.fecha_reporte.year if reporte.fecha_reporte else datetime.now().year
+    requiere_cambio_ie = bool(nivel.cambio_ie) or _tiene_cambio_ie(db, reporte.id_alumno, anio_actual)
+
+    alumno_nombre = f"{reporte.alumno.nombres} {reporte.alumno.apellidos}" if reporte.alumno else "Alumno"
+
+    return {
+        "mensaje": "Reporte actualizado con éxito",
+        "id_reporte": reporte.id_reporte,
+        "falta": nivel.nombre,
+        "puntos_descontados": nivel.puntos,
+        "medida": nivel.medida,
+        "alumno": alumno_nombre,
+        "puntaje_actual": puntaje,
+        "estado_color": estado_visual(puntaje, requiere_cambio_ie),
+        "requiere_cambio_ie": requiere_cambio_ie,
+        "bimestre": numero_bimestre,
+        "puntaje_maximo": PUNTAJE_MAXIMO,
+        "umbral_observacion": UMBRAL_OBSERVACION,
+        "umbral_critico": UMBRAL_CRITICO,
+    }
+
+@router.delete("/reportes/{id_reporte}")
+def eliminar_reporte_auxiliar(
+    id_reporte: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Elimina un reporte de conducta y recalcula automáticamente
+    la nota de conducta del bimestre correspondiente del estudiante.
+    """
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para eliminar reportes de conducta")
+
+    reporte = db.query(models.ReporteConducta).filter(
+        models.ReporteConducta.id_reporte == id_reporte
+    ).first()
+    if not reporte:
+        raise HTTPException(status_code=404, detail="Reporte no encontrado")
+
+    id_alumno = reporte.id_alumno
+    fecha_reporte = reporte.fecha_reporte
+
+    db.delete(reporte)
+    db.commit()
+
+    # Recalcular automáticamente la nota de conducta del bimestre
+    recalc = _recalcular_nota_conducta_alumno_bimestre(db, id_alumno, fecha_reporte)
+    db.commit()
+
+    puntaje = recalc["nota_calculada"]
+    numero_bimestre = recalc["bimestre"]
+
+    return {
+        "mensaje": "Reporte eliminado con éxito",
+        "id_reporte": id_reporte,
+        "puntaje_actual": puntaje,
+        "bimestre": numero_bimestre,
     }
 
 @router.get("/reportes/")
@@ -351,9 +553,14 @@ def programar_cita(cita: schemas.CitaCreate, db: Session = Depends(get_db), curr
     return {"mensaje": "Cita programada exitosamente", "data": nueva_cita}
 
 @router.get("/usuario/{id_usuario}/citas")
-def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def obtener_citas_estudiante(
+    id_usuario: int, 
+    solo_pendientes: bool = True,
+    db: Session = Depends(get_db), 
+    current_user: dict = Depends(get_current_user)
+):
     """
-    Lista todas las citas programadas para el estudiante logueado.
+    Lista las citas programadas pendientes para el estudiante logueado.
     """
     if current_user.get("id") != id_usuario:
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
@@ -365,10 +572,14 @@ def obtener_citas_estudiante(id_usuario: int, db: Session = Depends(get_db), cur
     if not alumno:
         raise HTTPException(status_code=404, detail="Perfil de alumno no encontrado")
 
-    # 2. Obtener sus citas ordenadas por fecha (las más próximas primero)
-    citas = db.query(models.CitaPsicologia).filter(
+    # 2. Obtener citas pendientes ordenadas por fecha (las más próximas primero)
+    query = db.query(models.CitaPsicologia).filter(
         models.CitaPsicologia.id_alumno == alumno.id_alumno
-    ).order_by(models.CitaPsicologia.fecha_cita.asc()).all()
+    )
+    if solo_pendientes:
+        query = query.filter(models.CitaPsicologia.estado.in_(["PROGRAMADA", "REPROGRAMADA"]))
+
+    citas = query.order_by(models.CitaPsicologia.fecha_cita.asc()).all()
 
     return [
         {
@@ -550,38 +761,158 @@ def cancelar_cita(id_cita: int, db: Session = Depends(get_db), current_user: dic
     return {"mensaje": "Cita cancelada"}
 
 @router.get("/citas/agenda-diaria")
-def obtener_agenda_dia(fecha: Optional[datetime] = None, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO"]:
+def obtener_agenda_dia(
+    fecha: Optional[str] = Query(None, description="Fecha en formato YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO", "ADMIN"]:
         raise HTTPException(status_code=403, detail="Acceso denegado")
-    
-    if not fecha: fecha = datetime.now()
 
-    # Hacemos join con la tabla alumno para traer el nombre
-    citas = db.query(
+    query = db.query(
         models.CitaPsicologia.id_cita,
         models.CitaPsicologia.id_alumno,
         models.CitaPsicologia.motivo,
         models.CitaPsicologia.fecha_cita,
         models.CitaPsicologia.estado,
-        (alumno_models.Alumno.nombres + " " + alumno_models.Alumno.apellidos).label("alumno_nombre")
-    ).join(alumno_models.Alumno, models.CitaPsicologia.id_alumno == alumno_models.Alumno.id_alumno)\
-     .filter(
-        func.date(models.CitaPsicologia.fecha_cita) == fecha.date(),
-        models.CitaPsicologia.estado != "CANCELADA"
-     )\
-     .order_by(models.CitaPsicologia.fecha_cita.asc())\
-     .all()
+        models.CitaPsicologia.resultado_reunion,
+        models.CitaPsicologia.id_familiar,
+        (alumno_models.Alumno.nombres + " " + alumno_models.Alumno.apellidos).label("alumno_nombre"),
+        alumno_models.Alumno.dni.label("alumno_dni")
+    ).join(alumno_models.Alumno, models.CitaPsicologia.id_alumno == alumno_models.Alumno.id_alumno)
+
+    if fecha and isinstance(fecha, str) and fecha.strip():
+        # Filtrar por fecha específica
+        query = query.filter(func.date(models.CitaPsicologia.fecha_cita) == fecha.strip())
+        query = query.order_by(models.CitaPsicologia.fecha_cita.asc())
+    else:
+        # Por defecto muestra todas las citas, ordenadas por fecha más reciente
+        query = query.order_by(models.CitaPsicologia.fecha_cita.desc())
+
+    citas = query.all()
 
     return [
         {
             "id_cita": c.id_cita,
             "id_alumno": c.id_alumno,
-            "motivo": c.motivo,
-            "fecha_cita": c.fecha_cita,
+            "motivo": c.motivo or "Sin motivo especificado",
+            "fecha_cita": c.fecha_cita.isoformat() if hasattr(c.fecha_cita, "isoformat") else str(c.fecha_cita),
             "estado": c.estado,
-            "alumno_nombre": c.alumno_nombre
+            "resultado_reunion": c.resultado_reunion or "",
+            "alumno_nombre": c.alumno_nombre,
+            "alumno_dni": c.alumno_dni or "—",
         } for c in citas
     ]
+
+@router.get("/alumnos-con-reportes")
+def obtener_alumnos_con_reportes(
+    orden: str = Query("reciente", description="reciente o antiguo"),
+    q: Optional[str] = Query(None, description="Buscar por nombre o DNI"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO", "ADMIN"]:
+        raise HTTPException(status_code=403, detail="Acceso denegado")
+
+    # Subquery: alumnos con fecha máxima y conteo de reportes de conducta
+    reportes_sub = db.query(
+        models.ReporteConducta.id_alumno.label("id_alumno"),
+        func.max(models.ReporteConducta.fecha_reporte).label("max_fecha_reporte"),
+        func.count(models.ReporteConducta.id_reporte).label("total_reportes")
+    ).group_by(models.ReporteConducta.id_alumno).subquery()
+
+    # Subquery: total de citas psicológicas
+    citas_sub = db.query(
+        models.CitaPsicologia.id_alumno.label("id_alumno"),
+        func.count(models.CitaPsicologia.id_cita).label("total_citas")
+    ).group_by(models.CitaPsicologia.id_alumno).subquery()
+
+    query = (
+        db.query(
+            alumno_models.Alumno.id_alumno,
+            alumno_models.Alumno.nombres,
+            alumno_models.Alumno.apellidos,
+            alumno_models.Alumno.dni,
+            reportes_sub.c.max_fecha_reporte,
+            reportes_sub.c.total_reportes,
+            func.coalesce(citas_sub.c.total_citas, 0).label("total_citas")
+        )
+        .join(reportes_sub, alumno_models.Alumno.id_alumno == reportes_sub.c.id_alumno)
+        .outerjoin(citas_sub, alumno_models.Alumno.id_alumno == citas_sub.c.id_alumno)
+    )
+
+    if q and isinstance(q, str) and q.strip():
+        termino = q.strip()
+        query = query.filter(
+            or_(
+                alumno_models.Alumno.nombres.like(f"%{termino}%"),
+                alumno_models.Alumno.apellidos.like(f"%{termino}%"),
+                alumno_models.Alumno.dni.like(f"%{termino}%")
+            )
+        )
+
+    if orden == "antiguo":
+        query = query.order_by(reportes_sub.c.max_fecha_reporte.asc())
+    else:
+        query = query.order_by(reportes_sub.c.max_fecha_reporte.desc())
+
+    alumnos = query.all()
+
+    # Para cada alumno, obtenemos su grado/sección actual si existe matrícula
+    ids_alumnos = [a.id_alumno for a in alumnos]
+    matriculas = (
+        db.query(
+            matricula_models.Matricula.id_alumno,
+            academic_models.Grado.nombre.label("grado_nombre"),
+            academic_models.Seccion.nombre.label("seccion_nombre"),
+            academic_models.Nivel.nombre.label("nivel_nombre")
+        )
+        .join(academic_models.Seccion, matricula_models.Matricula.id_seccion == academic_models.Seccion.id_seccion)
+        .join(academic_models.Grado, academic_models.Seccion.id_grado == academic_models.Grado.id_grado)
+        .join(academic_models.Nivel, academic_models.Grado.id_nivel == academic_models.Nivel.id_nivel)
+        .filter(matricula_models.Matricula.id_alumno.in_(ids_alumnos))
+        .all()
+    ) if ids_alumnos else []
+
+    mapa_mat = {m.id_alumno: m for m in matriculas}
+
+    # Traemos el último reporte con detalle del nivel
+    ultimos_reportes = (
+        db.query(models.ReporteConducta)
+        .options(joinedload(models.ReporteConducta.nivel))
+        .filter(models.ReporteConducta.id_alumno.in_(ids_alumnos))
+        .order_by(models.ReporteConducta.fecha_reporte.desc())
+        .all()
+    ) if ids_alumnos else []
+
+    mapa_ultimo_reporte: dict[int, models.ReporteConducta] = {}
+    for ur in ultimos_reportes:
+        if ur.id_alumno not in mapa_ultimo_reporte:
+            mapa_ultimo_reporte[ur.id_alumno] = ur
+
+    resultados = []
+    for a in alumnos:
+        mat = mapa_mat.get(a.id_alumno)
+        ur = mapa_ultimo_reporte.get(a.id_alumno)
+        resultados.append({
+            "id_alumno": a.id_alumno,
+            "nombres": a.nombres,
+            "apellidos": a.apellidos,
+            "nombre_completo": f"{a.apellidos}, {a.nombres}".strip(),
+            "dni": a.dni or "—",
+            "nivel": mat.nivel_nombre if mat else None,
+            "grado": mat.grado_nombre if mat else None,
+            "seccion": mat.seccion_nombre if mat else None,
+            "total_reportes": int(a.total_reportes or 0),
+            "total_citas": int(a.total_citas or 0),
+            "ultima_fecha_reporte": a.max_fecha_reporte.strftime("%d/%m/%Y %H:%M") if a.max_fecha_reporte else "—",
+            "ultima_falta": ur.nivel.nombre if ur and ur.nivel else "Reporte disciplinario",
+            "tipo_falta": ur.nivel.tipo.nombre if ur and ur.nivel and ur.nivel.tipo else None,
+            "puntos_descontados": ur.nivel.puntos if ur and ur.nivel else None,
+            "requiere_cambio_ie": bool(ur.nivel.cambio_ie) if ur and ur.nivel else False,
+        })
+
+    return resultados
 
 @router.get("/citas/alumnos-recientes")
 def obtener_alumnos_citas_recientes(
@@ -863,13 +1194,19 @@ def filtros_conducta(
         secciones = [s for s in secciones if s["id_seccion"] in secciones_tutor]
         es_tutor = len(secciones_tutor) > 0
 
-    bimestres = [1, 2, 3, 4]
-    
-    # Determinar bimestre actual
     ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == anio).first()
+    tipo_anio = ((getattr(ae, "tipo", None) or "REGULAR")).strip().upper()
+    es_verano = tipo_anio == "VERANO"
+
+    # El año de verano es un periodo continuo, no cuatro bimestres. Ofrecer los
+    # cuatro dejaba elegir tramos que no existen y guardaba la conducta del
+    # verano repartida en bimestres inventados.
+    bimestres = [bimestres_util.BIMESTRE_UNICO_VERANO] if es_verano else [1, 2, 3, 4]
+
     bim_actual = bimestres_util.bimestre_actual(
-        db, anio, getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
-    ) or 1
+        db, anio, getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None),
+        tipo=tipo_anio,
+    ) or bimestres[0]
 
     return {
         "anios": anios,
@@ -878,6 +1215,9 @@ def filtros_conducta(
         "bimestre_actual": bim_actual,
         "secciones": secciones,
         "es_tutor": es_tutor,
+        # Para que la pantalla pueda ocultar el selector de bimestre y hablar de
+        # "periodo" en vez de "bimestre" cuando el año es de verano.
+        "es_verano": es_verano,
     }
 
 
@@ -932,9 +1272,16 @@ def listar_notas_conducta(
     ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == anio).first()
     fecha_inicio = getattr(ae, "fecha_inicio", None)
     fecha_fin = getattr(ae, "fecha_fin", None)
+    tipo_anio = ((getattr(ae, "tipo", None) or "REGULAR")).strip().upper()
+
+    # En verano solo hay un periodo. Se normaliza aquí para que una petición
+    # con ?bimestre=3 (un enlace guardado del año regular, por ejemplo) devuelva
+    # el periodo del verano en vez de una lista vacía.
+    if tipo_anio == "VERANO":
+        bimestre = bimestres_util.BIMESTRE_UNICO_VERANO
 
     # Rango de fechas del bimestre
-    rango_bim = bimestres_util.rango(db, anio, bimestre, fecha_inicio, fecha_fin)
+    rango_bim = bimestres_util.rango(db, anio, bimestre, fecha_inicio, fecha_fin, tipo=tipo_anio)
     if rango_bim:
         desde, hasta = rango_bim
     else:
@@ -1144,9 +1491,18 @@ def guardar_nota_conducta(
 
     # Calcular puntos y nota esperada para validar
     ae = db.query(AnioEscolar).filter(AnioEscolar.id_anio_escolar == mat.id_anio_escolar).first()
+    tipo_anio = ((getattr(ae, "tipo", None) or "REGULAR")).strip().upper()
+
+    # En verano solo hay un periodo: se normaliza antes de guardar para que la
+    # nota no quede archivada en un bimestre que ese año no tiene y luego no
+    # aparezca al consultarla (`nota_conducta` es única por matrícula+bimestre).
+    if tipo_anio == "VERANO":
+        datos.bimestre = bimestres_util.BIMESTRE_UNICO_VERANO
+
     rango_bim = bimestres_util.rango(
         db, mat.id_anio_escolar, datos.bimestre,
-        getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None)
+        getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None),
+        tipo=tipo_anio,
     )
     if rango_bim:
         desde, hasta = rango_bim

@@ -23,6 +23,7 @@ class UsuarioResponse(BaseModel):
     id_usuario: int
     username: str
     activo: bool
+    debe_cambiar_password: bool = False
     model_config = ConfigDict(from_attributes=True)
 
 class PersonalResponse(PersonalBase):

@@ -3,7 +3,6 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.core.util.password import get_password_hash, verify_password
 from app.core.util.usuarios import extraer_dni
-# Imports corregidos: asegúrate de que las rutas sean las correctas en tu proyecto
 from app.modules.users.models import Usuario
 from app.modules.users.docente.models import Docente
 from app.modules.personal.models import Administrador 
@@ -12,10 +11,10 @@ from app.modules.personal.models import Psicologo
 from app.modules.users.alumno.models import Alumno
 from app.modules.users.familiar import services as familiar_services
 from app.core.util.security import get_current_user
-from app.core.util.correo_usuario import obtener_correo, guardar_correo
+from app.core.util.correo_usuario import obtener_correo, guardar_correo, obtener_telefono, guardar_telefono
 from app.modules.users.router import _exigir_cambio_password, _exigir_correo
 from .schemas import (
-    ChangePasswordSchema, ActualizarPerfilAdminSchema,
+    ChangePasswordSchema, ActualizarPerfilAdminSchema, ActualizarContactoSchema,
     ActualizarDireccionSchema, ActualizarMedicosSchema, FamiliarCreateSchema,
     RegistrarCorreoSchema, EstadoPrimerIngresoResponse,
 )
@@ -24,7 +23,6 @@ router = APIRouter(prefix="/perfil", tags=["Perfil"])
 
 @router.get("/mi-perfil/{username}")
 def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    
     # 1. Buscamos al usuario base
     user = db.query(Usuario).filter(Usuario.username == username).first()
     
@@ -40,8 +38,27 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), curr
             raise HTTPException(status_code=404, detail="Datos de alumno no encontrados")
         
         familiares_data = familiar_services.listar_familiares_de_alumno(db, alumno.id_alumno)
+        correo = obtener_correo(db, user)
+        telefono = obtener_telefono(db, user)
 
-        return {"rol": user.rol, "datos": alumno, "familiares": familiares_data}
+        datos_alumno = {
+            "id_alumno": alumno.id_alumno,
+            "id_usuario": alumno.id_usuario,
+            "dni": alumno.dni,
+            "nombres": alumno.nombres,
+            "apellidos": alumno.apellidos,
+            "fecha_nacimiento": alumno.fecha_nacimiento,
+            "genero": alumno.genero,
+            "direccion": alumno.direccion,
+            "enfermedad": alumno.enfermedad,
+            "talla_polo": alumno.talla_polo,
+            "colegio_procedencia": alumno.colegio_procedencia,
+            "estado_ingreso": alumno.estado_ingreso,
+            "telefono": telefono,
+            "email": correo,
+        }
+
+        return {"rol": user.rol, "datos": datos_alumno, "familiares": familiares_data}
 
     # --- CASO DOCENTE ---
     elif user.rol == "DOCENTE":
@@ -50,20 +67,21 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), curr
             raise HTTPException(status_code=404, detail="Datos de docente no encontrados")
         return {"rol": user.rol, "datos": docente}
 
-    # --- CASO ADMINISTRADOR (Nuevo) ---
+    # --- CASO ADMINISTRADOR ---
     elif user.rol == "ADMIN":
         admin = db.query(Administrador).filter(Administrador.id_usuario == user.id_usuario).first()
         if not admin:
             raise HTTPException(status_code=404, detail="Datos de administrador no encontrados")
         return {"rol": user.rol, "datos": admin}
 
-    # --- CASO AUXILIAR (Nuevo) ---
+    # --- CASO AUXILIAR ---
     elif user.rol == "AUXILIAR":
         auxiliar = db.query(Auxiliar).filter(Auxiliar.id_usuario == user.id_usuario).first()
         if not auxiliar:
             raise HTTPException(status_code=404, detail="Datos de auxiliar no encontrados")
         return {"rol": user.rol, "datos": auxiliar}
-    # --- CASO PSICOLOGO (Nuevo) ---
+
+    # --- CASO PSICOLOGO ---
     elif user.rol == "PSICOLOGO":
         psicologo = db.query(Psicologo).filter(Psicologo.id_usuario == user.id_usuario).first()
         if not psicologo:
@@ -71,6 +89,87 @@ def obtener_perfil_por_nombre(username: str, db: Session = Depends(get_db), curr
         return {"rol": user.rol, "datos": psicologo}
 
     raise HTTPException(status_code=400, detail="Rol no soportado")
+
+
+@router.patch("/contacto/{username}")
+def actualizar_contacto_perfil(
+    username: str,
+    data: ActualizarContactoSchema,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Actualiza el teléfono y correo de contacto para cualquier rol."""
+    user = db.query(Usuario).filter(Usuario.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if current_user.get("id") != user.id_usuario:
+        raise HTTPException(status_code=403, detail="No puedes editar un perfil ajeno")
+
+    tel_val = (data.telefono or "").strip() if data.telefono is not None else None
+    email_val = (data.email or "").strip() if data.email is not None else None
+
+    if user.rol == "ALUMNO":
+        if data.telefono is not None:
+            guardar_telefono(db, user, tel_val)
+        if data.email is not None:
+            guardar_correo(db, user, email_val)
+    elif user.rol == "DOCENTE":
+        docente = db.query(Docente).filter(Docente.id_usuario == user.id_usuario).first()
+        if not docente:
+            raise HTTPException(status_code=404, detail="Datos de docente no encontrados")
+        if data.telefono is not None:
+            docente.telefono = tel_val or None
+        if data.email is not None:
+            docente.email = email_val or None
+    elif user.rol == "ADMIN":
+        admin = db.query(Administrador).filter(Administrador.id_usuario == user.id_usuario).first()
+        if not admin:
+            raise HTTPException(status_code=404, detail="Datos de administrador no encontrados")
+        if data.telefono is not None:
+            admin.telefono = tel_val or None
+        if data.email is not None:
+            admin.email = email_val or None
+    elif user.rol == "AUXILIAR":
+        auxiliar = db.query(Auxiliar).filter(Auxiliar.id_usuario == user.id_usuario).first()
+        if not auxiliar:
+            raise HTTPException(status_code=404, detail="Datos de auxiliar no encontrados")
+        if data.telefono is not None:
+            auxiliar.telefono = tel_val or None
+        if data.email is not None:
+            auxiliar.email = email_val or None
+    elif user.rol == "PSICOLOGO":
+        psicologo = db.query(Psicologo).filter(Psicologo.id_usuario == user.id_usuario).first()
+        if not psicologo:
+            raise HTTPException(status_code=404, detail="Datos de psicólogo no encontrados")
+        if data.telefono is not None:
+            psicologo.telefono = tel_val or None
+        if data.email is not None:
+            psicologo.email = email_val or None
+    else:
+        raise HTTPException(status_code=400, detail="Rol no soportado")
+
+    db.commit()
+
+    nuevo_tel = obtener_telefono(db, user) if user.rol == "ALUMNO" else (
+        admin.telefono if user.rol == "ADMIN" else
+        docente.telefono if user.rol == "DOCENTE" else
+        auxiliar.telefono if user.rol == "AUXILIAR" else
+        psicologo.telefono
+    )
+    nuevo_email = obtener_correo(db, user) if user.rol == "ALUMNO" else (
+        admin.email if user.rol == "ADMIN" else
+        docente.email if user.rol == "DOCENTE" else
+        auxiliar.email if user.rol == "AUXILIAR" else
+        psicologo.email
+    )
+
+    return {
+        "message": "Datos de contacto actualizados con éxito",
+        "datos": {
+            "telefono": nuevo_tel,
+            "email": nuevo_email,
+        }
+    }
 
 
 @router.patch("/admin/{username}")
@@ -169,28 +268,22 @@ def agregar_familiar_alumno(
 
 @router.post("/auth/change-password")
 async def change_password(data: ChangePasswordSchema, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    # 1. Buscar al usuario
     user = db.query(Usuario).filter(Usuario.username == data.username).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # 1b. Solo puedes cambiar TU propia contraseña (evita cambiar la de otro usuario)
     if user.id_usuario != current_user.get("id"):
         raise HTTPException(status_code=403, detail="No puedes cambiar la contraseña de otro usuario")
 
-    # 2. Verificar si la contraseña actual es correcta
     if not verify_password(data.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
 
-    # 3. La nueva no puede ser igual al DNI: es la clave inicial que se reparte
     if data.new_password.strip() == extraer_dni(user.username):
         raise HTTPException(
             status_code=400,
             detail="La nueva contraseña no puede ser tu DNI. Elige una distinta."
         )
 
-    # 4. Encriptar la nueva y guardar. Al definir clave propia se levanta la
-    #    obligación de cambiarla en el primer ingreso.
     user.password_hash = get_password_hash(data.new_password)
     user.debe_cambiar_password = False
     db.commit()
@@ -199,13 +292,6 @@ async def change_password(data: ChangePasswordSchema, db: Session = Depends(get_
 
 @router.get("/auth/primer-ingreso", response_model=EstadoPrimerIngresoResponse)
 def estado_primer_ingreso(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """
-    Qué le falta a esta cuenta para poder usar el campus.
-
-    La pantalla de primer ingreso lo consulta al abrirse, en lugar de fiarse de
-    lo que devolvió el login: así sigue siendo correcta tras recargar la página
-    y no se le puede saltar cambiando lo guardado en el navegador.
-    """
     user = db.query(Usuario).filter(Usuario.id_usuario == current_user.get("id")).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -225,12 +311,6 @@ def registrar_correo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    Guarda el correo de contacto de la cuenta que ha iniciado sesión.
-
-    En el alumno el correo va a su apoderado, que es quien recibe los avisos de
-    asistencia y conducta. Ver app/core/util/correo_usuario.py.
-    """
     user = db.query(Usuario).filter(Usuario.id_usuario == current_user.get("id")).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")

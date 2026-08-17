@@ -217,3 +217,28 @@ def actualizar_permisos_admin(
     db.refresh(admin)
     
     return admin
+
+
+@router.patch("/usuario/{id_usuario}/forzar-cambio-password")
+def toggle_forzar_cambio_password(
+    id_usuario: int,
+    debe_cambiar: bool,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos para realizar esta acción")
+
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == id_usuario).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    usuario.debe_cambiar_password = debe_cambiar
+    db.commit()
+    db.refresh(usuario)
+
+    return {
+        "id_usuario": usuario.id_usuario,
+        "debe_cambiar_password": usuario.debe_cambiar_password,
+        "message": f"Exigencia de cambio de contraseña {'activada' if debe_cambiar else 'desactivada'} correctamente"
+    }

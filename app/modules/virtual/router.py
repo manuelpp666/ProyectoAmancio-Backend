@@ -180,6 +180,10 @@ async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(g
     payload = {
         "tipo": "NUEVO_MENSAJE",
         "data": {
+            # El id real del mensaje: el front lo necesita para no pintar dos
+            # veces lo que ya recibió (por el socket y por la consulta
+            # periódica de respaldo, que pueden solaparse).
+            "id_mensaje": nuevo_mensaje.id_mensaje,
             "id_conversacion": mensaje.id_conversacion,
             "contenido": mensaje.contenido,
             "remitente_id": mensaje.remitente_id,
@@ -187,7 +191,20 @@ async def enviar_mensaje(mensaje: schemas.MensajeCreate, db: Session = Depends(g
         }
     }
     await socket_manager.send_personal_message(receptor_id, payload)
-    return nuevo_mensaje
+
+    # Se devuelve un diccionario explícito en vez del modelo de SQLAlchemy: el
+    # front necesita id_mensaje para pintar el mensaje con su id real (y no
+    # duplicarlo cuando llegue por el socket o por el sondeo de respaldo), y
+    # serializar el modelo directamente depende de detalles internos del ORM.
+    return {
+        "id_mensaje": nuevo_mensaje.id_mensaje,
+        "id_conversacion": nuevo_mensaje.id_conversacion,
+        "remitente_id": nuevo_mensaje.remitente_id,
+        "contenido": nuevo_mensaje.contenido,
+        "leido": bool(nuevo_mensaje.leido),
+        "fecha_envio": nuevo_mensaje.fecha_envio.isoformat() if nuevo_mensaje.fecha_envio else None,
+        "hora": nuevo_mensaje.fecha_envio.strftime("%H:%M") if nuevo_mensaje.fecha_envio else None,
+    }
 
 
 @router.get("/chat/contactos/{id_usuario}")
@@ -362,8 +379,26 @@ def obtener_o_crear_conversacion(req: schemas.ConversacionCreate, db: Session = 
 
 
 @router.get("/chat/historial/{id_conversacion}")
-def obtener_historial(id_conversacion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+def obtener_historial(
+    id_conversacion: int,
+    desde_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Mensajes de una conversación.
 
+    Con `desde_id` devuelve solo los posteriores a ese mensaje. Es lo que usa el
+    chat para preguntar "¿hay algo nuevo?" cada pocos segundos cuando el
+    WebSocket no está disponible (ver el hook useChat en el front): sin esto
+    cada consulta reenviaría la conversación entera, y con ~500 cuentas eso es
+    mucho tráfico para nada.
+
+    El filtro va por id_mensaje y no por fecha porque el id es autoincremental:
+    dos mensajes escritos en el mismo segundo no se pierden ni se repiten.
+    Sin el parámetro se comporta igual que antes, así que el front viejo sigue
+    funcionando contra este backend.
+    """
     conv = db.query(models.Conversacion).filter(models.Conversacion.id_conversacion == id_conversacion).first()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
@@ -372,9 +407,13 @@ def obtener_historial(id_conversacion: int, db: Session = Depends(get_db), curre
     if current_user.get("rol") != "ADMIN" and current_user.get("id") not in [conv.usuario1_id, conv.usuario2_id]:
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
 
-    mensajes = db.query(models.Mensaje).filter(
+    consulta = db.query(models.Mensaje).filter(
         models.Mensaje.id_conversacion == id_conversacion
-    ).order_by(models.Mensaje.fecha_envio.asc()).all()
+    )
+    if desde_id:
+        consulta = consulta.filter(models.Mensaje.id_mensaje > desde_id)
+
+    mensajes = consulta.order_by(models.Mensaje.id_mensaje.asc()).all()
 
     return [
         {

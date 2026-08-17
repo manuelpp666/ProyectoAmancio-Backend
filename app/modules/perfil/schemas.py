@@ -8,18 +8,20 @@ class ChangePasswordSchema(BaseModel):
 
 
 class RegistrarCorreoSchema(BaseModel):
-    # EmailStr rechaza direcciones mal escritas antes de guardarlas: un correo
-    # con una errata deja al apoderado sin recibir los avisos y nadie se entera.
     email: EmailStr
 
 
 class EstadoPrimerIngresoResponse(BaseModel):
     debe_cambiar_password: bool
     debe_registrar_correo: bool
-    # Para el alumno el correo es el del apoderado, y el texto de la pantalla
-    # cambia en consecuencia.
     es_alumno: bool
     email_actual: Optional[str] = None
+
+
+class ActualizarContactoSchema(BaseModel):
+    telefono: Optional[str] = Field(None, max_length=15)
+    email: Optional[str] = Field(None, max_length=150)
+
 
 class ActualizarPerfilAdminSchema(BaseModel):
     telefono: Optional[str] = None
@@ -31,7 +33,6 @@ class ActualizarDireccionSchema(BaseModel):
     direccion: str = Field(..., min_length=3, max_length=300)
 
 class ActualizarMedicosSchema(BaseModel):
-    # Permitimos vaciarlo (None / cadena vacía) o registrar la condición
     enfermedad: Optional[str] = Field(None, max_length=150)
 
 class FamiliarCreateSchema(BaseModel):

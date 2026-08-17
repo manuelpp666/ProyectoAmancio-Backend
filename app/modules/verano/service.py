@@ -131,6 +131,42 @@ def grupo_de_alumno(db: Session, grado_actual: ac_models.Grado):
     return aula, clave, etiqueta
 
 
+def cursos_de_verano_del_alumno(db: Session, id_alumno: int, id_anio: str):
+    """Los cursos que el alumno lleva en un año de verano, en orden.
+
+    En verano no hay plan de estudio por grado: el alumno elige cursos fijos y
+    talleres al inscribirse y quedan en `solicitud_verano_curso`. Por eso las
+    pantallas que arman la lista desde `plan_estudio` (que es lo correcto en un
+    año regular) no sirven aquí y hay que preguntar por la inscripción.
+    """
+    from . import models as vr_models
+
+    filas = (db.query(vr_models.SolicitudVeranoCurso.id_curso,
+                      vr_models.SolicitudVeranoCurso.es_taller,
+                      ac_models.Curso.nombre)
+             .join(vr_models.SolicitudVerano,
+                   vr_models.SolicitudVerano.id == vr_models.SolicitudVeranoCurso.id_solicitud_verano)
+             .join(ac_models.Curso,
+                   ac_models.Curso.id_curso == vr_models.SolicitudVeranoCurso.id_curso)
+             .filter(vr_models.SolicitudVerano.id_alumno == id_alumno,
+                     vr_models.SolicitudVerano.id_anio_escolar == id_anio,
+                     vr_models.SolicitudVerano.estado != "RECHAZADA")
+             .order_by(vr_models.SolicitudVeranoCurso.es_taller.asc(),
+                       ac_models.Curso.nombre.asc())
+             .all())
+
+    # Un alumno puede tener más de una solicitud (una anulada y otra buena):
+    # se quita el duplicado por curso conservando el primero.
+    vistos, cursos = set(), []
+    for f in filas:
+        if f.id_curso in vistos:
+            continue
+        vistos.add(f.id_curso)
+        cursos.append({"id_curso": f.id_curso, "nombre": f.nombre,
+                       "es_taller": bool(f.es_taller)})
+    return cursos
+
+
 # ---------------------------------------------------------------------------
 # Evaluación de fin de año
 # ---------------------------------------------------------------------------
@@ -490,7 +526,7 @@ def procesar_pago_verano(db: Session, pago) -> bool:
         matricula = en_models.Matricula(
             id_anio_escolar=solicitud.id_anio_escolar,
             id_alumno=alumno.id_alumno,
-            id_seccion=None,
+            id_seccion=None,  # El admin asigna la sección luego en 'Asignar Estudiante'
             id_grado=solicitud.id_grado,
             estado="MATRICULADO",
             tipo_matricula="VERANO",

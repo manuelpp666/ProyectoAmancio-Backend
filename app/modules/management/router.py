@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, extract
-from typing import List
+from sqlalchemy import func, extract, or_
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from typing import List, Optional
 from datetime import datetime, date, timedelta
 from app.db.database import get_db
 from app.modules.academic import models as models_ac
@@ -193,6 +194,262 @@ def registrar_asistencia_lote(
     )
 
 
+@router.get("/asistencia/seccion/{id_seccion}")
+def obtener_asistencia_seccion(
+    id_seccion: int,
+    fecha: str = Query(..., description="Fecha en formato YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") not in ("AUXILIAR", "DOCENTE", "ADMIN"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver la asistencia")
+
+    matriculas = db.query(models_en.Matricula.id_matricula).filter(
+        models_en.Matricula.id_seccion == id_seccion
+    ).all()
+    ids_matricula = [m[0] for m in matriculas]
+
+    if not ids_matricula:
+        return {"fecha": fecha, "asistencias": {}, "registros": []}
+
+    registros = db.query(models.Asistencia).filter(
+        models.Asistencia.id_matricula.in_(ids_matricula),
+        models.Asistencia.fecha == fecha
+    ).all()
+
+    mapa_asistencias = {r.id_matricula: r.estado for r in registros}
+    lista_registros = [
+        {
+            "id_asistencia": r.id_asistencia,
+            "id_matricula": r.id_matricula,
+            "fecha": str(r.fecha),
+            "estado": r.estado,
+            "observacion": r.observacion or ""
+        }
+        for r in registros
+    ]
+
+    return {
+        "fecha": fecha,
+        "asistencias": mapa_asistencias,
+        "registros": lista_registros
+    }
+
+
+@router.get("/asistencia/reporte-resumen")
+def reporte_resumen_asistencia(
+    anio_id: Optional[str] = Query(None),
+    bimestre: Optional[int] = Query(None),
+    nivel_id: Optional[int] = Query(None),
+    grado_id: Optional[int] = Query(None),
+    seccion_id: Optional[int] = Query(None),
+    dni: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") not in ("AUXILIAR", "DOCENTE", "ADMIN"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver el reporte de asistencia")
+
+    if not anio_id:
+        ae_activo = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.activo == True).first()
+        anio_id = ae_activo.id_anio_escolar if ae_activo else str(datetime.now().year)
+
+    query = (
+        db.query(
+            models_en.Matricula.id_matricula,
+            models_en.Matricula.id_alumno,
+            models_al.Alumno.nombres,
+            models_al.Alumno.apellidos,
+            models_al.Alumno.dni,
+            models_ac.Nivel.nombre.label("nivel_nombre"),
+            models_ac.Grado.nombre.label("grado_nombre"),
+            models_ac.Grado.id_grado,
+            models_ac.Seccion.nombre.label("seccion_nombre"),
+            models_ac.Seccion.id_seccion,
+        )
+        .join(models_al.Alumno, models_en.Matricula.id_alumno == models_al.Alumno.id_alumno)
+        .join(models_ac.Seccion, models_en.Matricula.id_seccion == models_ac.Seccion.id_seccion)
+        .join(models_ac.Grado, models_ac.Seccion.id_grado == models_ac.Grado.id_grado)
+        .join(models_ac.Nivel, models_ac.Grado.id_nivel == models_ac.Nivel.id_nivel)
+        .filter(
+            models_en.Matricula.id_anio_escolar == anio_id,
+            models_al.Alumno.estado_ingreso != "RETIRADO"
+        )
+    )
+
+    if nivel_id and isinstance(nivel_id, int):
+        query = query.filter(models_ac.Grado.id_nivel == nivel_id)
+    if grado_id and isinstance(grado_id, int):
+        query = query.filter(models_ac.Grado.id_grado == grado_id)
+    if seccion_id and isinstance(seccion_id, int):
+        query = query.filter(models_ac.Seccion.id_seccion == seccion_id)
+    if dni and isinstance(dni, str) and dni.strip():
+        query = query.filter(models_al.Alumno.dni.like(f"%{dni.strip()}%"))
+    if q and isinstance(q, str) and q.strip():
+        termino = q.strip()
+        query = query.filter(
+            or_(
+                models_al.Alumno.nombres.like(f"%{termino}%"),
+                models_al.Alumno.apellidos.like(f"%{termino}%"),
+                models_al.Alumno.dni.like(f"%{termino}%")
+            )
+        )
+
+    matriculas = query.order_by(
+        models_ac.Grado.id_nivel,
+        models_ac.Grado.orden,
+        models_ac.Seccion.nombre,
+        models_al.Alumno.apellidos,
+        models_al.Alumno.nombres
+    ).all()
+
+    from app.modules.behavior.bimestres import calendario
+    ae_obj = db.query(models_ac.AnioEscolar).filter(models_ac.AnioEscolar.id_anio_escolar == anio_id).first()
+    ini_date = ae_obj.fecha_inicio if ae_obj else date(int(anio_id) if str(anio_id).isdigit() else datetime.now().year, 3, 1)
+    fin_date = ae_obj.fecha_fin if ae_obj and ae_obj.fecha_fin else date(int(anio_id) if str(anio_id).isdigit() else datetime.now().year, 12, 20)
+    tramos = calendario(db, anio_id, ini_date, fin_date)
+    tramo_sel = None
+    if bimestre and isinstance(bimestre, int) and bimestre > 0:
+        tramo_sel = next((t for t in tramos if t[0] == bimestre), None)
+
+    bimestres_info = [
+        {
+            "numero": t[0],
+            "fecha_inicio": str(t[1]),
+            "fecha_fin": str(t[2]),
+            "nombre": f"{t[0]}° Bimestre"
+        }
+        for t in tramos
+    ]
+
+    if not matriculas:
+        return {
+            "total": 0,
+            "anio_id": anio_id,
+            "bimestre": bimestre,
+            "bimestres": bimestres_info,
+            "alumnos": []
+        }
+
+    ids_matricula = [m.id_matricula for m in matriculas]
+
+    conteos_query = (
+        db.query(
+            models.Asistencia.id_matricula,
+            models.Asistencia.estado,
+            func.count(models.Asistencia.id_asistencia).label("conteo")
+        )
+        .filter(models.Asistencia.id_matricula.in_(ids_matricula))
+    )
+
+    if tramo_sel:
+        conteos_query = conteos_query.filter(
+            models.Asistencia.fecha >= tramo_sel[1],
+            models.Asistencia.fecha <= tramo_sel[2]
+        )
+
+    conteos_list = conteos_query.group_by(
+        models.Asistencia.id_matricula, models.Asistencia.estado
+    ).all()
+
+    mapa_conteos: dict[int, dict[str, int]] = {}
+    for c in conteos_list:
+        if c.id_matricula not in mapa_conteos:
+            mapa_conteos[c.id_matricula] = {"P": 0, "T": 0, "F": 0, "J": 0}
+        mapa_conteos[c.id_matricula][c.estado] = int(c.conteo)
+
+    resultados = []
+    for m in matriculas:
+        cnt = mapa_conteos.get(m.id_matricula, {"P": 0, "T": 0, "F": 0, "J": 0})
+        p = cnt.get("P", 0)
+        t = cnt.get("T", 0)
+        f = cnt.get("F", 0)
+        j = cnt.get("J", 0)
+        total_dias = p + t + f + j
+        porcentaje = round(((p + t) / total_dias) * 100, 1) if total_dias > 0 else 100.0
+
+        resultados.append({
+            "id_matricula": m.id_matricula,
+            "id_alumno": m.id_alumno,
+            "alumno": f"{m.apellidos} {m.nombres}".strip(),
+            "dni": m.dni or "—",
+            "nivel": m.nivel_nombre,
+            "grado": m.grado_nombre,
+            "id_grado": m.id_grado,
+            "seccion": m.seccion_nombre,
+            "id_seccion": m.id_seccion,
+            "presentes": p,
+            "tardanzas": t,
+            "faltas": f,
+            "justificaciones": j,
+            "total_dias": total_dias,
+            "porcentaje_asistencia": porcentaje
+        })
+
+    return {
+        "total": len(resultados),
+        "anio_id": anio_id,
+        "bimestre": bimestre,
+        "bimestres": bimestres_info,
+        "alumnos": resultados
+    }
+
+
+def _es_anio_verano(db: Session, anio: str) -> bool:
+    """Si un año escolar es de tipo VERANO."""
+    fila = db.query(models_ac.AnioEscolar.tipo).filter(
+        models_ac.AnioEscolar.id_anio_escolar == anio
+    ).first()
+    return bool(fila) and (fila[0] or "REGULAR").strip().upper() == "VERANO"
+
+
+def _cursos_verano_estudiante(db: Session, id_alumno: int, anio: str) -> List[dict]:
+    """Cursos de verano del alumno con su docente, si ya hay alguno asignado.
+
+    El docente se busca por la carga académica de la sección de verano del
+    alumno; en verano es normal que todavía no la haya, y en ese caso el curso
+    igual tiene que aparecer (con "Sin asignar"), como pasa en el año regular.
+    """
+    from app.modules.verano import service as verano_service
+
+    cursos = verano_service.cursos_de_verano_del_alumno(db, id_alumno, anio)
+    if not cursos:
+        return []
+
+    matricula = db.query(models_en.Matricula).filter(
+        models_en.Matricula.id_alumno == id_alumno,
+        models_en.Matricula.id_anio_escolar == anio,
+    ).first()
+
+    docentes: dict = {}
+    if matricula is not None and matricula.id_seccion:
+        filas = (db.query(models.CargaAcademica.id_curso,
+                          models_doc.Docente.nombres,
+                          models_doc.Docente.apellidos,
+                          models_doc.Docente.url_perfil)
+                 .join(models_doc.Docente,
+                       models_doc.Docente.id_docente == models.CargaAcademica.id_docente)
+                 .filter(models.CargaAcademica.id_anio_escolar == anio,
+                         models.CargaAcademica.id_seccion == matricula.id_seccion,
+                         models.CargaAcademica.id_curso.in_([c["id_curso"] for c in cursos]))
+                 .all())
+        docentes = {f.id_curso: f for f in filas}
+
+    salida = []
+    for c in cursos:
+        d = docentes.get(c["id_curso"])
+        salida.append({
+            "id_curso": c["id_curso"],
+            # El taller se marca en el nombre, como en el panel de admisión.
+            "curso_nombre": f"{c['nombre']} (Taller)" if c["es_taller"] else c["nombre"],
+            "docente_nombres": d.nombres if d else "Sin asignar",
+            "docente_apellidos": d.apellidos if d else "",
+            "url_perfil_docente": d.url_perfil if d else None,
+        })
+    return salida
+
+
 @router.get("/mis-cursos/{id_usuario}", response_model=List[schemas.CursoEstudianteResponse])
 def obtener_cursos_estudiante(
     id_usuario: int, 
@@ -206,6 +463,11 @@ def obtener_cursos_estudiante(
 
     if not alumno:
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
+
+    # En verano los cursos no salen del plan de estudio del grado: el alumno
+    # elige los suyos al inscribirse. Ver `cursos_de_verano_del_alumno`.
+    if _es_anio_verano(db, anio):
+        return _cursos_verano_estudiante(db, alumno.id_alumno, anio)
 
     # 2. Query siguiendo el camino real de tus tablas
     cursos_query = (
@@ -370,6 +632,36 @@ def obtener_resumen_notas_estudiante(
 
     if not matricula:
         return []
+
+    # En verano los cursos son los que el alumno eligió al inscribirse, no los
+    # del plan de estudio del grado, y la nota es una sola (no hay bimestres).
+    if _es_anio_verano(db, anio):
+        from app.modules.verano import service as verano_service
+
+        cursos = verano_service.cursos_de_verano_del_alumno(db, alumno.id_alumno, anio)
+        if not cursos:
+            return []
+        notas = {
+            rn.id_curso: rn for rn in db.query(models_mn.ResumenNota).filter(
+                models_mn.ResumenNota.id_matricula == matricula.id_matricula
+            ).all()
+        }
+        salida = []
+        for c in cursos:
+            rn = notas.get(c["id_curso"])
+            promedio = float(rn.promedio_final) if rn and rn.promedio_final is not None else 0
+            salida.append({
+                "id_curso": c["id_curso"],
+                "curso_nombre": f"{c['nombre']} (Taller)" if c["es_taller"] else c["nombre"],
+                "promedio_final": promedio,
+                # El verano es un periodo único: la nota va en el primero y los
+                # otros tres se mandan en 0 para no romper a quien los lea.
+                "nota_bimestre1": promedio,
+                "nota_bimestre2": 0,
+                "nota_bimestre3": 0,
+                "nota_bimestre4": 0,
+            })
+        return salida
 
     # 3. Consulta maestra para obtener todos los cursos de la sección del alumno
     # y sus notas (si existen)
@@ -843,9 +1135,105 @@ def obtener_resumen_docente(id_usuario: int, db: Session = Depends(get_db), curr
     }
 
 
+# --- Notificaciones -------------------------------------------------------
+#
+# Hay dos endpoints sobre los mismos datos: la lista (que arma los mensajes) y
+# el contador (que solo suma, para el badge de la campana). El badge se apaga
+# cuando el total coincide con lo que el usuario ya vio, así que si los dos
+# endpoints cuentan cosas distintas el badge se queda encendido para siempre.
+# Por eso los topes son constantes compartidas y los filtros se arman una sola
+# vez en las funciones de abajo: la lista les pide .all() y el contador
+# .count(), pero el CONJUNTO de filas es exactamente el mismo.
+
+TOPE_ENTREGAS_DOCENTE = 5
+TOPE_NOTAS_ALUMNO = 3
+TOPE_EVALUACIONES = 2
+TOPE_CONDUCTA = 5
+TOPE_CITAS = 5
+TOPE_EVENTOS = 3
+TOPE_MENSAJES = 10
+
+
+def _q_reportes_conducta(db: Session, id_alumno: int, ae):
+    """Reportes de conducta del alumno dentro del año escolar `ae`.
+
+    `reporte_conducta` no guarda el año escolar, solo la fecha, así que el
+    tramo se acota con las fechas del año. Sin ese filtro un alumno de
+    secundaria arrastraría los reportes de todos sus años anteriores.
+    """
+    q = db.query(models_psi.ReporteConducta).filter(
+        models_psi.ReporteConducta.id_alumno == id_alumno
+    )
+    inicio = getattr(ae, "fecha_inicio", None)
+    fin = getattr(ae, "fecha_fin", None)
+    if inicio:
+        q = q.filter(models_psi.ReporteConducta.fecha_reporte >= datetime.combine(inicio, datetime.min.time()))
+    if fin:
+        q = q.filter(models_psi.ReporteConducta.fecha_reporte <= datetime.combine(fin, datetime.max.time()))
+    return q
+
+
+def _q_citas_programadas(db: Session, id_alumno: int):
+    """Citas de psicología ya programadas y que todavía no han pasado.
+
+    Antes solo se avisaba de las citas del MISMO día: si al alumno le
+    programaban una cita para la semana siguiente no se enteraba hasta esa
+    mañana. Ahora aparece desde que se registra y deja de aparecer cuando el
+    día pasa (o cuando la cita cambia de estado).
+    """
+    inicio_hoy = datetime.combine(date.today(), datetime.min.time())
+    return db.query(models_psi.CitaPsicologia).filter(
+        models_psi.CitaPsicologia.id_alumno == id_alumno,
+        models_psi.CitaPsicologia.estado == "PROGRAMADA",
+        models_psi.CitaPsicologia.fecha_cita >= inicio_hoy,
+    )
+
+
+def _anios_inscripcion_abierta(db: Session, id_alumno: Optional[int] = None):
+    """Años escolares cuyo plazo de inscripción está abierto hoy.
+
+    Si se pasa `id_alumno` se descartan los años en los que ese alumno ya se
+    inscribió: no tiene sentido avisar de una matrícula que ya hizo. Para los
+    años de verano la inscripción vive en `solicitud_verano` (la matrícula
+    recién se crea al admitir), así que se miran las dos tablas.
+    """
+    hoy = date.today()
+    anios = db.query(models_ac.AnioEscolar).filter(
+        models_ac.AnioEscolar.inicio_inscripcion.isnot(None),
+        models_ac.AnioEscolar.fin_inscripcion.isnot(None),
+        models_ac.AnioEscolar.inicio_inscripcion <= hoy,
+        models_ac.AnioEscolar.fin_inscripcion >= hoy,
+    ).order_by(models_ac.AnioEscolar.id_anio_escolar.asc()).all()
+
+    if not anios or id_alumno is None:
+        return anios
+
+    ids = [a.id_anio_escolar for a in anios]
+    ya = {
+        m[0] for m in db.query(models_en.Matricula.id_anio_escolar).filter(
+            models_en.Matricula.id_alumno == id_alumno,
+            models_en.Matricula.id_anio_escolar.in_(ids),
+        ).all()
+    }
+    # `solicitud_verano` la crea el script del módulo de verano; si la base aún
+    # no lo tiene, se avisa igual en vez de tumbar todas las notificaciones.
+    try:
+        from app.modules.verano import models as models_verano
+        ya |= {
+            s[0] for s in db.query(models_verano.SolicitudVerano.id_anio_escolar).filter(
+                models_verano.SolicitudVerano.id_alumno == id_alumno,
+                models_verano.SolicitudVerano.id_anio_escolar.in_(ids),
+            ).all()
+        }
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+
+    return [a for a in anios if a.id_anio_escolar not in ya]
+
+
 @router.get("/notificaciones/{id_usuario}")
 def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    
+
     if current_user.get("id") != id_usuario:
         raise HTTPException(status_code=403, detail="No puedes ver perfiles ajenos")
     
@@ -865,7 +1253,7 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
             .filter(
                 models_mn.CargaAcademica.id_docente == docente.id_docente,
                 models_mn.CargaAcademica.id_anio_escolar == anio_activo.id_anio_escolar
-            ).order_by(models_vr.EntregaTarea.fecha_envio.desc()).limit(5).all()
+            ).order_by(models_vr.EntregaTarea.fecha_envio.desc()).limit(TOPE_ENTREGAS_DOCENTE).all()
         
         for e in entregas:
             notificaciones.append({
@@ -880,7 +1268,7 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
         calificaciones = db.query(models_vr.EntregaTarea)\
             .options(joinedload(models_vr.EntregaTarea.tarea))\
             .filter(models_vr.EntregaTarea.id_alumno == alumno.id_alumno, models_vr.EntregaTarea.calificacion != None)\
-            .order_by(models_vr.EntregaTarea.fecha_envio.desc()).limit(3).all()
+            .order_by(models_vr.EntregaTarea.fecha_envio.desc()).limit(TOPE_NOTAS_ALUMNO).all()
         
         for c in calificaciones:
             notificaciones.append({
@@ -908,7 +1296,7 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
         evals = db.query(models_verano.EvaluacionFinal).filter(
             models_verano.EvaluacionFinal.id_alumno == alumno.id_alumno,
             models_verano.EvaluacionFinal.resultado != "PROMOVIDO"
-        ).order_by(models_verano.EvaluacionFinal.fecha.desc()).limit(2).all()
+        ).order_by(models_verano.EvaluacionFinal.fecha.desc()).limit(TOPE_EVALUACIONES).all()
         for ev in evals:
             if ev.resultado == "REPITE":
                 msg = "Repetirás el año académico por desaprobar 4 o más cursos."
@@ -923,22 +1311,53 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
                 "fecha": ev.fecha.isoformat() if ev.fecha else None
             })
 
-        # Filtramos por el alumno, estado programado y que la fecha sea hoy
-        inicio_hoy = datetime.combine(date.today(), datetime.min.time())
-        fin_hoy = datetime.combine(date.today(), datetime.max.time())
+        # --- Reportes de conducta ---
+        # El alumno se entera por aquí de cada falta que le registran el
+        # auxiliar o su tutor, con la falta y los puntos que le cuesta.
+        reportes = (_q_reportes_conducta(db, alumno.id_alumno, anio_activo)
+                    .options(joinedload(models_psi.ReporteConducta.nivel))
+                    .order_by(models_psi.ReporteConducta.fecha_reporte.desc())
+                    .limit(TOPE_CONDUCTA).all())
+        for r in reportes:
+            falta = r.nivel.nombre if r.nivel else "Falta de conducta"
+            puntos = r.nivel.puntos if r.nivel else None
+            detalle = f" (-{puntos} puntos)" if puntos else ""
+            notificaciones.append({
+                "tipo": "conducta",
+                "mensaje": f"Nuevo reporte de conducta: {falta}{detalle}",
+                "fecha": r.fecha_reporte.isoformat() if r.fecha_reporte else None,
+            })
 
-        citas_hoy = db.query(models_psi.CitaPsicologia).filter(
-            models_psi.CitaPsicologia.id_alumno == alumno.id_alumno,
-            models_psi.CitaPsicologia.estado == "PROGRAMADA",
-            models_psi.CitaPsicologia.fecha_cita >= inicio_hoy,
-            models_psi.CitaPsicologia.fecha_cita <= fin_hoy
-        ).all()
-
-        for cita in citas_hoy:
+        # --- Citas de psicología programadas ---
+        citas = (_q_citas_programadas(db, alumno.id_alumno)
+                 .order_by(models_psi.CitaPsicologia.fecha_cita.asc())
+                 .limit(TOPE_CITAS).all())
+        hoy_dia = date.today()
+        for cita in citas:
+            cuando = ("hoy" if cita.fecha_cita.date() == hoy_dia
+                      else f"el {cita.fecha_cita.strftime('%d/%m/%Y')}")
             notificaciones.append({
                 "tipo": "cita",
-                "mensaje": f"Hoy tienes una cita de psicología: {cita.motivo} a las {cita.fecha_cita.strftime('%H:%M')}",
+                "mensaje": (f"Tienes una cita de psicología {cuando} a las "
+                            f"{cita.fecha_cita.strftime('%H:%M')}: {cita.motivo}"),
                 "fecha": cita.fecha_cita.isoformat()
+            })
+
+        # --- Inscripciones abiertas (verano o nuevo año académico) ---
+        for a in _anios_inscripcion_abierta(db, alumno.id_alumno):
+            if (a.tipo or "REGULAR").strip().upper() == "VERANO":
+                mensaje = (f"Están abiertas las inscripciones del año académico de verano "
+                           f"{a.id_anio_escolar}. Puedes inscribirte desde Matrícula.")
+            else:
+                mensaje = (f"Está abierta la matrícula del año académico {a.id_anio_escolar}. "
+                           "Puedes revisarla desde Matrícula.")
+            notificaciones.append({
+                "tipo": "inscripcion",
+                "mensaje": mensaje,
+                # La fecha de la notificación es el cierre del plazo, que es el
+                # dato que al alumno le importa y lo mantiene arriba en la lista
+                # a medida que se acerca.
+                "fecha": a.fin_inscripcion.isoformat() if a.fin_inscripcion else None,
             })
 
     rol = current_user.get("rol")
@@ -952,7 +1371,7 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
         # El resto solo ve los próximos eventos
         eventos = q_eventos.filter(
             models_web.Evento.fecha_inicio >= date.today()
-        ).order_by(models_web.Evento.fecha_inicio.asc()).limit(3).all()
+        ).order_by(models_web.Evento.fecha_inicio.asc()).limit(TOPE_EVENTOS).all()
 
     for ev in eventos:
         notificaciones.append({
@@ -970,7 +1389,7 @@ def obtener_notificaciones(id_usuario: int, db: Session = Depends(get_db), curre
         models_vr.Mensaje.leido == False,
         (models_vr.Conversacion.usuario1_id == id_usuario) |
         (models_vr.Conversacion.usuario2_id == id_usuario)
-    ).order_by(models_vr.Mensaje.fecha_envio.desc()).limit(10).all()
+    ).order_by(models_vr.Mensaje.fecha_envio.desc()).limit(TOPE_MENSAJES).all()
 
     for m in mensajes:
         contenido = m.contenido or ""
@@ -1020,9 +1439,9 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
             models_mn.CargaAcademica.id_docente == docente.id_docente,
             models_mn.CargaAcademica.id_anio_escolar == id_anio_activo
         ).count()
-        total += min(c, 5)
+        total += min(c, TOPE_ENTREGAS_DOCENTE)
 
-    # --- B. ALUMNO: notas (tope 3), deudas, citas de hoy ---
+    # --- B. ALUMNO: notas, deudas, conducta, citas e inscripciones ---
     alumno = None
     if rol == "ALUMNO":
         alumno = db.query(models_al.Alumno).filter(models_al.Alumno.id_usuario == id_usuario).first()
@@ -1030,7 +1449,7 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
         total += min(db.query(models_vr.EntregaTarea).filter(
             models_vr.EntregaTarea.id_alumno == alumno.id_alumno,
             models_vr.EntregaTarea.calificacion != None
-        ).count(), 3)
+        ).count(), TOPE_NOTAS_ALUMNO)
 
         total += db.query(models_fi.Pago).join(models_en.Matricula).filter(
             models_fi.Pago.id_alumno == alumno.id_alumno,
@@ -1038,28 +1457,25 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
             models_en.Matricula.id_anio_escolar == id_anio_activo
         ).count()
 
-        inicio_hoy = datetime.combine(date.today(), datetime.min.time())
-        fin_hoy = datetime.combine(date.today(), datetime.max.time())
-        total += db.query(models_psi.CitaPsicologia).filter(
-            models_psi.CitaPsicologia.id_alumno == alumno.id_alumno,
-            models_psi.CitaPsicologia.estado == "PROGRAMADA",
-            models_psi.CitaPsicologia.fecha_cita >= inicio_hoy,
-            models_psi.CitaPsicologia.fecha_cita <= fin_hoy
-        ).count()
+        # Los mismos filtros que la lista, pero contando en vez de traer filas.
+        ae_activo = consultas_ac.anio_activo(db)
+        total += min(_q_reportes_conducta(db, alumno.id_alumno, ae_activo).count(), TOPE_CONDUCTA)
+        total += min(_q_citas_programadas(db, alumno.id_alumno).count(), TOPE_CITAS)
+        total += len(_anios_inscripcion_abierta(db, alumno.id_alumno))
 
         # Situación académica (nivelación / repitencia), tope 2
         from app.modules.verano import models as models_verano
         total += min(db.query(models_verano.EvaluacionFinal).filter(
             models_verano.EvaluacionFinal.id_alumno == alumno.id_alumno,
             models_verano.EvaluacionFinal.resultado != "PROMOVIDO"
-        ).count(), 2)
+        ).count(), TOPE_EVALUACIONES)
 
     # --- C. EVENTOS (todos para ADMIN, próximos 3 para el resto) ---
     q_eventos = db.query(models_web.Evento).filter(models_web.Evento.activo == True)
     if rol == "ADMIN":
         total += q_eventos.count()
     else:
-        total += min(q_eventos.filter(models_web.Evento.fecha_inicio >= date.today()).count(), 3)
+        total += min(q_eventos.filter(models_web.Evento.fecha_inicio >= date.today()).count(), TOPE_EVENTOS)
 
     # --- D. MENSAJES NO LEÍDOS (tope 10) ---
     total += min(db.query(models_vr.Mensaje).join(
@@ -1070,7 +1486,7 @@ def contador_notificaciones(id_usuario: int, db: Session = Depends(get_db), curr
         models_vr.Mensaje.leido == False,
         (models_vr.Conversacion.usuario1_id == id_usuario) |
         (models_vr.Conversacion.usuario2_id == id_usuario)
-    ).count(), 10)
+    ).count(), TOPE_MENSAJES)
 
     return {"total": total}
 

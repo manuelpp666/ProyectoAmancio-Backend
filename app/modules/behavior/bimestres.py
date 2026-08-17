@@ -23,6 +23,28 @@ from sqlalchemy.orm import Session
 # Cuántos bimestres tiene un año escolar regular.
 TOTAL_BIMESTRES = 4
 
+# El año de verano no se divide en bimestres: son unas siete semanas de clases
+# continuas. El resto del sistema ya lo trata así (las notas y la libreta
+# ignoran el bimestre cuando el año es de tipo VERANO), y aquí hay que hacer lo
+# mismo: si se le aplicara el reparto en cuatro, un verano de mes y medio
+# quedaría partido en tramos de doce días y un reporte de conducta de la última
+# semana caería en un "IV bimestre" que no existe, con lo que desaparecería de
+# la pantalla de conducta (que consulta el tramo 1).
+BIMESTRE_UNICO_VERANO = 1
+
+
+def _tipo_de_anio(db: Session, anio: str) -> str:
+    """REGULAR / VERANO. Se consulta aquí para que ningún llamador se olvide."""
+    try:
+        fila = db.execute(
+            text("SELECT tipo FROM anio_escolar WHERE id_anio_escolar = :anio"),
+            {"anio": anio},
+        ).fetchone()
+    except Exception:
+        db.rollback()
+        return "REGULAR"
+    return ((fila[0] if fila else None) or "REGULAR").strip().upper()
+
 
 def _del_calendario(db: Session, anio: str) -> List[Tuple[int, dt.date, dt.date]]:
     """Lee la tabla `bimestre`. Devuelve [] si no existe o está vacía."""
@@ -55,8 +77,21 @@ def _repartido(inicio: dt.date, fin: dt.date) -> List[Tuple[int, dt.date, dt.dat
 
 def calendario(db: Session, anio: str,
                inicio: Optional[dt.date] = None,
-               fin: Optional[dt.date] = None) -> List[Tuple[int, dt.date, dt.date]]:
-    """Los tramos del año, de la tabla si los hay y repartidos si no."""
+               fin: Optional[dt.date] = None,
+               tipo: Optional[str] = None) -> List[Tuple[int, dt.date, dt.date]]:
+    """Los tramos del año, de la tabla si los hay y repartidos si no.
+
+    `tipo` es el tipo del año escolar (REGULAR / VERANO). Si no se pasa se
+    consulta: los años de verano llevan un tramo único que cubre todo el
+    periodo, ver BIMESTRE_UNICO_VERANO.
+    """
+    if (tipo or _tipo_de_anio(db, anio)) == "VERANO":
+        if inicio and fin:
+            return [(BIMESTRE_UNICO_VERANO, inicio, fin)]
+        # Sin fechas no se puede acotar, pero el tramo único tiene que existir
+        # igual para que la conducta del verano se pueda consultar y guardar.
+        return [(BIMESTRE_UNICO_VERANO, dt.date.min, dt.date.max)]
+
     tramos = _del_calendario(db, anio)
     if tramos:
         return tramos
@@ -90,17 +125,19 @@ def bimestre_de(fecha: dt.date,
 def bimestre_actual(db: Session, anio: str,
                     inicio: Optional[dt.date] = None,
                     fin: Optional[dt.date] = None,
-                    hoy: Optional[dt.date] = None) -> Optional[int]:
+                    hoy: Optional[dt.date] = None,
+                    tipo: Optional[str] = None) -> Optional[int]:
     """El bimestre en curso. None si la fecha queda fuera del año escolar."""
-    tramos = calendario(db, anio, inicio, fin)
+    tramos = calendario(db, anio, inicio, fin, tipo)
     return bimestre_de(hoy or dt.date.today(), tramos)
 
 
 def rango(db: Session, anio: str, numero: int,
           inicio: Optional[dt.date] = None,
-          fin: Optional[dt.date] = None) -> Optional[Tuple[dt.date, dt.date]]:
+          fin: Optional[dt.date] = None,
+          tipo: Optional[str] = None) -> Optional[Tuple[dt.date, dt.date]]:
     """Las fechas de un bimestre concreto, para filtrar consultas."""
-    for n, desde, hasta in calendario(db, anio, inicio, fin):
+    for n, desde, hasta in calendario(db, anio, inicio, fin, tipo):
         if n == numero:
             return (desde, hasta)
     return None
