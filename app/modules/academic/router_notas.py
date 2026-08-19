@@ -344,9 +344,18 @@ def notas_finales(
 
     alumnos = []
     for f in filas:
-        notas = por_alumno.get(f.id_matricula, {})
-        valores = [v for v, _ in notas.values()]
         exo = exonerados.get(f.id_matricula, set())
+
+        # Las notas de un curso exonerado se apartan, no se borran.
+        #
+        # Desde que se puede exonerar a un alumno que ya tenía notas
+        # (ver router_exoneracion.marcar), sus filas siguen guardadas en
+        # `nota`. Aquí se dejan fuera para que la casilla salga EXO y para que
+        # no entren en el promedio ni en el puntaje acumulado. Al retirar la
+        # exoneración vuelven a aparecer solas: nunca se tocó la base.
+        notas = {c: v for c, v in por_alumno.get(f.id_matricula, {}).items()
+                 if c not in exo}
+        valores = [v for v, _ in notas.values()]
 
         # Resolución de nota de conducta:
         # Prioridad: Nota manual/migrada > Cálculo automático (20 - puntos de reportes)

@@ -36,3 +36,19 @@ class LoginResponse(BaseModel):
     # True cuando la cuenta todavía no tiene un correo de contacto registrado
     # y el colegio exige pedirlo en el primer ingreso.
     debe_registrar_correo: bool = False
+
+
+class MisPermisosResponse(BaseModel):
+    """Permisos vigentes del usuario de la sesión.
+
+    El frontend guarda los permisos al entrar y los relee de su propio
+    almacenamiento al refrescar la página, así que sin este endpoint un
+    administrador seguiría viendo los permisos que tenía al iniciar sesión
+    aunque otro administrador ya se los hubiera cambiado.
+
+    `activo` viaja aparte para que el frontend pueda cerrar la sesión de una
+    cuenta dada de baja mientras la tenía abierta.
+    """
+    rol: str
+    activo: bool
+    permisos: Optional[dict] = None

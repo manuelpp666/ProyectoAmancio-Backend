@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.core.util.security import get_current_user
 from app.modules.enrollment.models import Matricula
-from app.modules.management.models import CargaAcademica, ExoneracionCurso, Nota
+from app.modules.management.models import CargaAcademica, ExoneracionCurso
 from app.modules.users.alumno.models import Alumno
 from app.modules.users.docente.models import Docente
 
@@ -172,17 +172,18 @@ def marcar(entrada: ExoneracionEntrada, db: Session = Depends(get_db),
         return {"mensaje": "El alumno ya estaba exonerado de este curso",
                 "id_exoneracion_curso": ya.id_exoneracion_curso}
 
-    # Una nota cargada y una exoneración se contradicen. Se avisa en vez de
-    # borrar la nota por nuestra cuenta: si fue un error de carga lo arregla el
-    # docente, y si no, la nota es la buena.
-    tiene_nota = (db.query(Nota)
-                  .filter(Nota.id_matricula == entrada.id_matricula,
-                          Nota.id_curso == entrada.id_curso).first())
-    if tiene_nota:
-        raise HTTPException(
-            409,
-            "Ese alumno ya tiene notas cargadas en el curso. Bórralas primero "
-            "si de verdad está exonerado.")
+    # Se puede exonerar aunque ya tenga notas, y las notas NO se borran.
+    #
+    # Antes esto devolvía un 409 pidiendo borrarlas primero. Era una mala
+    # solución: obligaba a destruir el trabajo del docente para marcar una
+    # exoneración que a menudo llega a mitad de año (un traslado, un
+    # certificado médico, una convalidación), y si luego se retiraba la
+    # exoneración las notas ya no estaban en ninguna parte.
+    #
+    # Ahora la exoneración solo TAPA las notas: mientras esté puesta, el curso
+    # sale como EXO y no cuenta para ningún promedio, pero las filas siguen en
+    # `nota`. Al quitarla, el alumno recupera exactamente lo que tenía.
+    # Ver `router_libreta._armar_libreta` y `router_notas.sabana_general`.
 
     fila = ExoneracionCurso(id_matricula=entrada.id_matricula,
                             id_curso=entrada.id_curso,

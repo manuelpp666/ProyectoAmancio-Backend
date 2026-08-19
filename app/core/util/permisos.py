@@ -19,6 +19,7 @@ CATALOGO = {
         "postulantes": True,
         "renovaciones": True,
         "verano": True,
+        "notas": True,
     },
     "gestion_personal": {
         "admin": True,
@@ -31,6 +32,7 @@ CATALOGO = {
         "solicitudes": True,
         "tipos_pagos": True,
         "recaudacion": True,
+        "conciliacion": True,
     },
     "academico": {
         "estructura": True,

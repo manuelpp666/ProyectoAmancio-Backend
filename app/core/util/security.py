@@ -41,6 +41,21 @@ def get_current_user(request: Request):
         raise HTTPException(status_code=401, detail="Token expirado o corrupto")
 
 
+def usuario_opcional(request: Request):
+    """Igual que `get_current_user`, pero sin exigir sesión: devuelve None.
+
+    Para endpoints públicos que deben enseñar MENOS datos a quien no ha
+    entrado. El caso que la estrenó: el listado de docentes lo consume la web
+    institucional (cualquiera, sin cuenta) y también el panel; con la misma
+    respuesta para los dos, el DNI y el correo de la plana docente quedaban
+    abiertos en internet.
+    """
+    try:
+        return get_current_user(request)
+    except HTTPException:
+        return None
+
+
 def require_roles(*roles_permitidos: str):
     """
     Dependencia reutilizable de autorización por rol.

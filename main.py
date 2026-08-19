@@ -1,6 +1,21 @@
 import os
 import sys
 
+# Límite de hilos de las librerías de cálculo. TIENE QUE IR ANTES de cualquier
+# import que arrastre numpy (pytesseract lo hace), porque OpenBLAS lee estas
+# variables una sola vez, al cargarse.
+#
+# Sin esto, el servidor no arrancaba en el hosting compartido: OpenBLAS intenta
+# crear un hilo por núcleo de la máquina (32 en el servidor del colegio), el
+# plan compartido no permite tantos procesos, y el arranque moría con
+# "pthread_create failed: Resource temporarily unavailable". La API no llegaba
+# a levantarse y el campus entero se quedaba sin backend.
+#
+# Aquí no se hace cálculo numérico pesado: un solo hilo es de sobra.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 # La consola de Windows usa cp1252 cuando la salida va a un archivo o a una
 # tubería (por ejemplo al arrancar el servidor redirigiendo a un log). Con esa
 # codificación, cualquier print con un emoji o una tilde aborta el arranque con
@@ -22,6 +37,7 @@ from app.modules.users.alumno import router as alumno_router
 from app.modules.users.familiar import router as familiar_router
 from app.modules.users.docente import router as docente_router
 from app.modules.chatbot import router as chatbot_router
+from app.modules.seguridad import router as seguridad_router
 # Resto de módulos
 from app.modules.perfil import router as perfil_router
 from app.modules.academic import router as academic_router
@@ -136,6 +152,7 @@ app.include_router(chatbot_router.router)
 app.include_router(admision_router.router)
 app.include_router(pagina_web_router.router)
 app.include_router(personal_router.router)
+app.include_router(seguridad_router.router)
 app.include_router(verano_router.router)
 
 @app.websocket("/ws/{user_id}")

@@ -89,37 +89,63 @@ _tessdata = os.getenv("TESSDATA_PREFIX") or _TESSDATA_PROYECTO
 if os.path.isdir(_tessdata):
     os.environ["TESSDATA_PREFIX"] = _tessdata
 
-OCR_AVAILABLE = False
-try:
-    import pytesseract
-    from pdf2image import convert_from_path
+# El OCR se prepara la PRIMERA VEZ que hace falta, no al arrancar.
+#
+# Antes esto se importaba aquí mismo, y con ello entraba numpy en el arranque
+# del servidor. En el hosting compartido eso tumbaba la aplicación entera: numpy
+# carga OpenBLAS, OpenBLAS pide un hilo por núcleo (32 en ese servidor), el plan
+# no permite tantos y el proceso moría antes de levantar la API. El campus se
+# quedaba sin backend por una función que casi nunca se usa.
+#
+# Ahora el arranque no toca numpy. Solo se paga ese coste si de verdad llega un
+# PDF escaneado, y el resultado se recuerda para no repetir la comprobación.
+_ocr_estado = None          # None = sin comprobar todavía
+_pytesseract = None
+_convert_from_path = None
 
-    if TESSERACT_CMD:
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
-    faltan = []
-    if not TESSERACT_CMD:
-        faltan.append("Tesseract (programa)")
-    if not POPPLER_PATH:
-        faltan.append("Poppler (programa)")
-    if not faltan:
-        idiomas = set(pytesseract.get_languages(config=""))
-        if "spa" not in idiomas:
-            faltan.append("idioma español de Tesseract (spa.traineddata)")
+def _preparar_ocr() -> bool:
+    """Comprueba e inicializa el OCR una sola vez. True si se puede usar."""
+    global _ocr_estado, _pytesseract, _convert_from_path
+    if _ocr_estado is not None:
+        return _ocr_estado
 
-    if faltan:
-        print("[WARN] OCR desactivado, falta: " + ", ".join(faltan))
-    else:
-        OCR_AVAILABLE = True
-        print(f"[OK] OCR activo · Tesseract: {TESSERACT_CMD} · idiomas: spa+eng")
-except ImportError:
-    print(
-        "[WARN] pytesseract/pdf2image no están instalados. El fallback de OCR para "
-        "PDFs escaneados estará desactivado. Instala con:\n"
-        "  pip install pytesseract pdf2image"
-    )
-except Exception as e:  # p. ej. Tesseract instalado pero roto
-    print(f"[WARN] OCR desactivado por un error al comprobarlo: {e}")
+    _ocr_estado = False
+    try:
+        import pytesseract
+        from pdf2image import convert_from_path
+
+        if TESSERACT_CMD:
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+        faltan = []
+        if not TESSERACT_CMD:
+            faltan.append("Tesseract (programa)")
+        if not POPPLER_PATH:
+            faltan.append("Poppler (programa)")
+        if not faltan:
+            idiomas = set(pytesseract.get_languages(config=""))
+            if "spa" not in idiomas:
+                faltan.append("idioma español de Tesseract (spa.traineddata)")
+
+        if faltan:
+            print("[WARN] OCR desactivado, falta: " + ", ".join(faltan))
+        else:
+            _pytesseract = pytesseract
+            _convert_from_path = convert_from_path
+            _ocr_estado = True
+            print(f"[OK] OCR activo · Tesseract: {TESSERACT_CMD} · idiomas: spa+eng")
+    except ImportError:
+        print(
+            "[WARN] pytesseract/pdf2image no están instalados. El fallback de OCR para "
+            "PDFs escaneados estará desactivado. Instala con:\n"
+            "  pip install pytesseract pdf2image"
+        )
+    except Exception as e:  # p. ej. Tesseract instalado pero roto
+        print(f"[WARN] OCR desactivado por un error al comprobarlo: {e}")
+
+    return _ocr_estado
+
 
 load_dotenv()
 
@@ -357,18 +383,18 @@ def extract_docx_blocks(path: str) -> List[str]:
 # ==========================================================================
 
 def _ocr_page(path: str, page_number: int) -> str:
-    if not OCR_AVAILABLE:
+    if not _preparar_ocr():
         return ""
     try:
         # poppler_path explícito: en Windows los binarios no siempre están en el
         # PATH del proceso que arranca el servidor, y sin esto convert_from_path
         # fallaba aunque Poppler estuviera instalado.
         extra = {"poppler_path": POPPLER_PATH} if POPPLER_PATH else {}
-        images = convert_from_path(
+        images = _convert_from_path(
             path, first_page=page_number + 1, last_page=page_number + 1, dpi=200, **extra)
         if not images:
             return ""
-        return pytesseract.image_to_string(images[0], lang="spa+eng")
+        return _pytesseract.image_to_string(images[0], lang="spa+eng")
     except Exception as e:
         print(f"[OCR][WARN] No se pudo aplicar OCR a la pagina {page_number + 1}: {e}")
         return ""

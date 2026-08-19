@@ -34,6 +34,24 @@ class UsuarioEnDocente(BaseModel):
     activo: bool
     model_config = ConfigDict(from_attributes=True)
 
+class DocentePublicoResponse(BaseModel):
+    """Lo que puede ver cualquiera desde la web institucional.
+
+    Deliberadamente NO lleva dni, email, telefono ni id_usuario. El nombre de
+    usuario del colegio es DOC-<dni>, así que publicar el DNI equivalía a
+    publicar media credencial de acceso.
+    """
+    id_docente: int
+    nombres: str
+    apellidos: str
+    especialidad: str | None = None
+    descripcion: Optional[str] = None
+    url_perfil: Optional[str] = None
+    visible_web: bool = True
+    usuario: "UsuarioEnDocente | None" = None
+    model_config = ConfigDict(from_attributes=True)
+
+
 class DocenteResponse(DocenteBase):
     id_docente: int
     dni: str

@@ -176,11 +176,19 @@ def _armar_libreta(*, alumno_info: dict, cursos, notas_por_curso: dict,
         info["orden"] = orden
         info["nombre"] = nombre_area or "SIN ÁREA"
 
-        notas_curso = notas_por_curso.get(c.id_curso, {})
+        # Un curso exonerado se muestra SIN notas, aunque las tenga guardadas.
+        #
+        # La exoneración se puede poner a mitad de año, cuando el docente ya
+        # calificó. Sus notas no se borran —siguen en `nota`, intactas— pero
+        # mientras la exoneración esté puesta no se enseñan ni entran en
+        # ningún promedio: el curso sale EXO, que es lo que significa estar
+        # exonerado. Si se retira la exoneración, reaparecen tal cual estaban.
+        esta_exonerado = c.id_curso in exonerados
+        notas_curso = {} if esta_exonerado else notas_por_curso.get(c.id_curso, {})
         info["cursos"].append({
             "id_curso": c.id_curso,
             "nombre": c.nombre,
-            "exonerado": c.id_curso in exonerados,
+            "exonerado": esta_exonerado,
             "notas": {str(b): notas_curso.get(b) for b in visibles},
         })
 

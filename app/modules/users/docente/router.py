@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from .schemas import DocenteCreate, DocenteResponse,DocenteUpdate
+from .schemas import (DocenteCreate, DocenteResponse, DocenteUpdate,
+                      DocentePublicoResponse)
 from .models import Docente
 from app.modules.users.models import Usuario
 from typing import List
 from app.core.util.password import get_password_hash
 from app.core.util.usuarios import generar_username
-from app.core.util.security import get_current_user
+from app.core.util.security import get_current_user, usuario_opcional
 from sqlalchemy.orm import joinedload
 from sqlalchemy import or_
 
@@ -56,12 +57,29 @@ def crear_docente(docente_in: DocenteCreate, db: Session = Depends(get_db), curr
         db.rollback() # Si falla algo, deshacemos todo (no se crea ni el usuario ni el docente)
         raise HTTPException(status_code=500, detail=f"Error al registrar: {str(e)}")
 
-@router.get("/", response_model=List[DocenteResponse])
-def listar_docentes(search: str = None, db: Session = Depends(get_db)):
+@router.get("/", response_model=None)
+def listar_docentes(search: str = None, db: Session = Depends(get_db),
+                    current_user: dict | None = Depends(usuario_opcional)):
     """
     Lista docentes con opción de búsqueda por nombre, apellido o especialidad.
+
+    La respuesta depende de quién pregunta. Este endpoint lo consume la web
+    institucional SIN sesión, y antes devolvía la ficha entera: DNI, correo y
+    teléfono de los 42 docentes quedaban accesibles para cualquiera. Como el
+    usuario del colegio es DOC-<dni>, publicar el DNI era publicar la mitad de
+    la credencial. Ahora:
+      * sin sesión (o con una que no sea de ADMIN): solo lo que se enseña en la
+        página de docentes, y únicamente los visibles y activos;
+      * ADMIN: la ficha completa, que es lo que necesita el panel.
     """
+    es_admin = (current_user or {}).get("rol") == "ADMIN"
+
     query = db.query(Docente).options(joinedload(Docente.usuario))
+
+    if not es_admin:
+        # Un docente oculto de la web no tiene por qué salir en la respuesta
+        # pública aunque el navegador luego lo filtre: si viaja, está expuesto.
+        query = query.filter(Docente.visible_web.is_(True))
 
     if search:
         # ilike es para búsquedas que ignoran mayúsculas/minúsculas
@@ -74,7 +92,11 @@ def listar_docentes(search: str = None, db: Session = Depends(get_db)):
             )
         )
 
-    return query.all()
+    filas = query.all()
+    if es_admin:
+        return [DocenteResponse.model_validate(d) for d in filas]
+    return [DocentePublicoResponse.model_validate(d) for d in filas
+            if not d.usuario or d.usuario.activo]
 
 
 @router.get("/{id}", response_model=DocenteResponse)
