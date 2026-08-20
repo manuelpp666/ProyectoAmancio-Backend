@@ -1683,6 +1683,7 @@ def dashboard_admin(
     # ── ASISTENCIA DE HOY ───────────────────────────────────────────────────
     conteo_hoy = {"P": 0, "T": 0, "F": 0, "J": 0}
     secciones_registradas = 0
+    secciones_con_lista: set = set()
     if ids_matricula:
         filas_hoy = (
             db.query(models.Asistencia.estado, func.count(models.Asistencia.id_asistencia))
@@ -1697,16 +1698,20 @@ def dashboard_admin(
             if estado in conteo_hoy:
                 conteo_hoy[estado] = n
 
-        # Secciones que ya pasaron lista hoy
-        secciones_registradas = (
-            db.query(func.count(func.distinct(models_en.Matricula.id_seccion)))
+        # Qué secciones ya pasaron lista hoy. Antes solo se contaban; ahora se
+        # guardan sus ids porque el panel marca aula por aula con un punto
+        # verde o rojo, y con un número suelto no se sabe cuál falta.
+        filas_sec = (
+            db.query(func.distinct(models_en.Matricula.id_seccion))
             .join(models.Asistencia, models.Asistencia.id_matricula == models_en.Matricula.id_matricula)
             .filter(
                 models.Asistencia.fecha == hoy,
                 models_en.Matricula.id_anio_escolar == anio,
             )
-            .scalar() or 0
+            .all()
         )
+        secciones_con_lista = {f[0] for f in filas_sec if f[0] is not None}
+        secciones_registradas = len(secciones_con_lista)
 
     secciones_total = (
         db.query(func.count(models_ac.Seccion.id_seccion))
@@ -1820,6 +1825,9 @@ def dashboard_admin(
             "seccion": sec,
             "matriculados": por_seccion.get(id_sec, 0),
             "vacantes": vac or 0,
+            # Si hoy se registró asistencia en esta aula. El panel lo pinta
+            # como un punto verde o rojo junto al nombre de la sección.
+            "paso_lista": id_sec in secciones_con_lista,
         })
 
     return {

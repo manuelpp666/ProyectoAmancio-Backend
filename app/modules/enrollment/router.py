@@ -10,6 +10,7 @@ from app.core.util.security import get_current_user
 
 # Importamos modelos de alumno para asegurar relaciones si es necesario
 from app.modules.users.alumno import models as alumno_models
+from app.modules.virtual.traslado import trasladar_entregas
 from app.modules.users import models as users_models
 from app.modules.academic import models as academic_models
 from app.modules.finance import models as finance_models
@@ -77,14 +78,37 @@ def actualizar_matricula(
     matricula = db.query(models.Matricula).filter(models.Matricula.id_matricula == matricula_id).first()
     if not matricula:
         raise HTTPException(status_code=404, detail="Matrícula no encontrada")
-    
+
+    # De dónde viene, antes de pisarlo: hace falta para llevarle sus notas.
+    seccion_anterior = matricula.id_seccion
+
     # Actualizamos campos
     matricula.id_seccion = datos.id_seccion
     # Mantenemos otros datos para evitar inconsistencias
     if datos.id_grado: matricula.id_grado = datos.id_grado
-    
+
+    # Al cambiar de aula se le lleva lo que no viaja solo.
+    #
+    # Su expediente no necesita nada: notas oficiales, resumen, conducta y
+    # asistencia cuelgan de la MATRÍCULA, que no cambia. Lo único que se queda
+    # atrás son las calificaciones del aula virtual, porque ahí las notas
+    # cuelgan de tareas y cada tarea pertenece a una sección. Sin esto, el
+    # docente nuevo veía al alumno con promedio 0,0.
+    traslado = None
+    if seccion_anterior and seccion_anterior != datos.id_seccion:
+        traslado = trasladar_entregas(
+            db,
+            id_alumno=matricula.id_alumno,
+            id_seccion_origen=seccion_anterior,
+            id_seccion_destino=datos.id_seccion,
+            id_anio_escolar=matricula.id_anio_escolar,
+        )
+
     db.commit()
     db.refresh(matricula)
+    if traslado:
+        print(f"[TRASLADO] alumno {matricula.id_alumno}: seccion {seccion_anterior} -> "
+              f"{datos.id_seccion} · {traslado}")
     return matricula
 
 # --- RENOVACIÓN DE MATRÍCULA (ALUMNO) ---
@@ -766,4 +790,4 @@ def procesar_retiro_no_renovados(
         "message": f"Se procesó el retiro de {len(alumnos_db)} estudiante(s) no renovados exitosamente.",
         "procesados": len(alumnos_db),
         "ids_procesados": ids_a_retirar
-    }
+    }
