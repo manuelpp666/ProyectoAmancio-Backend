@@ -1,6 +1,5 @@
 import os
 import uuid
-import shutil
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, UploadFile, File
@@ -19,6 +18,7 @@ from app.modules.users.alumno import models as models_al
 from app.modules.users.docente import models as models_doc
 from app.modules.personal import models as models_psi
 from app.core.util.security import get_current_user, ensure_owner_or_roles
+from app.core.util import archivos
 from . import models, schemas
 
 
@@ -37,9 +37,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(DOCS_TAREAS_DIR, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png"}
-# Definición de la constante (10 MB)
-MAX_FILE_SIZE_MB = 10
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# El tope de tamaño por archivo (10 MB) y la cuota por carpeta viven en
+# app/core/util/archivos.py, que es quien guarda todas las subidas. Antes la
+# constante estaba aquí y solo la miraba la entrega del alumno: el material
+# del docente y el adjunto de la tarea se guardaban sin comprobar nada.
 
 
 router = APIRouter(prefix="/virtual", tags=["Aula Virtual"])
@@ -464,24 +466,19 @@ async def crear_tarea(
     # 3. Procesamiento del Archivo (Si el docente lo subió)
     url_adjunto = None
     if archivo and archivo.filename:
-        # Validar extensión
-        ext = os.path.splitext(archivo.filename)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
-
         # Definir ruta: media/recursos_tareas/carga_X/
         rel_folder = os.path.join("media", "recursos_tareas", f"carga_{id_carga_academica}")
         abs_folder = os.path.join(BASE_DIR, rel_folder)
-        os.makedirs(abs_folder, exist_ok=True)
 
         # Nombre único para evitar colisiones
+        ext = os.path.splitext(archivo.filename)[1].lower()
         filename = f"ref_{uuid.uuid4().hex[:6]}{ext}"
-        file_path = os.path.join(abs_folder, filename)
 
-        # Guardado físico
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(archivo.file, buffer)
-        
+        # Extensión, tamaño y cuota de la carpeta del curso: las tres reglas
+        # viven en app/core/util/archivos.py, no repartidas por los endpoints.
+        archivos.guardar_subida(archivo, abs_folder, filename,
+                                extensiones=ALLOWED_EXTENSIONS)
+
         url_adjunto = f"/{rel_folder}/{filename}".replace("\\", "/")
 
     # 4. Crear registro en BD
@@ -615,18 +612,15 @@ async def crear_material(
 
     url_adjunto = None
     if archivo and archivo.filename:
-        ext = os.path.splitext(archivo.filename)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
-
         rel_folder = os.path.join("media", "materiales_clase", f"carga_{id_carga_academica}")
         abs_folder = os.path.join(BASE_DIR, rel_folder)
-        os.makedirs(abs_folder, exist_ok=True)
 
+        ext = os.path.splitext(archivo.filename)[1].lower()
         filename = f"mat_{uuid.uuid4().hex[:6]}{ext}"
-        file_path = os.path.join(abs_folder, filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(archivo.file, buffer)
+
+        archivos.guardar_subida(archivo, abs_folder, filename,
+                                extensiones=ALLOWED_EXTENSIONS)
+
         url_adjunto = f"/{rel_folder}/{filename}".replace("\\", "/")
 
     nuevo = models.MaterialClase(
@@ -986,26 +980,31 @@ async def editar_tarea(
 
     # 2. Gestión del archivo adjunto del docente (si se sube uno nuevo)
     if archivo and archivo.filename:
-        # Borrar el archivo físico anterior si existía
-        if tarea.archivo_adjunto_url:
-            old_path = os.path.join(BASE_DIR, tarea.archivo_adjunto_url.lstrip("/"))
-            if os.path.exists(old_path):
-                try: os.remove(old_path)
-                except: pass
-
-        # Guardar el nuevo archivo
+        # Guardar el nuevo archivo PRIMERO. El anterior no se toca hasta que
+        # este haya entrado bien: si la subida se rechaza por tamaño, por
+        # extensión o porque la carpeta del curso está llena, el docente se
+        # queda con el adjunto que ya tenía en vez de perder los dos.
         rel_folder = os.path.join("media", "recursos_tareas", f"carga_{tarea.id_carga_academica}")
         abs_folder = os.path.join(BASE_DIR, rel_folder)
-        os.makedirs(abs_folder, exist_ok=True)
-        
+
         ext = os.path.splitext(archivo.filename)[1].lower()
         filename = f"ref_{uuid.uuid4().hex[:6]}{ext}"
-        file_path = os.path.join(abs_folder, filename)
 
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(archivo.file, buffer)
-        
+        archivos.guardar_subida(archivo, abs_folder, filename,
+                                extensiones=ALLOWED_EXTENSIONS)
+
+        anterior = tarea.archivo_adjunto_url
         tarea.archivo_adjunto_url = f"/{rel_folder}/{filename}".replace("\\", "/")
+
+        # Ya hay archivo nuevo: ahora sí se borra el viejo. Si fallara, lo
+        # recoge la limpieza de huérfanos del mantenimiento semanal.
+        if anterior:
+            old_path = os.path.join(BASE_DIR, anterior.lstrip("/"))
+            if os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except OSError as e:
+                    print(f"[VIRTUAL][WARN] No se pudo borrar {old_path}: {e}")
 
     # 3. Actualizar campos de texto
     tarea.titulo = titulo
@@ -1100,45 +1099,26 @@ async def entregar_tarea(
     if not alumno:
         raise HTTPException(status_code=404, detail="Perfil de alumno no encontrado")
 
-    # 2. VALIDACIONES DE ARCHIVO
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    if file_ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Formato {file_ext} no permitido.")
-
-    # --- SOLUCIÓN DEFINITIVA ---
-    # Accedemos a file.file (objeto SpooledTemporaryFile de Python) 
-    # que sí acepta 2 argumentos en seek()
-    file.file.seek(0, 2) 
-    file_size = file.file.tell()
-    file.file.seek(0)
-
-    if file_size > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status_code=413, detail=f"El archivo es muy grande ({round(file_size/1024/1024, 2)}MB). Máximo 10MB.")
-
-    # 3. GESTIÓN DE DIRECTORIOS
+    # 2. GESTIÓN DE DIRECTORIOS
     relative_folder = os.path.join("media", "entregas_tareas", f"tarea_{id_tarea}")
     absolute_folder = os.path.join(BASE_DIR, relative_folder)
-    
-    # Asegurar que los directorios existan
-    try:
-        os.makedirs(absolute_folder, exist_ok=True)
-    except Exception as e:
-        print(f"Error creando carpetas: {e}")
-        raise HTTPException(status_code=500, detail="Error de permisos en el servidor.")
 
     # Nombre único para evitar colisiones
+    file_ext = os.path.splitext(file.filename or "")[1].lower()
     unique_filename = f"alu_{alumno.id_alumno}_{uuid.uuid4().hex[:8]}{file_ext}"
-    file_path = os.path.join(absolute_folder, unique_filename)
 
-    # 4. GUARDADO FÍSICO
-    try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
-        print(f"Error al guardar archivo: {e}")
-        raise HTTPException(status_code=500, detail="Error al escribir el archivo en disco.")
+    # 3. VALIDACIONES Y GUARDADO FÍSICO
+    #
+    # Esta carpeta va SIN cuota, a diferencia de las del docente: cada alumno
+    # tiene como mucho una entrega por tarea (la siguiente reemplaza a la
+    # anterior y borra su archivo), así que el tamaño ya está acotado por el
+    # número de alumnos de la sección. Una cuota de carpeta aquí acabaría
+    # rechazando la entrega del último alumno de una clase numerosa, que es
+    # justo lo que no debe pasar el día de la fecha límite.
+    archivos.guardar_subida(file, absolute_folder, unique_filename,
+                            extensiones=ALLOWED_EXTENSIONS, cuota_bytes=None)
 
-    # 5. ACTUALIZACIÓN DE BASE DE DATOS
+    # 4. ACTUALIZACIÓN DE BASE DE DATOS
     entrega = db.query(models.EntregaTarea).filter(
         models.EntregaTarea.id_tarea == id_tarea,
         models.EntregaTarea.id_alumno == alumno.id_alumno

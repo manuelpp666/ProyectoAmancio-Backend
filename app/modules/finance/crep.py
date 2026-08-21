@@ -28,6 +28,10 @@ ANCHO = 250
 CODIFICACION = "latin-1"
 SALTO = "\r\n"
 
+# El código de operación ocupa seis caracteres y viene relleno con ceros por
+# delante: 048937, no 48937. Ver `normalizar_operacion`.
+LARGO_OPERACION = 6
+
 
 class ErrorFormatoBCP(ValueError):
     """El archivo no tiene la pinta de un archivo del BCP."""
@@ -72,6 +76,35 @@ def _de_fecha(valor: dt.date) -> str:
 def _documento(texto: str) -> str:
     """Quita los ceros de relleno: '00000062884107' -> '62884107'."""
     return texto.strip().lstrip("0")
+
+
+def normalizar_operacion(valor) -> Optional[str]:
+    """El código de operación en la forma en que lo manda el banco: '48937' -> '048937'.
+
+    Al revés que en el documento, aquí el cero de relleno SÍ es parte del
+    código, y se pierde con una facilidad enorme: si el código pasa por una
+    hoja de cálculo, Excel lo guarda como el número 48937; si alguien lo teclea
+    a mano, rara vez escribe el cero. Al conciliar se comparan en crudo, así
+    que '048937' y '48937' pasan por cobros distintos, y una cuota que ya
+    estaba pagada acaba en la bandeja de revisión como posible pago doble.
+
+    Se rellena en lugar de recortar por delante para que lo guardado coincida
+    con lo que llega del banco, que es contra lo que se contrasta.
+
+    Lo que no son puros dígitos se devuelve tal cual: MANUAL-CAJA y
+    MANUAL-CONCILIACION son marcas del sistema, no códigos del BCP. Un código
+    más largo de la cuenta tampoco se toca —zfill no recorta— porque acortarlo
+    sería inventarse un dato.
+    """
+    if valor is None:
+        return None
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    # isdigit() acepta dígitos de otros alfabetos, que zfill no sabría alinear.
+    if texto.isascii() and texto.isdigit():
+        return texto.zfill(LARGO_OPERACION)
+    return texto
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +222,9 @@ def parsear_reporte_cobros(datos: bytes) -> ReporteCobros:
             monto_total=_a_decimal(l[103:118]),
             sucursal=l[118:121].strip(),
             agencia=l[121:124].strip(),
-            operacion=l[124:130].strip(),
+            # `or ""` para no cambiar el tipo cuando el campo viene en blanco:
+            # antes era cadena vacía y hay sitios que la esperan así.
+            operacion=normalizar_operacion(l[124:130]) or "",
             referencia=l[130:152].strip(),
             medio_atencion=l[156:158].strip(),
             hora_atencion=l[168:174].strip(),

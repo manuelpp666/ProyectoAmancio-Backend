@@ -235,3 +235,67 @@ class RegistroCREP(Base):
     estado = Column(String(20), default="INCORPORADO", index=True)  # INCORPORADO | DESCARGADO
     # Lista de cuotas serializadas en JSON para la comparación delta exacta
     cuotas_json = Column(Text().with_variant(Text(4294967295), "mysql"), nullable=True)
+
+
+class AjusteManualPago(Base):
+    """Cada cambio que una persona hace a mano sobre una cuota.
+
+    POR QUÉ EXISTE
+      El archivo CREP se genera leyendo `pago` en vivo, así que un cambio hecho
+      a mano ya viaja al banco en la siguiente descarga. Lo que no había forma
+      de saber es CUÁLES fueron esos cambios: quién bajó un importe, a quién se
+      le cobró en caja o qué cuota se borró. Al comparar el archivo con el del
+      mes anterior aparecían diferencias que nadie sabía justificar.
+
+      Esta tabla es el rastro. No decide nada del cobro —la que manda sigue
+      siendo `pago`—, solo anota lo que pasó y si el banco ya lo tiene.
+
+    LO QUE NO ES
+      No es la conciliación. Los cobros que llegan del BCP se anotan en
+      `movimiento_cobranza`; aquí solo entra lo que hizo una persona desde el
+      panel.
+    """
+    __tablename__ = "ajuste_manual_pago"
+
+    id_ajuste = Column(Integer, primary_key=True, index=True)
+
+    # La cuota afectada. Queda a NULL cuando se borró: por eso los datos que
+    # hacen falta para reconocerla en el CREP (documento, vencimiento, importe)
+    # se copian aquí y no se leen por relación.
+    # Enteros sueltos, sin clave foránea a propósito: con una FK, borrar un
+    # pago fallaría mientras quede su apunte, y el registro de lo ocurrido no
+    # puede ser motivo de que una operación normal deje de funcionar.
+    id_pago = Column(Integer, nullable=True, index=True)
+    id_cuota_externa = Column(Integer, nullable=True, index=True)
+
+    # ALTA · MONTO · MORA · ESTADO · PAGO_MANUAL · ELIMINACION · PRECIO_MASIVO
+    tipo = Column(String(20), nullable=False, index=True)
+
+    # Qué le hace este cambio al archivo del banco, ya resuelto al anotarlo:
+    # ALTA (entra una cuota) · BAJA (deja de cobrarse) · IMPORTE (cambia lo que
+    # se cobra) · NINGUNO (no altera el archivo).
+    efecto_crep = Column(String(10), nullable=False, default="NINGUNO",
+                         server_default="NINGUNO", index=True)
+
+    documento = Column(String(20), nullable=True, index=True)
+    nombre = Column(String(120), nullable=True)
+    concepto = Column(String(150), nullable=True)
+    fecha_vencimiento = Column(Date, nullable=True, index=True)
+
+    monto_anterior = Column(Numeric(10, 2), nullable=True)
+    monto_nuevo = Column(Numeric(10, 2), nullable=True)
+    mora_anterior = Column(Numeric(10, 2), nullable=True)
+    mora_nueva = Column(Numeric(10, 2), nullable=True)
+    estado_anterior = Column(String(20), nullable=True)
+    estado_nuevo = Column(String(20), nullable=True)
+
+    detalle = Column(String(255), nullable=True)
+
+    id_usuario = Column(Integer, nullable=True, index=True)
+    usuario = Column(String(60), nullable=True)
+    fecha = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+    # Con qué CREP oficial se envió al banco. NULL = todavía no incorporado,
+    # que es lo que la pantalla enseña como pendiente.
+    id_registro_crep = Column(Integer, nullable=True, index=True)
+    fecha_incorporacion = Column(DateTime, nullable=True)

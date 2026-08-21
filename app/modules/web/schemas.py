@@ -1,8 +1,18 @@
+import json
+
 from pydantic import BaseModel,Field, ConfigDict, model_validator
 from datetime import datetime
 from typing import List, Optional, Literal
 
-MAXIMO_IMAGENES = 4
+# Una noticia puede llevar todas las fotos que haga falta. El único límite
+# real es la columna donde se guarda la lista: es un TEXT de MySQL, 65 535
+# bytes, y ahí caben del orden de 600 URLs de Cloudinary.
+#
+# Se comprueba a propósito, aunque no se vaya a alcanzar nunca: MySQL no
+# avisa al pasarse, RECORTA. Y una lista JSON cortada por la mitad ya no se
+# puede leer, así que la noticia se quedaría sin NINGUNA foto en vez de sin
+# la última. Mejor un error claro antes de guardar.
+LIMITE_BYTES_GALERIA = 65_000
 
 class NoticiaCreate(BaseModel):
     titulo: str = Field(..., min_length=5, max_length=150)
@@ -20,8 +30,9 @@ class NoticiaCreate(BaseModel):
         """Limpia la galería y la deja coherente con la portada.
 
         Quita huecos y repetidas —subir dos veces la misma foto no debe
-        pintarla dos veces—, corta en 4 y se asegura de que la portada sea la
-        primera, que es lo que ve quien entra desde el listado.
+        pintarla dos veces— y se asegura de que la portada sea la primera,
+        que es lo que ve quien entra desde el listado. No hay tope de fotos;
+        lo único que se vigila es que la lista quepa en su columna.
         """
         if self.imagenes is not None:
             limpias: List[str] = []
@@ -29,7 +40,12 @@ class NoticiaCreate(BaseModel):
                 url = (url or "").strip()
                 if url and url not in limpias:
                     limpias.append(url)
-            self.imagenes = limpias[:MAXIMO_IMAGENES] or None
+            medida = len(json.dumps(limpias, ensure_ascii=False).encode("utf-8"))
+            if medida > LIMITE_BYTES_GALERIA:
+                raise ValueError(
+                    f"La galería tiene {len(limpias)} imágenes y no cabe en la "
+                    f"noticia. Quita algunas y vuelve a guardar.")
+            self.imagenes = limpias or None
         if self.imagenes:
             self.imagen_portada_url = self.imagenes[0]
         return self

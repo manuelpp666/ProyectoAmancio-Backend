@@ -1,20 +1,23 @@
 import os
 import uuid
-import shutil
 import calendar
 from fastapi import APIRouter, Depends, HTTPException, status,File, UploadFile, Form
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime, date, timedelta
 from typing import List,Optional
+from decimal import Decimal
 from sqlalchemy import func, extract, or_, and_
 from app.db.database import get_db
 from . import models, schemas
+from . import ajustes
 from app.modules.academic import models as academic_models
 from app.modules.users.alumno import models as user_models
 from app.modules.enrollment import models as er_models
 from .service import FinanceService
+from .crep import normalizar_operacion
 from app.core.util.security import get_current_user, require_roles, require_service_key
 from app.core.util import busqueda as busqueda_util
+from app.core.util import archivos
 
 
 router = APIRouter(prefix="/finance", tags=["Finanzas"])
@@ -177,26 +180,23 @@ async def solicitar_tramite(
 
     # 2. Gestión de Archivo (Lógica similar a entregas-tarea)
     url_db = None
-    if file:
-        file_ext = os.path.splitext(file.filename)[1].lower()
-        if file_ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Formato de archivo no permitido.")
-        
-        # Crear carpeta si no existe
+    # `file` a secas era verdadero aunque el navegador mandara el campo vacío,
+    # y entonces `file.filename` valía "" y se guardaba un archivo sin nombre.
+    if file and file.filename:
         absolute_folder = os.path.join(BASE_DIR, UPLOAD_DIR)
-        os.makedirs(absolute_folder, exist_ok=True)
 
         # Nombre único
+        file_ext = os.path.splitext(file.filename)[1].lower()
         unique_filename = f"tramite_{id_alumno}_{uuid.uuid4().hex[:8]}{file_ext}"
-        file_path = os.path.join(absolute_folder, unique_filename)
 
-        # Guardado físico
-        try:
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-            url_db = f"/{UPLOAD_DIR}/{unique_filename}".replace("\\", "/")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Error al guardar el archivo adjunto.")
+        # Extensión y tamaño máximo. Va SIN cuota de carpeta: aquí caen los
+        # adjuntos de todo el colegio en una sola carpeta, y una cuota que se
+        # llenara dejaría a los alumnos sin poder pedir trámites. Cuánto ocupa
+        # se vigila desde Panel → Mantenimiento.
+        archivos.guardar_subida(file, absolute_folder, unique_filename,
+                                extensiones=ALLOWED_EXTENSIONS, cuota_bytes=None)
+
+        url_db = f"/{UPLOAD_DIR}/{unique_filename}".replace("\\", "/")
 
     # 3. Determinar estado inicial
     estado_inicial = "PAGADO_PENDIENTE_REV" if tipo_tramite.costo <= 0 else "PENDIENTE_PAGO"
@@ -261,6 +261,11 @@ def crear_pago(pago: schemas.PagoCreate, db: Session = Depends(get_db), current_
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
+    # Una cuota creada a mano entra en el archivo del BCP como una línea más;
+    # queda anotada para poder justificarla cuando se cuadre con el banco.
+    ajustes.anotar(ajustes.apunte(
+        "ALTA", {}, ajustes.instantanea(nuevo), usuario=current_user,
+        detalle="Cuota registrada desde el panel"))
     return nuevo
 
 @router.get("/bcp/consulta/{dni}", response_model=List[schemas.PagoResponse])
@@ -306,7 +311,9 @@ def notificar_pago_bcp(payload: schemas.BCPWebhookPayload, db: Session = Depends
     # 2. Actualizar el pago
     pago.estado = "PAGADO"
     pago.fecha_pago = payload.fecha_operacion
-    pago.codigo_operacion_bcp = payload.codigo_operacion
+    # Tecleado a mano: casi nadie escribe el cero de delante. Sin normalizar,
+    # este pago no cruzaría con el cobro que mande el banco.
+    pago.codigo_operacion_bcp = normalizar_operacion(payload.codigo_operacion)
     pago.json_respuesta_banco = str(payload.model_dump()) # Guardamos el log completo
 
     # 3. SI EL PAGO ERA UN TRÁMITE, actualizar la solicitud
@@ -343,13 +350,28 @@ def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: S
     else:
         anio_id = anio_activo.id_anio_escolar
 
-    # 2. Update masivo usando JOIN con matricula para asegurar el año correcto
-    query = db.query(models.Pago).join(er_models.Matricula).filter(
-        er_models.Matricula.id_anio_escolar == anio_id,
+    # 2. Update masivo. El año correcto se asegura con una SUBCONSULTA sobre
+    #    matrícula, no con un JOIN: SQLAlchemy no deja llamar a `update()` sobre
+    #    una consulta que lleve join, y lanzaba
+    #    «Can't call Query.update() when join() has been called», o sea un 500
+    #    en cada intento. La condición es la misma: cuotas cuya matrícula
+    #    pertenece a ese año escolar.
+    matriculas_del_anio = (
+        db.query(er_models.Matricula.id_matricula)
+        .filter(er_models.Matricula.id_anio_escolar == anio_id)
+    )
+    query = db.query(models.Pago).filter(
+        models.Pago.id_matricula.in_(matriculas_del_anio.scalar_subquery()),
         models.Pago.concepto.contains(payload.concepto_filtro),
         models.Pago.estado == "PENDIENTE",
         func.extract('month', models.Pago.fecha_vencimiento) >= payload.mes_inicio
     )
+
+    # Se leen ANTES de tocarlas: despues del update masivo ya no hay forma de
+    # saber cuánto valía cada una, y sin ese «antes» el apunte no sirve para
+    # explicarle al banco por qué cambió el importe.
+    afectadas = [ajustes.instantanea(p)
+                 for p in query.options(joinedload(models.Pago.alumno)).all()]
 
     count = query.update({
         "monto": payload.nuevo_monto,
@@ -357,6 +379,20 @@ def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: S
     }, synchronize_session=False)
 
     db.commit()
+
+    # Un apunte por cuota, no uno por la operación entera: el archivo del BCP
+    # va cuota a cuota y así cada línea que cambie tiene su explicación.
+    nuevo_monto = Decimal(str(payload.nuevo_monto))
+    apuntes = []
+    for antes in afectadas:
+        despues = dict(antes)
+        despues["monto"] = nuevo_monto
+        apuntes.append(ajustes.apunte(
+            "PRECIO_MASIVO", antes, despues, usuario=current_user,
+            detalle=f"Cambio masivo de precio ({payload.concepto_filtro}) "
+                    f"desde el mes {payload.mes_inicio} del ciclo {anio_id}"))
+    ajustes.anotar(*apuntes)
+
     return {"message": f"Se actualizaron {count} registros de pago para el ciclo {anio_id}"}
 
 @router.get("/solicitudes/pendientes-revision", response_model=List[schemas.SolicitudTramiteResponse])
@@ -530,6 +566,10 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db), current_u
     if pago.estado == "PAGADO":
         raise HTTPException(status_code=400, detail="Este pago ya fue procesado")
 
+    # Cómo estaba la cuota antes de cobrarla. Se copia ahora porque después del
+    # commit SQLAlchemy vuelve a leerla de la base y ya traería los datos nuevos.
+    antes_manual = ajustes.instantanea(pago)
+
     pago.estado = "PAGADO"
     pago.fecha_pago = datetime.now()
     pago.codigo_operacion_bcp = "MANUAL-CAJA"
@@ -633,6 +673,14 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db), current_u
         print(f"Error procesando pago de verano {pago.id_pago}: {e}")
 
     db.commit()
+
+    # Cobrado en caja: la cuota deja de viajar al BCP y el archivo de mañana ya
+    # no la lleva. Es el cambio manual que más descuadres explica al conciliar.
+    ajustes.anotar(ajustes.apunte(
+        "PAGO_MANUAL", antes_manual,
+        {**antes_manual, "estado": "PAGADO"}, usuario=current_user,
+        detalle="Cobrado en caja (MANUAL-CAJA)"))
+
     return {"message": "Pago confirmado y pagos del año generados."}
 
 @router.put("/pagos/{id_pago}", response_model=schemas.PagoResponse)
@@ -640,10 +688,20 @@ def editar_pago(id_pago: int, pago_data: schemas.PagoUpdate, db: Session = Depen
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     if not pago:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
+    antes = ajustes.instantanea(pago)
     for key, value in pago_data.model_dump(exclude_unset=True).items():
         setattr(pago, key, value)
     db.commit()
     db.refresh(pago)
+
+    # Solo se anota si cambió algo que el banco vaya a notar. Retocar el texto
+    # del concepto no llena la tabla de ruido.
+    despues = ajustes.instantanea(pago)
+    tipo = ajustes.tipo_del_cambio(antes, despues)
+    if tipo:
+        ajustes.anotar(ajustes.apunte(
+            tipo, antes, despues, usuario=current_user,
+            detalle="Cuota editada desde el panel"))
     return pago
 
 @router.delete("/pagos/{id_pago}")
@@ -651,8 +709,14 @@ def eliminar_pago(id_pago: int, db: Session = Depends(get_db), current_user: dic
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     if not pago:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
+    # Antes de borrar: luego el objeto ya no se puede leer y esta es la única
+    # constancia que quedará de una deuda que desaparece del archivo del BCP.
+    antes = ajustes.instantanea(pago)
     db.delete(pago)
     db.commit()
+    ajustes.anotar(ajustes.apunte(
+        "ELIMINACION", antes, {}, usuario=current_user,
+        detalle="Cuota eliminada desde el panel"))
     return {"message": "Pago eliminado correctamente"}
 
 

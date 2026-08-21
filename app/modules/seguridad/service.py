@@ -21,7 +21,7 @@ from fastapi import Request
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from .models import IntentoAcceso
+from .models import IntentoAcceso, SolicitudAcceso
 
 # Cuánto se mira hacia atrás.
 VENTANA_MINUTOS = 15
@@ -146,3 +146,83 @@ def anotar(db: Session, request: Request, username: str, exito: bool,
         db.commit()
     except Exception:
         db.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Solicitudes de acceso
+# ---------------------------------------------------------------------------
+
+# El formulario es público por necesidad: lo usa justamente quien no puede
+# entrar. Sin freno, cualquiera podría llenar la bandeja del panel —y de paso
+# el buzón de los administradores— con un script.
+MAX_SOLICITUDES_DNI = 3       # por DNI y día: si escribió tres veces, ya está
+MAX_SOLICITUDES_IP = 10       # por sitio y día: cabe una familia entera
+VENTANA_SOLICITUDES_HORAS = 24
+
+
+def solicitudes_recientes(db: Session, dni: str, ip: Optional[str]) -> Optional[str]:
+    """Motivo por el que NO se acepta otra solicitud, o None si sí se acepta.
+
+    Si la comprobación falla —la tabla todavía sin crear tras una subida a
+    medias— se deja pasar: quedarse sin poder avisar de que no puedes entrar
+    es peor que aceptar una solicitud de más.
+    """
+    try:
+        desde = datetime.now() - timedelta(hours=VENTANA_SOLICITUDES_HORAS)
+
+        del_dni = (db.query(SolicitudAcceso)
+                   .filter(SolicitudAcceso.dni == dni,
+                           SolicitudAcceso.fecha >= desde).count())
+        if del_dni >= MAX_SOLICITUDES_DNI:
+            return ("Ya hemos recibido tu solicitud. El colegio se pondrá en "
+                    "contacto contigo; no hace falta que la mandes otra vez.")
+
+        if ip:
+            de_la_ip = (db.query(SolicitudAcceso)
+                        .filter(SolicitudAcceso.ip == ip,
+                                SolicitudAcceso.fecha >= desde).count())
+            if de_la_ip >= MAX_SOLICITUDES_IP:
+                return ("Se han mandado demasiadas solicitudes desde este "
+                        "equipo. Inténtalo de nuevo mañana o llama al colegio.")
+        return None
+    except Exception as e:
+        print(f"[SEGURIDAD][WARN] No se pudo comprobar el freno de solicitudes, "
+              f"se deja pasar: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def titular_del_dni(db: Session, dni: str) -> tuple:
+    """(nombre, rol) de quien tiene ese DNI, o (None, None) si no figura.
+
+    Se busca en las cinco tablas donde vive un DNI. Es información SOLO para
+    el administrador: al que manda la solicitud jamás se le dice si acertó,
+    porque eso convertiría el formulario en una forma de averiguar quién
+    estudia o trabaja aquí.
+
+    Si la consulta falla, la solicitud se guarda igual sin el nombre. Perder
+    el nombre es una molestia; perder la solicitud, un problema.
+    """
+    try:
+        from app.modules.users.alumno.models import Alumno
+        from app.modules.users.docente.models import Docente
+        from app.modules.personal.models import Administrador, Auxiliar, Psicologo
+
+        for modelo, rol in ((Alumno, "ALUMNO"), (Docente, "DOCENTE"),
+                            (Administrador, "ADMIN"), (Auxiliar, "AUXILIAR"),
+                            (Psicologo, "PSICOLOGO")):
+            fila = db.query(modelo).filter(modelo.dni == dni).first()
+            if fila:
+                nombre = f"{fila.apellidos or ''} {fila.nombres or ''}".strip()
+                return (nombre[:120] or None), rol
+        return None, None
+    except Exception as e:
+        print(f"[SEGURIDAD][WARN] No se pudo identificar el DNI {dni}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None, None

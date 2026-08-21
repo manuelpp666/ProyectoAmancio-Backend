@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.util.security import get_current_user
 from app.db.database import get_db
+from app.modules.finance import ajustes as aju
 from app.modules.finance import conciliacion as con
 from app.modules.finance import models as fin
 from app.modules.finance.crep import ErrorFormatoBCP
@@ -115,6 +116,11 @@ def resumen(db: Session = Depends(get_db),
             .filter(fin.MovimientoCobranza.estado == "PENDIENTE_REVISION").scalar() or 0,
         "ultimo_lote": ultimo_lote,
         "sincronizacion_crep": sincronizacion,
+        # Cambios hechos a mano que el banco todavía no tiene. Va aparte de
+        # `sincronizacion_crep` porque aquello compara dos fotos y esto es el
+        # parte de quién tocó qué: una cuota puede haberse editado tres veces
+        # y volver a su importe original, y la comparación no vería nada.
+        "ajustes_manuales_pendientes": aju.contar_pendientes(db),
     }
 
 
@@ -265,7 +271,8 @@ def ajustar_importe(tipo: str = Form(...),
     except (InvalidOperation, ValueError):
         raise HTTPException(400, f"«{monto}» no es un importe válido")
     try:
-        return con.ajustar_importe(db, tipo, id_cuota, valor)
+        return con.ajustar_importe(db, tipo, id_cuota, valor,
+                                   usuario=current_user)
     except ValueError as e:
         db.rollback()
         raise HTTPException(400, str(e))
@@ -482,6 +489,104 @@ def descargar_excel(db: Session = Depends(get_db),
     wb.save(buffer)
     buffer.seek(0)
     nombre = f"Cobranza-{dt.date.today().strftime('%d-%m-%Y')}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nombre}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cambios manuales en las cuotas
+# ---------------------------------------------------------------------------
+#
+# El CREP se arma leyendo las cuotas en vivo, así que un cambio hecho a mano ya
+# viaja al banco en la siguiente descarga. Esto es el parte de esos cambios:
+# qué se tocó, quién lo tocó y si el banco ya lo tiene.
+
+@router.get("/ajustes-manuales")
+def ajustes_manuales(
+        estado: str = Query("pendientes", pattern="^(pendientes|incorporados|todos)$"),
+        tipo: Optional[str] = Query(None, description="ALTA, MONTO, PAGO_MANUAL…"),
+        desde: Optional[dt.date] = Query(None),
+        hasta: Optional[dt.date] = Query(None),
+        limite: int = Query(200, ge=1, le=500),
+        db: Session = Depends(get_db),
+        current_user: dict = Depends(get_current_user)):
+    """Los cambios que una persona hizo a mano sobre las cuotas."""
+    _solo_admin(current_user)
+    if desde and hasta and desde > hasta:
+        raise HTTPException(400, "La fecha «desde» es posterior a la fecha «hasta»")
+    try:
+        return aju.listar(db, estado=estado, tipo=tipo, desde=desde,
+                          hasta=hasta, limite=limite)
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Falta preparar la base de datos: ejecuta el script "
+                   "26_ajustes_manuales_pagos.sql para crear la tabla de "
+                   "cambios manuales.")
+
+
+@router.get("/ajustes-manuales.xlsx")
+def ajustes_manuales_excel(
+        estado: str = Query("pendientes", pattern="^(pendientes|incorporados|todos)$"),
+        db: Session = Depends(get_db),
+        current_user: dict = Depends(get_current_user)):
+    """Los mismos cambios en Excel, para adjuntarlos al cuadre del mes."""
+    _solo_admin(current_user)
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        raise HTTPException(
+            503, "Falta la librería openpyxl en el servidor para exportar a Excel")
+
+    try:
+        datos = aju.listar(db, estado=estado, limite=aju.MAXIMO_DEVUELTOS)
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        raise HTTPException(
+            503, "Falta preparar la base de datos: ejecuta el script "
+                 "26_ajustes_manuales_pagos.sql.")
+
+    filas = datos.get("ajustes") or []
+    if not filas:
+        raise HTTPException(400, "No hay ningún cambio manual que exportar")
+
+    wb = Workbook()
+    h = wb.active
+    h.title = "Cambios manuales"
+    h.append(["Fecha", "Quién", "Cambio", "Efecto en el CREP", "Estudiante",
+              "Documento", "Concepto", "Vencimiento", "Importe antes",
+              "Importe después", "Estado antes", "Estado después",
+              "¿Ya está en el CREP?", "Detalle"])
+    for f in filas:
+        h.append([
+            (f.get("fecha") or "").replace("T", " ")[:16],
+            f.get("usuario") or "",
+            f.get("tipo_texto") or "",
+            f.get("efecto_texto") or "",
+            f.get("nombre") or "",
+            f.get("documento") or "",
+            f.get("concepto") or "",
+            f.get("fecha_vencimiento") or "",
+            f.get("total_anterior"),
+            f.get("total_nuevo"),
+            f.get("estado_anterior") or "",
+            f.get("estado_nuevo") or "",
+            "Sí" if f.get("incorporado") else "No",
+            f.get("detalle") or "",
+        ])
+    for col, ancho in zip("ABCDEFGHIJKLMN",
+                          (17, 16, 22, 28, 32, 14, 26, 14, 14, 15, 14, 15, 18, 34)):
+        h.column_dimensions[col].width = ancho
+    h.freeze_panes = "A2"
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    nombre = f"Cambios-manuales-{dt.date.today().strftime('%d-%m-%Y')}.xlsx"
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -113,6 +113,66 @@ def actualizar_matricula(
 
 # --- RENOVACIÓN DE MATRÍCULA (ALUMNO) ---
 
+def _normalizar_nombre_seccion(nombre) -> str:
+    """'  amarillo ' y 'Amarillo' son la misma sección para lo que nos importa."""
+    return " ".join((nombre or "").split()).strip().lower()
+
+
+def _heredar_seccion(db: Session, mat_origen, id_anio_destino: str,
+                     id_grado_destino: int):
+    """La sección del año nuevo que le corresponde por continuidad, o None.
+
+    El colegio mantiene los mismos colores de aula año tras año: quien estuvo en
+    1ero Amarillo suele seguir en 2do Amarillo. Antes la renovación dejaba la
+    sección vacía y había que asignar a mano a casi seiscientos alumnos, uno por
+    uno, arrastrándolos en la pantalla de asignación.
+
+    OJO con lo que NO es esto: las secciones pertenecen a un año concreto, así
+    que aquí no se "conserva" la sección anterior —esa fila ni siquiera sirve
+    para el año nuevo—. Lo que se busca es la del MISMO NOMBRE dentro del grado
+    al que pasa.
+
+    Devuelve None, y la matrícula se queda sin sección para que la asigne un
+    administrador, cuando:
+      * el alumno no tenía sección el año anterior;
+      * el grado nuevo no tiene un aula con ese nombre (p. ej. secundaria usa
+        otros colores, o ese año se abrieron menos secciones);
+      * el aula existe pero ya está llena. Respetar las vacantes es innegociable:
+        colar a un alumno de más en un aula completa es peor que dejar el hueco
+        a la vista.
+    """
+    if not mat_origen or not mat_origen.id_seccion:
+        return None
+
+    anterior = db.query(academic_models.Seccion).filter(
+        academic_models.Seccion.id_seccion == mat_origen.id_seccion
+    ).first()
+    if not anterior:
+        return None
+
+    buscado = _normalizar_nombre_seccion(anterior.nombre)
+    if not buscado:
+        return None
+
+    candidatas = db.query(academic_models.Seccion).filter(
+        academic_models.Seccion.id_anio_escolar == id_anio_destino,
+        academic_models.Seccion.id_grado == id_grado_destino,
+    ).all()
+
+    for sec in candidatas:
+        if _normalizar_nombre_seccion(sec.nombre) != buscado:
+            continue
+        ocupadas = db.query(models.Matricula).filter(
+            models.Matricula.id_seccion == sec.id_seccion,
+            models.Matricula.id_anio_escolar == id_anio_destino,
+        ).count()
+        if ocupadas >= (sec.vacantes or 0):
+            return None          # existe, pero está llena
+        return sec.id_seccion
+
+    return None
+
+
 def _calcular_siguiente_grado(db: Session, grado_actual: academic_models.Grado):
     """Calcula el grado al que pasaría el alumno el próximo año (o None si egresa)."""
     # 1. Siguiente grado dentro del mismo nivel
@@ -471,8 +531,11 @@ def decidir_solicitud_renovacion(
     current_user: dict = Depends(get_current_user)
 ):
     """El administrador aprueba o rechaza una solicitud de renovación.
-    Al aprobar, se crea automáticamente la matrícula del año destino (sin sección,
-    para que luego se asigne en 'Asignar Estudiante')."""
+
+    Al aprobar se crea la matrícula del año destino: el grado se calcula solo
+    (el siguiente, o el mismo si repite) y el aula se hereda por continuidad,
+    buscando la del mismo nombre en ese grado. Si no existe o está llena, la
+    matrícula queda sin sección y se asigna en 'Asignar Estudiante'."""
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No tienes permisos para esta acción")
 
@@ -547,10 +610,17 @@ def decidir_solicitud_renovacion(
                 detail="No se pudo determinar el grado destino del alumno."
             )
 
+        # Se le intenta dar el aula del mismo color en su grado nuevo. Si no
+        # existe o está llena, queda en None y la asigna un administrador desde
+        # 'Asignar Estudiante', igual que antes.
+        id_seccion_destino = _heredar_seccion(
+            db, mat_origen, solicitud.anio_destino, id_grado_destino
+        )
+
         nueva_matricula = models.Matricula(
             id_anio_escolar=solicitud.anio_destino,
             id_alumno=solicitud.id_alumno,
-            id_seccion=None,  # El admin asigna la sección luego en 'Asignar Estudiante'
+            id_seccion=id_seccion_destino,
             id_grado=id_grado_destino,
             estado="MATRICULADO",
             tipo_matricula=tipo_matricula,

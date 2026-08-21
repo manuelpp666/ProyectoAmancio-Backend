@@ -9,8 +9,8 @@ from app.db.database import Base
 class ListaDeTexto(TypeDecorator):
     """Una lista de cadenas guardada como JSON en una columna de texto.
 
-    Se usa para las imágenes de una noticia: son pocas (máximo 4) y lo único
-    que importa de ellas es el orden, así que no compensa una tabla aparte.
+    Se usa para las imágenes de una noticia: lo único que importa de ellas es
+    el orden, así que no compensa una tabla aparte.
     El orden de la lista ES el orden en que se muestran.
 
     Si el texto guardado no es una lista JSON válida se devuelve None en vez
@@ -44,8 +44,10 @@ class Noticia(Base):
     # tarjetas del listado y en el inicio, y porque las noticias de antes de
     # las galerías solo tienen esto.
     imagen_portada_url = Column(String(255))
-    # Hasta 4 imágenes en el orden en que se subieron. NULL en las noticias
-    # antiguas: ahí manda `imagen_portada_url` y se muestra esa sola.
+    # Las imágenes en el orden en que se subieron, sin tope de cantidad (el
+    # que hay lo pone el tamaño del TEXT y lo comprueba el esquema). NULL en
+    # las noticias antiguas: ahí manda `imagen_portada_url` y se muestra esa
+    # sola.
     imagenes = Column(ListaDeTexto, nullable=True)
     categoria = Column(String(50))
     activo = Column(Boolean, default=True)

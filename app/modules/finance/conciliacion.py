@@ -29,10 +29,11 @@ from sqlalchemy import func
 from sqlalchemy.exc import ProgrammingError, OperationalError
 from sqlalchemy.orm import Session, joinedload
 
+from app.modules.finance import ajustes
 from app.modules.finance import models as fin
 from app.modules.finance.crep import (
     CabeceraCREP, CuotaCREP, ErrorFormatoBCP, PagoBCP,
-    generar_crep, parsear_reporte_cobros,
+    generar_crep, normalizar_operacion, parsear_reporte_cobros,
 )
 from app.modules.users.alumno.models import Alumno
 from app.modules.users.relacion_familiar.models import RelacionFamiliar
@@ -322,7 +323,11 @@ class IndiceDeudas:
                 CuotaPagada(id_pago=f.id_pago, concepto=f.concepto, monto=f.monto,
                             fecha_vencimiento=f.fecha_vencimiento,
                             fecha_pago=f.fecha_pago,
-                            operacion=f.codigo_operacion_bcp,
+                            # Normalizado al entrar: así el arreglo vale aunque
+                            # todavía no se haya corregido la base, y el aviso
+                            # que ve la secretaria enseña el código como el del
+                            # banco y no como quedó guardado.
+                            operacion=normalizar_operacion(f.codigo_operacion_bcp),
                             del_crep="SINCRONIZACION_CREP" in (f.json_respuesta_banco or "")),
                 cajones=self.pagadas, rastrear=False)
 
@@ -336,7 +341,8 @@ class IndiceDeudas:
                                     concepto=c.concepto, monto=c.monto,
                                     fecha_vencimiento=c.fecha_vencimiento,
                                     fecha_pago=c.fecha_pago,
-                                    operacion=c.codigo_operacion_bcp),
+                                    operacion=normalizar_operacion(
+                                        c.codigo_operacion_bcp)),
                         cajones=self.pagadas, rastrear=False)
 
     def _buscar_en(self, cajones: _Cajones, pago: PagoBCP) -> Tuple[List, Optional[str]]:
@@ -399,7 +405,7 @@ def _marcar_pagado(registro, pago: PagoBCP) -> None:
     registro.estado = "PAGADO"
     registro.fecha_pago = dt.datetime.combine(
         pago.fecha_pago or dt.date.today(), dt.time.min)
-    registro.codigo_operacion_bcp = pago.operacion or None
+    registro.codigo_operacion_bcp = normalizar_operacion(pago.operacion)
     if isinstance(registro, fin.Pago):
         registro.json_respuesta_banco = json.dumps({
             "origen": "REPORTE_COBROS_BCP",
@@ -433,7 +439,13 @@ def _explicar_ya_cobrada(ya: "CuotaPagada", pago: PagoBCP) -> Tuple[str, str, Op
     """
     cuando = f" el {ya.fecha_pago:%d/%m/%Y}" if ya.fecha_pago else ""
 
-    if ya.operacion and pago.operacion and str(ya.operacion) == str(pago.operacion):
+    # Normalizados, no en crudo: los pagos que entraron en la migración inicial
+    # traen el código sin los ceros de delante —Excel los comió— y comparar tal
+    # cual hacía que '048937' y '48937' parecieran cobros distintos. La cuota se
+    # daba por pagada con OTRO cobro y salía a revisión como posible pago doble.
+    suya = normalizar_operacion(ya.operacion)
+    entrante = normalizar_operacion(pago.operacion)
+    if suya and entrante and suya == entrante:
         return ("REPETIDO",
                 f"Este mismo cobro (operación {pago.operacion}) ya se había "
                 f"aplicado{cuando} a «{ya.concepto}». No se hace nada.",
@@ -1126,7 +1138,12 @@ def incorporar_cambios_al_crep(db: Session, id_usuario: Optional[int] = None) ->
         db.commit()
     db.refresh(nuevo)
 
+    # A partir de aquí el banco ya tiene estos cambios manuales: quedan
+    # sellados con el CREP que los llevó y dejan de figurar como pendientes.
+    sellados = ajustes.marcar_incorporados(nuevo.id_registro_crep)
+
     return {
+        "ajustes_manuales_incorporados": sellados,
         "id_registro_crep": nuevo.id_registro_crep,
         "nombre_archivo": nuevo.nombre_archivo,
         "fecha_generacion": nuevo.fecha_generacion.isoformat(),
@@ -1444,7 +1461,8 @@ def importar_crep_inicial(db: Session, datos: bytes, nombre: str = "CREP.txt",
 
 
 def ajustar_importe(db: Session, tipo: str, id_cuota: int,
-                    monto: Decimal) -> dict:
+                    monto: Decimal,
+                    usuario: Optional[dict] = None) -> dict:
     """Pone en una cuota pendiente el importe que trae el archivo del BCP.
 
     Es la ÚNICA vía por la que la conciliación cambia un precio, y solo ocurre
@@ -1482,9 +1500,18 @@ def ajustar_importe(db: Session, tipo: str, id_cuota: int,
 
     antes = Decimal(str(cuota.monto))
     mora = Decimal(str(cuota.mora or 0))
+    instantanea_previa = ajustes.instantanea(cuota)
     cuota.monto = monto
     cuota.monto_total = monto + mora
     db.commit()
+
+    # Es un cambio de precio decidido por una persona, igual que si se hubiera
+    # hecho desde la pantalla de caja: va al mismo registro para que los dos
+    # caminos se vean juntos al cuadrar con el banco.
+    ajustes.anotar(ajustes.apunte(
+        "MONTO", instantanea_previa,
+        {**instantanea_previa, "monto": monto}, usuario=usuario,
+        detalle="Importe igualado al del reporte del BCP"))
 
     return {
         "tipo": tipo,
@@ -1830,7 +1857,8 @@ def resolver_movimiento(db: Session, id_movimiento: int, accion: str,
         cuota.estado = "PAGADO"
         cuota.fecha_pago = dt.datetime.combine(
             mov.fecha_pago or dt.date.today(), dt.time.min)
-        cuota.codigo_operacion_bcp = mov.operacion or "MANUAL-CONCILIACION"
+        cuota.codigo_operacion_bcp = (
+            normalizar_operacion(mov.operacion) or "MANUAL-CONCILIACION")
         if isinstance(cuota, fin.Pago):
             cuota.json_respuesta_banco = json.dumps({
                 "origen": "RESOLUCION_MANUAL",

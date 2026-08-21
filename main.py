@@ -1,5 +1,29 @@
 import os
 import sys
+import time
+
+# Zona horaria del colegio. TIENE QUE IR ANTES de que cualquier módulo calcule
+# una fecha, porque `date.today()` se resuelve con la zona del proceso.
+#
+# El hosting compartido corre en UTC salvo que alguien lo cambie, y Perú está
+# cinco horas por detrás. Con el servidor en UTC, a las 7 de la tarde hora de
+# Lima el backend ya cree que es el día siguiente: el panel del administrador
+# daba por no pasada la lista de TODAS las aulas a partir de esa hora, y los
+# informes por fecha cortaban el día donde no tocaba.
+#
+# Fijándola aquí, el sistema tiene el mismo "hoy" que el colegio, sin depender
+# de cómo esté configurado el servidor.
+#
+# Solo en Linux, y no por comodidad: Windows NO entiende los nombres de zona de
+# la base de datos IANA ("America/Lima"). Su librería de C espera un formato
+# propio y, al no reconocer el nombre, se pasa a UTC en silencio. Poniendo la
+# variable sin más, el equipo de desarrollo pasaba a creerse que son las 01:00
+# del día siguiente cuando en Lima son las 20:00 — justo el error que este
+# bloque venía a evitar, pero al revés y sin avisar. El servidor es Linux, que
+# sí la entiende, y el equipo local ya tiene la hora de Perú por su cuenta.
+if hasattr(time, "tzset"):
+    os.environ["TZ"] = "America/Lima"
+    time.tzset()
 
 # Límite de hilos de las librerías de cálculo. TIENE QUE IR ANTES de cualquier
 # import que arrastre numpy (pytesseract lo hace), porque OpenBLAS lee estas
@@ -25,7 +49,8 @@ for _flujo in (sys.stdout, sys.stderr):
     if hasattr(_flujo, "reconfigure"):
         _flujo.reconfigure(encoding="utf-8", errors="replace")
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +81,7 @@ from app.modules.horario import router as horario_router
 from app.modules.pagina_principal import router as pagina_web_router
 from app.modules.personal import router as personal_router
 from app.modules.verano import router as verano_router
+from app.modules.mantenimiento import router as mantenimiento_router
 from app.core.socket_manager import socket_manager
 from app.core import socket_manager as socket_manager_mod
 from app.core import config
@@ -115,6 +141,42 @@ app.add_middleware(
 # Compresión GZip para respuestas JSON grandes (listas de matrículas, noticias, etc.)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
+
+# Tope duro al tamaño de una petición.
+#
+# POR QUÉ AQUÍ Y NO EN EL ENDPOINT: Starlette vuelca el cuerpo entero a un
+# archivo temporal ANTES de llamar al endpoint. Cuando el endpoint mide el
+# archivo y lo rechaza, los 900 MB ya se escribieron en el disco del servidor
+# (el temporal se borra después, pero se escribieron). Mirando la cabecera
+# `Content-Length` se corta antes de leer nada.
+#
+# El número es holgado a propósito: los topes de verdad son los de cada
+# endpoint (10 MB por archivo). Esto solo evita el disparate, y tiene que
+# dejar pasar la subida de varios reportes del BCP a la vez, que es la
+# petición más grande que hace el sistema.
+#
+# Esto NO sustituye al límite del servidor web (`LimitRequestBody` en Apache,
+# `client_max_body_size` en nginx): quien envía puede mentir en la cabecera.
+MAX_PETICION_MB = 30
+MAX_PETICION_BYTES = MAX_PETICION_MB * 1024 * 1024
+
+
+@app.middleware("http")
+async def limitar_tamano_peticion(request: Request, call_next):
+    declarado = request.headers.get("content-length")
+    if declarado:
+        try:
+            if int(declarado) > MAX_PETICION_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": f"La petición supera los {MAX_PETICION_MB} MB. "
+                                       f"Sube los archivos de uno en uno."},
+                )
+        except ValueError:
+            # Cabecera con basura: que decida el servidor web.
+            pass
+    return await call_next(request)
+
 # 1. Esto detecta la carpeta 'Backend' (donde está main.py)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -153,6 +215,7 @@ app.include_router(admision_router.router)
 app.include_router(pagina_web_router.router)
 app.include_router(personal_router.router)
 app.include_router(seguridad_router.router)
+app.include_router(mantenimiento_router.router)
 app.include_router(verano_router.router)
 
 @app.websocket("/ws/{user_id}")

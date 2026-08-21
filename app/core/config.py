@@ -91,8 +91,18 @@ def verificar() -> None:
 
 
 def resumen() -> str:
-    """Una línea para el log de arranque: deja claro en qué modo se levantó."""
+    """Una línea para el log de arranque: deja claro en qué modo se levantó.
+
+    Incluye la fecha y hora que ve el proceso. Es la forma de comprobar de un
+    vistazo, tras un reinicio, que el servidor está en hora de Lima: si aquí
+    sale una hora que no es la del colegio, todo lo que dependa de "hoy"
+    (la asistencia del día, los informes por fecha) estará corrido.
+    """
+    from datetime import datetime
+    import time as _t
+    ahora = datetime.now()
     return (f"Entorno: {ENTORNO} · cookie SameSite={COOKIE_SAMESITE} "
             f"Secure={COOKIE_SECURE} · docs={'off' if ES_PRODUCCION else DOCS_URL} "
             f"· BD {DB_POOL_SIZE}+{DB_MAX_OVERFLOW} conexiones / "
-            f"{HILOS_PETICIONES} peticiones simultáneas")
+            f"{HILOS_PETICIONES} peticiones simultáneas"
+            f" · hora del servidor {ahora:%d/%m/%Y %H:%M} ({_t.tzname[0]})")
