@@ -56,18 +56,45 @@ class NoticiaResponse(NoticiaCreate):
     activo: bool
     model_config = ConfigDict(from_attributes=True)
 
+# Color predeterminado de cada tipo de evento. Tiene que decir lo mismo que
+# ProyectoAmancio/src/components/utils/eventos.ts: el panel manda el color ya
+# resuelto, y esto es la red por si el evento se crea desde otro sitio.
+COLOR_POR_TIPO_EVENTO = {
+    "inicio de clases": "#0E7490",
+    "ceremonia": "#093E7A",
+    "festividades": "#701C32",
+    "feriado": "#D97706",
+    "actividad": "#059669",
+    "actividad escolar": "#2563EB",
+    "vacaciones": "#DB2777",
+}
+COLOR_EVENTO_POR_DEFECTO = "#093E7A"
+
+
 class EventoCreate(BaseModel):
     titulo: str = Field(..., min_length=3, max_length=100)
     fecha_inicio: datetime
     id_anio_escolar: Optional[str] = None
     fecha_fin: Optional[datetime] = None
     tipo_evento: Optional[str] = None
-    color: Optional[str] = Field(default="#3182ce", pattern=r"^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$")
+    # Si no viene, se rellena con el color del tipo (ver asignar_color_por_tipo).
+    color: Optional[str] = Field(default=None, pattern=r"^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$")
     descripcion: Optional[str] = Field(None, max_length=500)
+
     @model_validator(mode='after')
     def validar_rango_fechas(self) -> 'EventoCreate':
         if self.fecha_fin and self.fecha_fin < self.fecha_inicio:
             raise ValueError("La fecha de fin no puede ser anterior al inicio del evento")
+        return self
+
+    @model_validator(mode='after')
+    def asignar_color_por_tipo(self) -> 'EventoCreate':
+        # Un evento sin color pintaba de gris en el calendario y no salía en la
+        # leyenda. Se le da el de su tipo, y si el tipo no está en la lista, el
+        # azul de la marca.
+        if not (self.color or "").strip():
+            tipo = (self.tipo_evento or "").strip().lower()
+            self.color = COLOR_POR_TIPO_EVENTO.get(tipo, COLOR_EVENTO_POR_DEFECTO)
         return self
 
 class EventoResponse(EventoCreate):

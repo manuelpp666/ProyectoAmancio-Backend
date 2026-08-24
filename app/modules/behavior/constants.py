@@ -30,3 +30,23 @@ def estado_visual(puntaje: int, cambio_ie: bool = False) -> str:
     if puntaje < UMBRAL_OBSERVACION:
         return "Amarillo"
     return "Verde"
+
+
+# Los tres valores que puede devolver `estado_visual`, en orden de gravedad.
+# Quien filtre por estado de conducta compara contra esto y no contra
+# literales sueltos: un "Rojo " con un espacio o un "rojo" en minúscula no
+# deben dejar la pantalla vacía sin explicar por qué.
+ESTADOS_CONDUCTA = ("Verde", "Amarillo", "Rojo")
+
+
+def normalizar_estado(valor):
+    """Devuelve el estado canónico ('Verde'), o None si no se reconoce.
+
+    Acepta cualquier combinación de mayúsculas y espacios, para que el valor
+    llegue de donde llegue —una URL escrita a mano, un desplegable— se
+    interprete igual.
+    """
+    if not valor:
+        return None
+    limpio = str(valor).strip().capitalize()
+    return limpio if limpio in ESTADOS_CONDUCTA else None

@@ -157,6 +157,25 @@ def cambiar_estado_tramite(id: int, activo: bool, db: Session = Depends(get_db),
 # 2. SOLICITUDES DE TRÁMITE (ALUMNOS)
 # ==========================================
 
+def _validar_solicitud_propia(id_alumno: int, current_user: dict, db: Session):
+    """Que el alumno del que habla la petición sea el que inició sesión.
+
+    Comprobar solo el rol no bastaba: el id_alumno lo manda el navegador, así
+    que un alumno podía escribir el de un compañero y con eso generarle un
+    trámite —con su cobro incluido— o leer la lista de los suyos, que trae su
+    nombre y su DNI. El rol seguía diciendo ALUMNO y la petición pasaba.
+
+    Se comprueba contra la ficha del alumno, no contra lo que venga en el
+    token: el vínculo alumno-usuario vive en la base.
+    """
+    alumno = db.query(user_models.Alumno).filter(
+        user_models.Alumno.id_alumno == id_alumno).first()
+    if not alumno or alumno.id_usuario != current_user.get("id"):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo puedes consultar y solicitar tus propios trámites")
+
+
 @router.post("/solicitudes/", response_model=schemas.SolicitudTramiteResponse)
 async def solicitar_tramite(
     id_alumno: int = Form(...),
@@ -168,15 +187,44 @@ async def solicitar_tramite(
 ):
     if current_user.get("rol") != "ALUMNO":
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
-    
+    _validar_solicitud_propia(id_alumno, current_user, db)
+
     """
-    Registra la solicitud, guarda el archivo adjunto si existe 
+    Registra la solicitud, guarda el archivo adjunto si existe
     y genera el pago si el trámite tiene costo.
     """
     # 1. Validar Tipo de Trámite
     tipo_tramite = db.query(models.TipoTramite).filter(models.TipoTramite.id_tipo_tramite == id_tipo_tramite).first()
     if not tipo_tramite:
         raise HTTPException(status_code=404, detail="Tipo de trámite no encontrado")
+
+    # 1.b Pensiones al día
+    #
+    # Va ANTES de guardar el adjunto y antes de crear nada: si se rechaza, no
+    # puede quedar ni un archivo suelto en el disco ni media solicitud en la
+    # base. El panel ya se lo dice al alumno antes de darle al botón, pero eso
+    # depende de lo que tuviera cargado la pantalla; esta es la comprobación
+    # que manda.
+    if getattr(tipo_tramite, "requiere_pagos_al_dia", False):
+        try:
+            estado_cuenta = _deuda_vencida(db, id_alumno)
+        except Exception:
+            # Si la consulta de deuda falla, no se deja a todo el colegio sin
+            # poder pedir trámites por un problema que no es del alumno.
+            estado_cuenta = None
+
+        if estado_cuenta and not estado_cuenta["al_dia"]:
+            n = estado_cuenta["cuotas_vencidas"]
+            plural = "s" if n != 1 else ""
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Este trámite exige tener las pensiones al día. Figuras "
+                    f"con {n} cuota{plural} vencida{plural} por "
+                    f"S/ {estado_cuenta['monto_vencido']:.2f}. Regulariza tu "
+                    f"deuda y vuelve a solicitarlo."
+                ),
+            )
 
     # 2. Gestión de Archivo (Lógica similar a entregas-tarea)
     url_db = None
@@ -244,6 +292,7 @@ async def solicitar_tramite(
 def listar_mis_solicitudes(id_alumno: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ALUMNO":
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
+    _validar_solicitud_propia(id_alumno, current_user, db)
 
     return db.query(models.SolicitudTramite)\
              .options(joinedload(models.SolicitudTramite.tipo))\
@@ -727,6 +776,56 @@ def _validar_acceso_pagos_alumno(id_alumno: int, current_user: dict, db: Session
     alumno = db.query(user_models.Alumno).filter(user_models.Alumno.id_alumno == id_alumno).first()
     if not alumno or alumno.id_usuario != current_user.get("id"):
         raise HTTPException(status_code=403, detail="No puedes ver los pagos de otro alumno")
+
+
+def _deuda_vencida(db: Session, id_alumno: int) -> dict:
+    """Lo que el alumno debía haber pagado y no pagó.
+
+    «Al día» no es «no deber nada»: una cuota que todavía no ha vencido no
+    pone a nadie en falta. Se cuentan las que ya pasaron de fecha, más las que
+    el sistema marcó VENCIDO (esas lo están por definición).
+
+    Es el único sitio donde se decide qué significa estar al día. Lo usan el
+    aviso del panel del alumno y la creación de la solicitud, para que los dos
+    digan lo mismo.
+    """
+    hoy = date.today()
+    cuotas = db.query(models.Pago).filter(
+        models.Pago.id_alumno == id_alumno,
+        models.Pago.estado.in_(["PENDIENTE", "VENCIDO"]),
+        or_(models.Pago.estado == "VENCIDO",
+            and_(models.Pago.fecha_vencimiento.isnot(None),
+                 models.Pago.fecha_vencimiento < hoy)),
+    ).order_by(models.Pago.fecha_vencimiento.asc()).all()
+
+    total = Decimal("0.00")
+    for c in cuotas:
+        # El monto_total ya trae la mora incorporada cuando la hay; si viniera
+        # vacío se cae al monto, y si tampoco lo hay, a cero. Sumar None
+        # reventaría la petición entera por un dato incompleto.
+        importe = c.monto_total if c.monto_total is not None else c.monto
+        total += Decimal(str(importe or 0))
+
+    return {
+        "al_dia": len(cuotas) == 0,
+        "cuotas_vencidas": len(cuotas),
+        "monto_vencido": float(total),
+        "detalle": [
+            {"id_pago": c.id_pago, "concepto": c.concepto,
+             "fecha_vencimiento": c.fecha_vencimiento,
+             "monto": float(c.monto_total if c.monto_total is not None
+                            else (c.monto or 0))}
+            for c in cuotas[:10]   # con la lista completa no se hace nada
+        ],
+    }
+
+
+@router.get("/alumnos/{id_alumno}/deuda-vencida")
+def obtener_deuda_vencida_alumno(id_alumno: int, db: Session = Depends(get_db),
+                                 current_user: dict = Depends(get_current_user)):
+    """¿Este alumno está al día? Lo consulta su panel antes de pedir un trámite."""
+    _validar_acceso_pagos_alumno(id_alumno, current_user, db)
+    return _deuda_vencida(db, id_alumno)
 
 
 @router.get("/alumnos/{id_alumno}/deudas")

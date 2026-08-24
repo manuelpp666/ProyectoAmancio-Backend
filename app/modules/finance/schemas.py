@@ -22,6 +22,9 @@ class TipoTramiteBase(BaseModel):
     periodo_academico: PeriodoAcademicoSchema = PeriodoAcademicoSchema.REGULAR
     # Días que tiene el alumno para pagar el trámite desde que lo solicita
     dias_vencimiento: int = Field(default=15, ge=1, le=365)
+    # Impide solicitarlo a quien tenga cuotas vencidas. Por defecto en falso:
+    # un trámite que no diga nada se comporta como hasta ahora.
+    requiere_pagos_al_dia: bool = False
 
 class TipoTramiteCreate(TipoTramiteBase):
     pass

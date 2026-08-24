@@ -33,6 +33,9 @@ class TipoTramite(Base):
         )
     # Días que tiene el alumno para pagar el trámite desde que lo solicita.
     dias_vencimiento = Column(Integer, nullable=False, server_default="15")
+    # Si está marcado, el alumno con cuotas vencidas no puede solicitarlo: se
+    # le avisa en pantalla y el endpoint rechaza la petición con un 409.
+    requiere_pagos_al_dia = Column(Boolean, nullable=False, server_default="0")
     # Relación: Un tipo de trámite puede estar en muchas solicitudes
     solicitudes = relationship("SolicitudTramite", back_populates="tipo")
 

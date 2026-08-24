@@ -401,11 +401,43 @@ class IndiceDeudas:
 # Aplicación de un reporte
 # ---------------------------------------------------------------------------
 
+# Los dos estados de una solicitud de trámite que le importan a la cobranza.
+# El resto —APROBADO, RECHAZADO— ya pasaron por el dictamen del colegio y no
+# se tocan desde aquí.
+SOLICITUD_SIN_PAGAR = "PENDIENTE_PAGO"
+SOLICITUD_POR_REVISAR = "PAGADO_PENDIENTE_REV"
+
+
+def _cerrar_solicitud_de_tramite(registro) -> Optional[int]:
+    """Un trámite que se acaba de cobrar pasa a la bandeja de revisión.
+
+    Sin esto el dinero entraba y el trámite se quedaba parado: el alumno
+    seguía viendo «pendiente de pago» y la solicitud no aparecía en
+    /solicitudes/pendientes-revision, que filtra justo por
+    PAGADO_PENDIENTE_REV. Nadie se enteraba de que había un certificado que
+    emitir. El cobro en caja y la confirmación desde la app ya lo hacían; lo
+    que faltaba era hacerlo también cuando el pago llega por el banco.
+
+    Solo avanza desde PENDIENTE_PAGO: si la solicitud ya tiene dictamen, un
+    reporte repetido o una resolución a destiempo no debe devolverla a la
+    bandeja. Devuelve el id de la solicitud tocada, o None.
+    """
+    # Las cuotas externas no salen de una solicitud: no tienen el campo.
+    if not isinstance(registro, fin.Pago) or not registro.id_solicitud_tramite:
+        return None
+    solicitud = registro.solicitud
+    if solicitud is None or solicitud.estado != SOLICITUD_SIN_PAGAR:
+        return None
+    solicitud.estado = SOLICITUD_POR_REVISAR
+    return solicitud.id_solicitud_tramite
+
+
 def _marcar_pagado(registro, pago: PagoBCP) -> None:
     registro.estado = "PAGADO"
     registro.fecha_pago = dt.datetime.combine(
         pago.fecha_pago or dt.date.today(), dt.time.min)
     registro.codigo_operacion_bcp = normalizar_operacion(pago.operacion)
+    _cerrar_solicitud_de_tramite(registro)
     if isinstance(registro, fin.Pago):
         registro.json_respuesta_banco = json.dumps({
             "origen": "REPORTE_COBROS_BCP",
@@ -757,6 +789,29 @@ def _mora_del_tipo(tipo) -> Decimal:
     return Decimal(str(tipo.mora))
 
 
+def _acumula_mora(cuota: "fin.Pago") -> bool:
+    """Si a esa cuota se le puede cargar mora al vencer.
+
+    Un trámite no. El alumno pide un certificado y tiene un plazo para
+    pagarlo; si no paga, la solicitud caduca, no se le encarece. Y el riesgo
+    era real, no teórico: el pago de un trámite se crea sin `id_tipo_pago`, y
+    sin tipo `_mora_del_tipo` devuelve los 5 soles por defecto, así que un
+    duplicado de libreta de 20 soles pasaba a 25 en cuanto alguien cargaba la
+    mora de ese día. Encima el trámite vence en una fecha suelta (el día que
+    lo pidió más el plazo), así que salía en la pantalla de mora como una
+    fecha propia con una sola cuota: fácil de pulsar sin mirar.
+
+    Lo usan las dos pantallas —la que propone las fechas y la que carga la
+    mora— para que no puedan discrepar.
+    """
+    if cuota.id_solicitud_tramite:
+        return False
+    tipo = cuota.tipo_pago
+    # Sin tipo se sigue asumiendo que sí: las pensiones antiguas vienen así y
+    # cambiarlo dejaría de cobrar mora donde hoy se cobra.
+    return tipo is None or tipo.accion_vencimiento == "APLICAR_MORA"
+
+
 def aplicar_mora(db: Session, fecha_vencimiento: dt.date,
                  importe: Optional[Decimal] = None,
                  simular: bool = False) -> dict:
@@ -788,14 +843,15 @@ def aplicar_mora(db: Session, fecha_vencimiento: dt.date,
 
     tocadas, ya_tenian, sin_regla = [], 0, 0
     for c in cuotas:
-        tipo = c.tipo_pago
-        if tipo is not None and tipo.accion_vencimiento != "APLICAR_MORA":
+        if not _acumula_mora(c):
             sin_regla += 1
             continue
         if c.mora and Decimal(str(c.mora)) > 0:
             ya_tenian += 1
             continue
-        valor = importe if importe is not None else _mora_del_tipo(tipo)
+        # El importe a mano tampoco resucita a los excluidos: si el concepto no
+        # lleva mora, no la lleva aunque la secretaria escriba una cifra.
+        valor = importe if importe is not None else _mora_del_tipo(c.tipo_pago)
         if valor <= 0:
             # Mora en cero es una decisión, no un dato que falte: los módulos
             # están así a propósito porque el colegio no se la cobra.
@@ -839,10 +895,9 @@ def vencimientos_sin_mora(db: Session, hasta: Optional[dt.date] = None) -> List[
              .all())
     agrupado: Dict[tuple, dict] = {}
     for c in filas:
-        tipo = c.tipo_pago
-        if tipo is not None and tipo.accion_vencimiento != "APLICAR_MORA":
-            continue
-        cuanto = _mora_del_tipo(tipo)
+        if not _acumula_mora(c):
+            continue                      # trámites, y conceptos sin regla
+        cuanto = _mora_del_tipo(c.tipo_pago)
         if cuanto <= 0:
             continue                      # concepto sin mora, como los módulos
         # El 30 y el 31 del mismo mes son una sola fila: son la misma fecha de
@@ -1409,6 +1464,9 @@ def importar_crep_inicial(db: Session, datos: bytes, nombre: str = "CREP.txt",
         if sincronizar_pagadas and not simular:
             registro.estado = "PAGADO"
             registro.fecha_pago = dt.datetime.now()
+            # Misma puerta, misma regla: si la cuota que se da por cobrada era
+            # un trámite, su solicitud tiene que avanzar con ella.
+            _cerrar_solicitud_de_tramite(registro)
             registro.json_respuesta_banco = json.dumps({
                 "origen": "SINCRONIZACION_CREP",
                 "archivo": nombre,
@@ -1859,6 +1917,9 @@ def resolver_movimiento(db: Session, id_movimiento: int, accion: str,
             mov.fecha_pago or dt.date.today(), dt.time.min)
         cuota.codigo_operacion_bcp = (
             normalizar_operacion(mov.operacion) or "MANUAL-CONCILIACION")
+        # Un trámite que llega a la bandeja (ambiguo, monto distinto) y se
+        # resuelve a mano tiene que acabar igual que uno aplicado solo.
+        _cerrar_solicitud_de_tramite(cuota)
         if isinstance(cuota, fin.Pago):
             cuota.json_respuesta_banco = json.dumps({
                 "origen": "RESOLUCION_MANUAL",

@@ -1,15 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import extract, func, or_, text
+from sqlalchemy import bindparam, extract, func, or_, text
 from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
 from app.modules.academic import models as academic_models
 from app.modules.enrollment import models as matricula_models
 from app.core.util.security import get_current_user
 from app.core.util import busqueda as busqueda_util
+from app.core.util.correo_usuario import PRIORIDAD_PARENTESCO
+from app.modules.users.relacion_familiar.models import RelacionFamiliar
 from . import models, schemas
 from . import bimestres as bimestres_util
-from .constants import PUNTAJE_MAXIMO, UMBRAL_OBSERVACION, UMBRAL_CRITICO, calcular_puntaje, estado_visual
+from .constants import (PUNTAJE_MAXIMO, UMBRAL_OBSERVACION, UMBRAL_CRITICO,
+                        ESTADOS_CONDUCTA, calcular_puntaje, estado_visual,
+                        normalizar_estado)
 from typing import Optional, Tuple
 from datetime import datetime, date
 
@@ -804,15 +808,172 @@ def obtener_agenda_dia(
         } for c in citas
     ]
 
+def _apoderados_de_la_lista(db: Session, ids_alumnos: list) -> dict:
+    """A quién llamar por cada alumno: {id_alumno: {apoderado, parentesco, telefono}}.
+
+    Un alumno puede tener varios familiares registrados. Cuál manda no se
+    decide aquí: se usa `PRIORIDAD_PARENTESCO` de `core/util/correo_usuario`,
+    la misma lista con la que el sistema elige a quién mandarle los avisos.
+    Si el psicólogo llamara a un familiar y el colegio escribiera a otro,
+    tendríamos dos «apoderados» distintos para el mismo alumno.
+
+    Entre los del mismo parentesco gana el que tenga teléfono: un apoderado
+    sin número no sirve de nada en esta pantalla.
+    """
+    if not ids_alumnos:
+        return {}
+    relaciones = (
+        db.query(RelacionFamiliar)
+        .options(joinedload(RelacionFamiliar.familiar))
+        .filter(RelacionFamiliar.id_alumno.in_(ids_alumnos))
+        .all()
+    )
+
+    def prioridad(rel):
+        tipo = (rel.tipo_parentesco or "").strip().upper()
+        orden = (PRIORIDAD_PARENTESCO.index(tipo)
+                 if tipo in PRIORIDAD_PARENTESCO else len(PRIORIDAD_PARENTESCO))
+        sin_telefono = 0 if (rel.familiar and (rel.familiar.telefono or "").strip()) else 1
+        return (sin_telefono, orden)
+
+    mejor: dict = {}
+    for rel in sorted(relaciones, key=prioridad):
+        if not rel.familiar or rel.id_alumno in mejor:
+            continue
+        f = rel.familiar
+        nombre = f"{f.apellidos or ''}, {f.nombres or ''}".strip(", ").strip()
+        mejor[rel.id_alumno] = {
+            "apoderado": nombre or None,
+            "apoderado_parentesco": (rel.tipo_parentesco or "").strip() or None,
+            "apoderado_telefono": (f.telefono or "").strip() or None,
+        }
+    return mejor
+
+
+def _notas_migradas_varios(db: Session, ids_alumnos: list, anio: str,
+                           numero_bimestre: Optional[int]) -> dict:
+    """Las notas de conducta del sistema antiguo, para varios alumnos de una vez.
+
+    Es `_conducta_migrada` en versión lista: una consulta en lugar de una por
+    alumno, porque aquí se pintan todos los de la pantalla a la vez. Mismas
+    salvaguardas: sin bimestre no hay nota que buscar, y si la tabla todavía
+    no existe (base sin el script 20) se sigue con el puntaje calculado en vez
+    de tumbar la pantalla.
+    """
+    if not numero_bimestre or not ids_alumnos:
+        return {}
+    try:
+        filas = db.execute(
+            text("SELECT m.id_alumno, nc.valor FROM nota_conducta nc "
+                 "JOIN matricula m ON m.id_matricula = nc.id_matricula "
+                 "WHERE m.id_anio_escolar = :anio AND nc.bimestre = :bim "
+                 "  AND m.id_alumno IN :ids").bindparams(
+                     bindparam("ids", expanding=True)),
+            {"anio": anio, "bim": numero_bimestre, "ids": list(ids_alumnos)},
+        ).all()
+    except Exception:
+        db.rollback()
+        return {}
+    return {f[0]: int(round(float(f[1]))) for f in filas if f[1] is not None}
+
+
+def _conducta_de_la_lista(db: Session, ids_alumnos: list, reportes: list,
+                          anio: int, numero_bimestre: Optional[int] = None) -> dict:
+    """Estado de conducta de cada alumno de la lista: {id_alumno: {...}}.
+
+    Calcula lo mismo que `/usuario/{id}/estado-conducta` y con las mismas
+    reglas —el puntaje sale de los reportes del BIMESTRE en curso, el cambio
+    de I.E. se arrastra todo el AÑO, y una nota migrada manda sobre el
+    cálculo—, pero para todos los alumnos de golpe y reaprovechando los
+    reportes que la pantalla ya había traído. Si las dos pantallas dieran
+    colores distintos para el mismo alumno, nadie sabría a cuál creer.
+    """
+    desde, hasta, numero_bimestre = _periodo(db, anio, numero_bimestre)
+    migradas = _notas_migradas_varios(db, ids_alumnos, str(anio), numero_bimestre)
+
+    perdidos = {i: 0 for i in ids_alumnos}
+    cambio_ie = {i: False for i in ids_alumnos}
+    del_bimestre = {i: 0 for i in ids_alumnos}
+    for r in reportes:
+        if r.id_alumno not in perdidos or not r.nivel or not r.fecha_reporte:
+            continue
+        fecha = r.fecha_reporte.date()
+        if fecha.year != anio:
+            continue
+        # El cambio de I.E. es medida extrema: no se borra al empezar un
+        # bimestre nuevo, cuenta en todo el año.
+        if r.nivel.cambio_ie:
+            cambio_ie[r.id_alumno] = True
+        if desde <= fecha <= hasta:
+            perdidos[r.id_alumno] += r.nivel.puntos or 0
+            del_bimestre[r.id_alumno] += 1
+
+    resultado = {}
+    for i in ids_alumnos:
+        migrada = migradas.get(i)
+        puntaje = migrada if migrada is not None else calcular_puntaje(perdidos[i])
+        resultado[i] = {
+            "estado_conducta": estado_visual(puntaje, cambio_ie[i]),
+            "puntaje_conducta": puntaje,
+            "puntaje_maximo": PUNTAJE_MAXIMO,
+            "conducta_bimestre": numero_bimestre,
+            "reportes_del_bimestre": del_bimestre[i],
+            "conducta_cambio_ie": cambio_ie[i],
+            # Cuando la nota viene del sistema antiguo, el número NO sale de
+            # los reportes de esta pantalla. Conviene que se sepa.
+            "conducta_de_registro_anterior": migrada is not None,
+        }
+    return resultado
+
+
+# Cómo se puede ordenar la lista. "conducta" no se puede pedirle al SQL: el
+# puntaje no es una columna, sale de los reportes del bimestre.
+ORDENES = ("reciente", "antiguo", "conducta")
+
+
 @router.get("/alumnos-con-reportes")
 def obtener_alumnos_con_reportes(
-    orden: str = Query("reciente", description="reciente o antiguo"),
+    orden: str = Query("reciente", description="reciente, antiguo o conducta "
+                                               "(peor conducta primero)"),
     q: Optional[str] = Query(None, description="Buscar por nombre o DNI"),
+    estado_conducta: Optional[str] = Query(
+        None, description="Filtra por el semáforo de conducta: Verde, Amarillo "
+                          "o Rojo. Sin valor, todos."),
+    anio: Optional[int] = Query(None, description="Año escolar; por defecto el actual"),
+    bimestre: Optional[int] = Query(
+        None, ge=1, le=bimestres_util.TOTAL_BIMESTRES,
+        description="Bimestre sobre el que se calcula la conducta; por defecto "
+                    "el que corresponde a hoy"),
+    incluir_sin_reportes: bool = Query(
+        False, description="False (por defecto): solo alumnos con reportes, "
+                           "como siempre. True: todos los alumnos activos."),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
     if current_user.get("rol") not in ["AUXILIAR", "PSICOLOGO", "ADMIN"]:
         raise HTTPException(status_code=403, detail="Acceso denegado")
+
+    # Se valida ANTES de consultar. Un valor que no se reconoce se rechaza en
+    # vez de ignorarse: ignorándolo se devolvería la lista entera y el
+    # psicólogo creería estar viendo solo los críticos.
+    estado_pedido = None
+    if estado_conducta is not None and estado_conducta.strip():
+        estado_pedido = normalizar_estado(estado_conducta)
+        if estado_pedido is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Estado de conducta no reconocido: "
+                       f"{estado_conducta.strip()!r}. Valores válidos: "
+                       f"{', '.join(ESTADOS_CONDUCTA)}")
+
+    orden = (orden or "reciente").strip().lower()
+    if orden not in ORDENES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Orden no reconocido: {orden!r}. Valores válidos: "
+                   f"{', '.join(ORDENES)}")
+
+    anio = anio or datetime.now().year
 
     # Subquery: alumnos con fecha máxima y conteo de reportes de conducta
     reportes_sub = db.query(
@@ -834,12 +995,24 @@ def obtener_alumnos_con_reportes(
             alumno_models.Alumno.apellidos,
             alumno_models.Alumno.dni,
             reportes_sub.c.max_fecha_reporte,
-            reportes_sub.c.total_reportes,
+            func.coalesce(reportes_sub.c.total_reportes, 0).label("total_reportes"),
             func.coalesce(citas_sub.c.total_citas, 0).label("total_citas")
         )
-        .join(reportes_sub, alumno_models.Alumno.id_alumno == reportes_sub.c.id_alumno)
         .outerjoin(citas_sub, alumno_models.Alumno.id_alumno == citas_sub.c.id_alumno)
     )
+
+    if incluir_sin_reportes:
+        # Todos los alumnos activos, tengan o no reportes. Los retirados
+        # quedan fuera, igual que en el resto de pantallas de este módulo:
+        # el psicólogo no puede citar a quien ya no está en el colegio.
+        query = (query
+                 .outerjoin(reportes_sub,
+                            alumno_models.Alumno.id_alumno == reportes_sub.c.id_alumno)
+                 .filter(alumno_models.Alumno.estado_ingreso != "RETIRADO"))
+    else:
+        # El comportamiento de siempre: solo quien tiene algún reporte.
+        query = query.join(
+            reportes_sub, alumno_models.Alumno.id_alumno == reportes_sub.c.id_alumno)
 
     if q and isinstance(q, str) and q.strip():
         termino = q.strip()
@@ -851,10 +1024,21 @@ def obtener_alumnos_con_reportes(
             )
         )
 
-    if orden == "antiguo":
-        query = query.order_by(reportes_sub.c.max_fecha_reporte.asc())
-    else:
-        query = query.order_by(reportes_sub.c.max_fecha_reporte.desc())
+    # "conducta" se ordena al final, cuando ya está calculado el puntaje. Aquí
+    # se deja por fecha igualmente, porque `sorted` es estable y así el
+    # desempate entre dos puntajes iguales sigue siendo el reporte más
+    # reciente.
+    #
+    # El desempate por apellidos NO es cosmético: en el modo «Todos» hay
+    # cientos de alumnos sin ningún reporte, y para todos ellos la fecha es
+    # NULL. Ordenando solo por fecha, MySQL puede devolverlos en cualquier
+    # orden y dos cargas seguidas de la misma pantalla salían barajadas.
+    por_fecha = (reportes_sub.c.max_fecha_reporte.asc() if orden == "antiguo"
+                 else reportes_sub.c.max_fecha_reporte.desc())
+    query = query.order_by(por_fecha,
+                           alumno_models.Alumno.apellidos.asc(),
+                           alumno_models.Alumno.nombres.asc(),
+                           alumno_models.Alumno.id_alumno.asc())
 
     alumnos = query.all()
 
@@ -890,27 +1074,58 @@ def obtener_alumnos_con_reportes(
         if ur.id_alumno not in mapa_ultimo_reporte:
             mapa_ultimo_reporte[ur.id_alumno] = ur
 
+    # Se reaprovechan los reportes ya traídos: el semáforo no cuesta ni una
+    # consulta más de reportes.
+    conducta = _conducta_de_la_lista(db, ids_alumnos, ultimos_reportes, anio, bimestre)
+    apoderados = _apoderados_de_la_lista(db, ids_alumnos)
+
+    # Un alumno puede no tener familiar registrado. Se devuelven las claves
+    # igualmente, en nulo, para que la pantalla pueda decir «sin teléfono» en
+    # vez de no enseñar nada y dejar dudando si es que no se cargó.
+    sin_apoderado = {"apoderado": None, "apoderado_parentesco": None,
+                     "apoderado_telefono": None}
+
     resultados = []
     for a in alumnos:
         mat = mapa_mat.get(a.id_alumno)
         ur = mapa_ultimo_reporte.get(a.id_alumno)
+        cond = conducta.get(a.id_alumno, {})
+        # El filtro se aplica aquí y no en el SQL porque el estado de conducta
+        # no es una columna: se calcula a partir de los reportes del bimestre.
+        if estado_pedido and cond.get("estado_conducta") != estado_pedido:
+            continue
         resultados.append({
             "id_alumno": a.id_alumno,
             "nombres": a.nombres,
             "apellidos": a.apellidos,
             "nombre_completo": f"{a.apellidos}, {a.nombres}".strip(),
             "dni": a.dni or "—",
+            **cond,
+            **apoderados.get(a.id_alumno, sin_apoderado),
             "nivel": mat.nivel_nombre if mat else None,
             "grado": mat.grado_nombre if mat else None,
             "seccion": mat.seccion_nombre if mat else None,
             "total_reportes": int(a.total_reportes or 0),
             "total_citas": int(a.total_citas or 0),
             "ultima_fecha_reporte": a.max_fecha_reporte.strftime("%d/%m/%Y %H:%M") if a.max_fecha_reporte else "—",
-            "ultima_falta": ur.nivel.nombre if ur and ur.nivel else "Reporte disciplinario",
+            # Sin ningún reporte no hay «última falta» que enseñar. Antes esta
+            # lista solo traía alumnos reportados y el caso no existía; ahora
+            # sí, y poner "Reporte disciplinario" a quien no tiene ninguno
+            # sería decir algo falso.
+            "ultima_falta": (ur.nivel.nombre if ur and ur.nivel
+                             else ("Reporte disciplinario" if ur else None)),
             "tipo_falta": ur.nivel.tipo.nombre if ur and ur.nivel and ur.nivel.tipo else None,
             "puntos_descontados": ur.nivel.puntos if ur and ur.nivel else None,
             "requiere_cambio_ie": bool(ur.nivel.cambio_ie) if ur and ur.nivel else False,
         })
+
+    if orden == "conducta":
+        # Peor conducta primero. El SQL ya los dejó ordenados por fecha, y
+        # `sorted` es estable, así que entre dos alumnos con el mismo puntaje
+        # sigue mandando el del reporte más reciente. El que no tenga puntaje
+        # (no debería pasar) se va al final en vez de reventar la comparación.
+        resultados.sort(key=lambda r: (r.get("puntaje_conducta") is None,
+                                       r.get("puntaje_conducta") or 0))
 
     return resultados
 
