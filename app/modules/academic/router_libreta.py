@@ -26,10 +26,12 @@ vez de reventar.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -39,7 +41,10 @@ from app.modules.academic.models import (AnioEscolar, Area, Curso, Grado, Nivel,
                                          PlanEstudio, Seccion)
 from app.modules.enrollment.models import Matricula
 from app.modules.management.models import ExoneracionCurso, Nota
-from app.modules.behavior.models import NotaConducta
+from app.modules.behavior import bimestres as bimestres_util
+from app.modules.behavior.constants import calcular_puntaje
+from app.modules.behavior.models import (NivelConducta, NotaConducta,
+                                         ReporteConducta)
 from app.modules.users.alumno.models import Alumno
 
 router = APIRouter(prefix="/academic", tags=["Académico"])
@@ -101,6 +106,95 @@ def _exoneraciones_varias(db: Session, ids_matricula) -> dict:
     except (ProgrammingError, OperationalError):
         db.rollback()
         return {}
+
+
+def _conducta_resuelta(db: Session, ae, ids_matricula, visibles: tuple) -> dict:
+    """id_matricula -> {bimestre: nota de conducta}, con el mismo criterio que
+    la pantalla de notas finales.
+
+    La nota de conducta se resuelve en dos pasos, igual que en
+    `router_notas.py` (busca "Resolución de nota de conducta"):
+
+      1. La guardada en `nota_conducta`, si el auxiliar la puso a mano o vino
+         en la migración.
+      2. Si no hay ninguna, se DEDUCE: el alumno arranca el bimestre con 20 y
+         cada reporte le descuenta los puntos de su falta.
+
+    Antes la libreta solo hacía el paso 1 y dejaba la casilla en blanco. Como
+    las notas del II bimestre nunca se cargaron —553 alumnos tienen la del I y
+    22 la del II—, la pantalla enseñaba un 20 deducido y la libreta salía
+    vacía para el mismo alumno. Son la misma nota y tienen que decir lo mismo.
+
+    Los tramos de fechas se piden con el mismo `rango()` que usa la pantalla,
+    de forma que las dos sumen exactamente los mismos reportes.
+    """
+    guardadas: dict = {}
+    try:
+        for nc in (db.query(NotaConducta.id_matricula, NotaConducta.bimestre,
+                            NotaConducta.valor)
+                   .filter(NotaConducta.id_matricula.in_(ids_matricula),
+                           NotaConducta.bimestre.in_(visibles)).all()):
+            guardadas.setdefault(nc.id_matricula, {})[nc.bimestre] = float(nc.valor)
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        guardadas = {}
+
+    # Sin año escolar no se sabe dónde empieza y acaba cada bimestre, así que
+    # no hay forma de saber qué reportes contar: se devuelve lo guardado.
+    if ae is None:
+        return guardadas
+
+    # En verano no hay nota de conducta: son siete semanas sin bimestres. La
+    # pantalla la deja en None y aquí se hace lo mismo.
+    tipo = (ae.tipo or "REGULAR").strip().upper()
+    if tipo == "VERANO":
+        return guardadas
+
+    try:
+        alumno_de = {m.id_matricula: m.id_alumno for m in
+                     db.query(Matricula.id_matricula, Matricula.id_alumno)
+                     .filter(Matricula.id_matricula.in_(ids_matricula)).all()}
+        ids_alumno = {v for v in alumno_de.values() if v}
+        hoy = date.today()
+
+        for numero in visibles:
+            tramo = bimestres_util.rango(
+                db, ae.id_anio_escolar, numero,
+                getattr(ae, "fecha_inicio", None), getattr(ae, "fecha_fin", None), tipo)
+            if not tramo:
+                continue
+            desde, hasta = tramo
+
+            # Un bimestre que todavía no ha empezado no se deduce: saldría un
+            # 20 impreso en la libreta de un tramo que nadie ha cursado. Pasa
+            # al pedir el año completo antes de que acabe. La pantalla no cae
+            # en esto porque solo enseña una columna, la del bimestre en curso.
+            if desde > hoy:
+                continue
+
+            puntos: dict = {}
+            if ids_alumno:
+                for r in (db.query(ReporteConducta.id_alumno,
+                                   func.coalesce(func.sum(NivelConducta.puntos), 0))
+                          .join(NivelConducta,
+                                NivelConducta.id_nivel_conducta == ReporteConducta.id_nivel_conducta)
+                          .filter(ReporteConducta.id_alumno.in_(ids_alumno),
+                                  func.date(ReporteConducta.fecha_reporte) >= desde,
+                                  func.date(ReporteConducta.fecha_reporte) <= hasta)
+                          .group_by(ReporteConducta.id_alumno).all()):
+                    puntos[r[0]] = int(r[1] or 0)
+
+            for id_matricula in ids_matricula:
+                fila = guardadas.setdefault(id_matricula, {})
+                if numero in fila:
+                    continue        # manda siempre la nota guardada
+                fila[numero] = float(calcular_puntaje(puntos.get(alumno_de.get(id_matricula), 0)))
+    except (ProgrammingError, OperationalError):
+        # Una base sin las tablas de conducta se queda con lo que hubiera
+        # guardado; la libreta pierde la nota deducida, no la descarga entera.
+        db.rollback()
+
+    return guardadas
 
 
 def _orden_areas(db: Session, ids_area: set, primaria: bool) -> dict:
@@ -338,12 +432,12 @@ def libreta(
     orden_areas = _orden_areas(db, ids_area, es_primaria)
 
     # --- conducta, solo de los bimestres que entran ---
-    conducta = {
-        nc.bimestre: nc.valor
-        for nc in db.query(NotaConducta.bimestre, NotaConducta.valor)
-        .filter(NotaConducta.id_matricula == id_matricula,
-                NotaConducta.bimestre.in_(visibles)).all()
-    }
+    # La guardada si la hay y, si no, la deducida de los reportes: es la misma
+    # regla que aplica la tabla de notas finales. Ver `_conducta_resuelta`.
+    ae_alumno = (db.query(AnioEscolar)
+                 .filter(AnioEscolar.id_anio_escolar == matricula.id_anio_escolar)
+                 .first())
+    conducta = _conducta_resuelta(db, ae_alumno, [id_matricula], visibles)         .get(id_matricula, {})
 
     return _armar_libreta(
         alumno_info=_alumno_info(matricula, alumno, nivel, grado, seccion),
@@ -464,12 +558,9 @@ def libretas_en_bloque(
     exo_por_matricula = _exoneraciones_varias(db, ids)
 
     # --- 5. conducta ---
-    conducta_por_matricula: dict = {}
-    for nc in (db.query(NotaConducta.id_matricula, NotaConducta.bimestre,
-                        NotaConducta.valor)
-               .filter(NotaConducta.id_matricula.in_(ids),
-                       NotaConducta.bimestre.in_(visibles)).all()):
-        conducta_por_matricula.setdefault(nc.id_matricula, {})[nc.bimestre] = nc.valor
+    # Guardada o deducida de los reportes, igual que en la tabla de notas
+    # finales y que en la libreta de uno solo. Ver `_conducta_resuelta`.
+    conducta_por_matricula = _conducta_resuelta(db, ae, ids, visibles)
 
     # --- 6. orden de las áreas, en los dos niveles ---
     # Se resuelve una vez para todas: el orden depende del nivel del alumno, y
