@@ -5,15 +5,17 @@ from app.db.database import get_db
 from app.modules.users.alumno import models as alumno_models
 from app.modules.academic import models as academic_models
 from app.modules.enrollment import models as matricula_models
-from app.core.util.security import get_current_user
+from app.core.util.security import get_current_user, require_roles
 from app.core.util import busqueda as busqueda_util
 from app.core.util.correo_usuario import PRIORIDAD_PARENTESCO
 from app.modules.users.relacion_familiar.models import RelacionFamiliar
+from app.modules.personal import models as personal_models
 from . import models, schemas
 from . import bimestres as bimestres_util
 from .constants import (PUNTAJE_MAXIMO, UMBRAL_OBSERVACION, UMBRAL_CRITICO,
                         ESTADOS_CONDUCTA, calcular_puntaje, estado_visual,
                         normalizar_estado)
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from typing import Optional, Tuple
 from datetime import datetime, date
 
@@ -211,6 +213,49 @@ def _serializar_reporte(r: "models.ReporteConducta") -> dict:
         "descripcion": r.descripcion_suceso,
     }
 
+def _serializar_eliminado(e: "models.ReporteConductaEliminado") -> dict:
+    """Forma de un reporte borrado para el historial de eliminados."""
+    return {
+        "id_eliminado": e.id_eliminado,
+        "id_reporte": e.id_reporte,
+        "id_alumno": e.id_alumno,
+        "alumno": e.alumno or "Alumno no disponible",
+        "dni": e.dni,
+        "falta": e.falta or "Falta registrada",
+        "tipo_falta": e.tipo_falta,
+        "puntos": e.puntos or 0,
+        "medida": e.medida,
+        "cambio_ie": bool(e.cambio_ie),
+        "descripcion": e.descripcion_suceso,
+        "fecha": e.fecha_reporte.strftime("%d/%m/%Y %H:%M") if e.fecha_reporte else "",
+        "motivo": e.motivo,
+        "eliminado_por": e.eliminado_por or "Usuario no disponible",
+        "rol_elimina": e.rol_elimina,
+        "fecha_eliminacion": (e.fecha_eliminacion.strftime("%d/%m/%Y %H:%M")
+                              if e.fecha_eliminacion else ""),
+    }
+
+
+def _nombre_de_usuario(db: Session, id_usuario: Optional[int], rol: Optional[str]) -> Optional[str]:
+    """Nombre y apellidos de quien está usando el sistema.
+
+    El historial de borrados guarda el nombre escrito, no solo el id: quien
+    borra un reporte hoy puede no seguir en el colegio dentro de dos años, y el
+    registro tiene que seguir diciendo quién fue.
+    """
+    tabla = {
+        "AUXILIAR": personal_models.Auxiliar,
+        "ADMIN": personal_models.Administrador,
+        "PSICOLOGO": personal_models.Psicologo,
+    }.get((rol or "").strip().upper())
+    if not id_usuario or tabla is None:
+        return None
+
+    fila = (db.query(tabla.nombres, tabla.apellidos)
+            .filter(tabla.id_usuario == id_usuario).first())
+    return f"{fila[0]} {fila[1]}".strip() if fila else None
+
+
 def _tiene_cambio_ie(db: Session, id_alumno: int, anio: int) -> bool:
     """True si el alumno tiene registrada en el año una falta que amerita cambio de I.E."""
     return db.query(models.ReporteConducta.id_reporte).join(models.NivelConducta).filter(
@@ -328,30 +373,70 @@ def actualizar_reporte_auxiliar(
         "umbral_critico": UMBRAL_CRITICO,
     }
 
-@router.delete("/reportes/{id_reporte}")
+@router.post("/reportes/{id_reporte}/eliminar")
 def eliminar_reporte_auxiliar(
     id_reporte: int,
+    datos: schemas.ReporteEliminar,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Elimina un reporte de conducta y recalcula automáticamente
-    la nota de conducta del bimestre correspondiente del estudiante.
+    Elimina un reporte de conducta, deja constancia del motivo en el historial
+    de eliminados y recalcula la nota de conducta del bimestre del estudiante.
+
+    Es POST y no DELETE porque el motivo viaja en el cuerpo de la petición, y
+    hay servidores intermedios que descartan el cuerpo de un DELETE. Sigue el
+    mismo patrón que /citas/{id_cita}/cancelar.
     """
     if current_user.get("rol") not in ["AUXILIAR", "ADMIN"]:
         raise HTTPException(status_code=403, detail="No tienes permisos para eliminar reportes de conducta")
 
-    reporte = db.query(models.ReporteConducta).filter(
-        models.ReporteConducta.id_reporte == id_reporte
-    ).first()
+    reporte = (db.query(models.ReporteConducta)
+               .options(joinedload(models.ReporteConducta.nivel).joinedload(models.NivelConducta.tipo),
+                        joinedload(models.ReporteConducta.alumno))
+               .filter(models.ReporteConducta.id_reporte == id_reporte).first())
     if not reporte:
         raise HTTPException(status_code=404, detail="Reporte no encontrado")
 
     id_alumno = reporte.id_alumno
     fecha_reporte = reporte.fecha_reporte
 
-    db.delete(reporte)
-    db.commit()
+    # Foto del reporte ANTES de borrarlo: nombre del alumno, de la falta y
+    # puntos tal como estaban hoy. El catálogo de faltas se puede editar desde
+    # el panel, así que guardar solo los ids dejaría el historial mintiendo.
+    nivel, alumno = reporte.nivel, reporte.alumno
+    borrado = models.ReporteConductaEliminado(
+        id_reporte=reporte.id_reporte,
+        id_alumno=id_alumno,
+        alumno=f"{alumno.nombres} {alumno.apellidos}" if alumno else None,
+        dni=alumno.dni if alumno else None,
+        falta=nivel.nombre if nivel else None,
+        tipo_falta=nivel.tipo.nombre if nivel and nivel.tipo else None,
+        puntos=nivel.puntos if nivel else 0,
+        medida=nivel.medida if nivel else None,
+        cambio_ie=bool(nivel.cambio_ie) if nivel else False,
+        descripcion_suceso=reporte.descripcion_suceso,
+        fecha_reporte=fecha_reporte,
+        motivo=datos.motivo,
+        id_usuario=current_user.get("id"),
+        eliminado_por=(_nombre_de_usuario(db, current_user.get("id"), current_user.get("rol"))
+                       or current_user.get("sub")),
+        rol_elimina=current_user.get("rol"),
+    )
+
+    # Constancia y borrado van en la misma transacción: si no se puede guardar
+    # el motivo, el reporte no se borra. Un borrado sin constancia devuelve
+    # puntos de conducta sin que quede dicho por qué.
+    try:
+        db.add(borrado)
+        db.delete(reporte)
+        db.commit()
+    except (ProgrammingError, OperationalError):
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=("No se pudo registrar el borrado en el historial de eliminados, "
+                    "así que el reporte no se eliminó. Avise al área de sistemas."))
 
     # Recalcular automáticamente la nota de conducta del bimestre
     recalc = _recalcular_nota_conducta_alumno_bimestre(db, id_alumno, fecha_reporte)
@@ -365,6 +450,7 @@ def eliminar_reporte_auxiliar(
         "id_reporte": id_reporte,
         "puntaje_actual": puntaje,
         "bimestre": numero_bimestre,
+        "eliminado": _serializar_eliminado(borrado),
     }
 
 @router.get("/reportes/")
@@ -405,6 +491,43 @@ def listar_reportes(
     ).offset(offset).limit(limit).all()
 
     return {"total": total, "items": [_serializar_reporte(r) for r in reportes]}
+
+
+@router.get("/reportes/eliminados")
+def listar_reportes_eliminados(
+    q: Optional[str] = Query(None, max_length=60),
+    limit: int = Query(15, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Reportes de conducta borrados, del borrado más reciente al más antiguo.
+
+    Busca por el nombre y el DNI que tenía el alumno cuando se borró, igual que
+    el historial normal, para que el mismo buscador filtre las dos listas.
+    """
+    if current_user.get("rol") not in ["AUXILIAR", "ADMIN", "PSICOLOGO"]:
+        raise HTTPException(status_code=403, detail="No tienes permisos para ver los reportes eliminados")
+
+    modelo = models.ReporteConductaEliminado
+    try:
+        consulta = db.query(modelo)
+
+        termino = (q or "").strip()
+        if len(termino) >= 3:
+            consulta = busqueda_util.filtrar(consulta, termino, modelo.alumno, modelo.dni)
+
+        total = consulta.count()
+        filas = (consulta.order_by(modelo.fecha_eliminacion.desc(), modelo.id_eliminado.desc())
+                 .offset(offset).limit(limit).all())
+    except (ProgrammingError, OperationalError):
+        # La tabla se crea con un SQL aparte. Mientras no esté, el historial
+        # sale vacío en vez de tumbar la pantalla entera del auxiliar.
+        db.rollback()
+        return {"total": 0, "items": [], "disponible": False}
+
+    return {"total": total, "items": [_serializar_eliminado(e) for e in filas], "disponible": True}
 
 
 @router.get("/usuario/{id_usuario}/estado-conducta")
@@ -528,6 +651,286 @@ def listar_niveles_disponibles(db: Session = Depends(get_db), current_user: dict
             "descripcion": n.descripcion,
         } for n in niveles
     ]
+
+# ---------------------------------------------------------------------------
+# CATÁLOGO DE FALTAS  (Panel del administrador → Gestión de Estudiantes)
+# ---------------------------------------------------------------------------
+#
+# Dos niveles, los mismos del Reglamento Interno:
+#
+#   tipo_falta       agrupa por criterio: "Respeto", "Honradez", "Asistencia y
+#                    Puntualidad"...
+#   nivel_conducta   la falta concreta y los puntos que descuenta.
+#
+# Es lo que llena el selector del auxiliar (`/conducta/niveles-conducta`) y lo
+# que resta de los 20 puntos con los que cada alumno empieza el bimestre.
+#
+# Solo ADMIN: el auxiliar reporta faltas, pero no decide cuánto valen.
+#
+# Ojo con los puntos: la nota de conducta NO se guarda calculada, se deduce al
+# vuelo sumando los reportes del bimestre. Cambiar los puntos de una falta ya
+# usada recalcula hacia atrás la nota de todos los que la tienen. Por eso cada
+# falta viaja con su número de usos, para que la pantalla pueda avisarlo.
+
+
+def _usos_por_falta(db: Session, ids: Optional[list] = None) -> dict:
+    """Cuántos reportes usa cada falta: {id_nivel_conducta: cuántos}.
+
+    Una sola consulta agrupada para todo el catálogo. Con 26 faltas, preguntar
+    una por una serían 26 viajes a la base cada vez que se abre la pantalla.
+    """
+    q = db.query(models.ReporteConducta.id_nivel_conducta,
+                 func.count(models.ReporteConducta.id_reporte))
+    if ids is not None:
+        if not ids:
+            return {}
+        q = q.filter(models.ReporteConducta.id_nivel_conducta.in_(ids))
+    return {fila[0]: int(fila[1] or 0)
+            for fila in q.group_by(models.ReporteConducta.id_nivel_conducta).all()
+            if fila[0] is not None}
+
+
+def _falta_a_dict(n, usos: int) -> dict:
+    return {
+        "id_nivel_conducta": n.id_nivel_conducta,
+        "id_tipo_falta": n.id_tipo_falta,
+        "nombre": n.nombre,
+        "puntos": n.puntos,
+        "medida": n.medida,
+        "cambio_ie": bool(n.cambio_ie),
+        "descripcion": n.descripcion,
+        "usos": usos,
+    }
+
+
+@router.get("/catalogo")
+def catalogo_de_faltas(db: Session = Depends(get_db),
+                       current_user: dict = Depends(require_roles("ADMIN"))):
+    """Todo el catálogo en una sola petición, ya agrupado.
+
+    Tres consultas para la pantalla entera —tipos, faltas y usos— en vez de
+    una por cada grupo. `usos` es cuántos reportes de conducta apuntan a esa
+    falta: la pantalla lo necesita para avisar antes de borrar o de cambiarle
+    los puntos, y traerlo aquí evita una llamada extra por fila.
+    """
+    tipos = db.query(models.TipoFalta).order_by(models.TipoFalta.nombre).all()
+    faltas = (db.query(models.NivelConducta)
+              .order_by(models.NivelConducta.puntos.desc(),
+                        models.NivelConducta.nombre)
+              .all())
+    usos = _usos_por_falta(db)
+
+    por_tipo: dict = {}
+    for n in faltas:
+        por_tipo.setdefault(n.id_tipo_falta, []).append(
+            _falta_a_dict(n, usos.get(n.id_nivel_conducta, 0)))
+
+    ids_tipo = {t.id_tipo_falta for t in tipos}
+    salida = []
+    for t in tipos:
+        hijas = por_tipo.get(t.id_tipo_falta, [])
+        salida.append({
+            "id_tipo_falta": t.id_tipo_falta,
+            "nombre": t.nombre,
+            "faltas": hijas,
+            "total_faltas": len(hijas),
+            "usos": sum(f["usos"] for f in hijas),
+        })
+
+    # Faltas cuyo tipo ya no existe. No debería pasar (hay clave foránea), pero
+    # si pasara quedarían invisibles en la pantalla y sin forma de arreglarlas.
+    huerfanas = [f for id_tipo, lista in por_tipo.items()
+                 if id_tipo not in ids_tipo for f in lista]
+
+    return {
+        "puntaje_maximo": PUNTAJE_MAXIMO,
+        "total_tipos": len(salida),
+        "total_faltas": len(faltas),
+        "tipos": salida,
+        "huerfanas": huerfanas,
+    }
+
+
+# --- tipos de falta ---
+
+@router.post("/tipos-falta")
+def crear_tipo_falta(datos: schemas.TipoFaltaGuardar, db: Session = Depends(get_db),
+                     current_user: dict = Depends(require_roles("ADMIN"))):
+    existe = (db.query(models.TipoFalta)
+              .filter(func.lower(models.TipoFalta.nombre) == datos.nombre.lower())
+              .first())
+    if existe:
+        raise HTTPException(409, f"Ya existe un tipo de falta llamado «{existe.nombre}».")
+
+    tipo = models.TipoFalta(nombre=datos.nombre)
+    db.add(tipo)
+    try:
+        db.commit()
+    except IntegrityError:
+        # La columna es UNIQUE. La comprobación de arriba cubre el caso normal;
+        # esto cubre que dos administradores guarden lo mismo a la vez.
+        db.rollback()
+        raise HTTPException(409, "Ya existe un tipo de falta con ese nombre.")
+    db.refresh(tipo)
+    return {"id_tipo_falta": tipo.id_tipo_falta, "nombre": tipo.nombre,
+            "faltas": [], "total_faltas": 0, "usos": 0}
+
+
+@router.put("/tipos-falta/{id_tipo_falta}")
+def editar_tipo_falta(id_tipo_falta: int, datos: schemas.TipoFaltaGuardar,
+                      db: Session = Depends(get_db),
+                      current_user: dict = Depends(require_roles("ADMIN"))):
+    tipo = (db.query(models.TipoFalta)
+            .filter(models.TipoFalta.id_tipo_falta == id_tipo_falta).first())
+    if not tipo:
+        raise HTTPException(404, "Ese tipo de falta ya no existe.")
+
+    repetido = (db.query(models.TipoFalta)
+                .filter(func.lower(models.TipoFalta.nombre) == datos.nombre.lower(),
+                        models.TipoFalta.id_tipo_falta != id_tipo_falta)
+                .first())
+    if repetido:
+        raise HTTPException(409, f"Ya existe otro tipo de falta llamado «{repetido.nombre}».")
+
+    tipo.nombre = datos.nombre
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Ya existe otro tipo de falta con ese nombre.")
+    db.refresh(tipo)
+    return {"id_tipo_falta": tipo.id_tipo_falta, "nombre": tipo.nombre}
+
+
+@router.delete("/tipos-falta/{id_tipo_falta}")
+def eliminar_tipo_falta(id_tipo_falta: int, db: Session = Depends(get_db),
+                        current_user: dict = Depends(require_roles("ADMIN"))):
+    """Solo se borra un tipo vacío.
+
+    Borrarlo con faltas dentro rompería la clave foránea —error 500 y sin
+    explicación— o dejaría faltas colgando de un tipo inexistente. Se responde
+    diciendo cuántas hay que mover o borrar antes.
+    """
+    tipo = (db.query(models.TipoFalta)
+            .filter(models.TipoFalta.id_tipo_falta == id_tipo_falta).first())
+    if not tipo:
+        raise HTTPException(404, "Ese tipo de falta ya no existe.")
+
+    dentro = (db.query(func.count(models.NivelConducta.id_nivel_conducta))
+              .filter(models.NivelConducta.id_tipo_falta == id_tipo_falta).scalar() or 0)
+    if dentro:
+        raise HTTPException(
+            409,
+            f"«{tipo.nombre}» tiene {dentro} "
+            f"{'falta' if dentro == 1 else 'faltas'} dentro. "
+            f"Bórralas o cámbialas de tipo antes de quitar el grupo.")
+
+    nombre = tipo.nombre
+    db.delete(tipo)
+    db.commit()
+    return {"message": f"Tipo de falta «{nombre}» eliminado."}
+
+
+# --- faltas concretas ---
+
+def _tipo_o_404(db: Session, id_tipo_falta: int) -> None:
+    existe = (db.query(models.TipoFalta.id_tipo_falta)
+              .filter(models.TipoFalta.id_tipo_falta == id_tipo_falta).first())
+    if not existe:
+        raise HTTPException(404, "El tipo de falta elegido ya no existe. Recarga la pantalla.")
+
+
+def _falta_repetida(db: Session, id_tipo_falta: int, nombre: str,
+                    excluir: Optional[int] = None):
+    """Misma falta dos veces dentro del mismo tipo.
+
+    Se compara sin distinguir mayúsculas: dos entradas que solo se diferencian
+    en eso son la misma para quien tiene que elegir una en el desplegable.
+    """
+    q = (db.query(models.NivelConducta)
+         .filter(models.NivelConducta.id_tipo_falta == id_tipo_falta,
+                 func.lower(models.NivelConducta.nombre) == nombre.lower()))
+    if excluir is not None:
+        q = q.filter(models.NivelConducta.id_nivel_conducta != excluir)
+    return q.first()
+
+
+@router.post("/faltas")
+def crear_falta(datos: schemas.FaltaGuardar, db: Session = Depends(get_db),
+                current_user: dict = Depends(require_roles("ADMIN"))):
+    _tipo_o_404(db, datos.id_tipo_falta)
+
+    repetida = _falta_repetida(db, datos.id_tipo_falta, datos.nombre)
+    if repetida:
+        raise HTTPException(409, f"Ese tipo ya tiene una falta llamada «{repetida.nombre}».")
+
+    falta = models.NivelConducta(**datos.model_dump())
+    db.add(falta)
+    db.commit()
+    db.refresh(falta)
+    return _falta_a_dict(falta, 0)
+
+
+@router.put("/faltas/{id_nivel_conducta}")
+def editar_falta(id_nivel_conducta: int, datos: schemas.FaltaGuardar,
+                 db: Session = Depends(get_db),
+                 current_user: dict = Depends(require_roles("ADMIN"))):
+    """Cambiar los puntos de una falta recalcula la conducta hacia atrás.
+
+    No es un descuido: la nota se deduce al vuelo restando de 20 los puntos de
+    los reportes del bimestre, así que corregir un valor mal puesto arregla
+    también las notas que salieron mal. Se devuelve cuántos reportes usan la
+    falta para que la pantalla lo diga antes y después de guardar.
+    """
+    falta = (db.query(models.NivelConducta)
+             .filter(models.NivelConducta.id_nivel_conducta == id_nivel_conducta).first())
+    if not falta:
+        raise HTTPException(404, "Esa falta ya no existe.")
+
+    _tipo_o_404(db, datos.id_tipo_falta)
+
+    repetida = _falta_repetida(db, datos.id_tipo_falta, datos.nombre,
+                               excluir=id_nivel_conducta)
+    if repetida:
+        raise HTTPException(409, f"Ese tipo ya tiene una falta llamada «{repetida.nombre}».")
+
+    for campo, valor in datos.model_dump().items():
+        setattr(falta, campo, valor)
+    db.commit()
+    db.refresh(falta)
+
+    usos = _usos_por_falta(db, [id_nivel_conducta]).get(id_nivel_conducta, 0)
+    return _falta_a_dict(falta, usos)
+
+
+@router.delete("/faltas/{id_nivel_conducta}")
+def eliminar_falta(id_nivel_conducta: int, db: Session = Depends(get_db),
+                   current_user: dict = Depends(require_roles("ADMIN"))):
+    """No se borra una falta que ya se le puso a alguien.
+
+    `reporte_conducta` apunta aquí. Borrarla dejaría reportes sin motivo y
+    cambiaría sola la nota de conducta de esos alumnos. Para retirar una falta
+    del reglamento sin perder el historial, lo suyo es dejar de usarla.
+    """
+    falta = (db.query(models.NivelConducta)
+             .filter(models.NivelConducta.id_nivel_conducta == id_nivel_conducta).first())
+    if not falta:
+        raise HTTPException(404, "Esa falta ya no existe.")
+
+    usos = _usos_por_falta(db, [id_nivel_conducta]).get(id_nivel_conducta, 0)
+    if usos:
+        raise HTTPException(
+            409,
+            f"«{falta.nombre}» está en {usos} "
+            f"{'reporte' if usos == 1 else 'reportes'} de conducta. "
+            f"Si se borra, esos partes se quedan sin motivo y cambia la nota de "
+            f"esos alumnos. Puedes editarla, pero no quitarla.")
+
+    nombre = falta.nombre
+    db.delete(falta)
+    db.commit()
+    return {"message": f"Falta «{nombre}» eliminada."}
+
 
 # --- ENDPOINTS DE CITAS PSICOLÓGICAS ---
 
@@ -1809,4 +2212,4 @@ def restablecer_nota_conducta(
         db.delete(registro)
         db.commit()
 
-    return {"mensaje": "Nota de conducta restablecida al cálculo automático"}
+    return {"mensaje": "Nota de conducta restablecida al cálculo automático"}

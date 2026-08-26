@@ -32,6 +32,39 @@ class ReporteConducta(Base):
     nivel = relationship("NivelConducta")
     alumno = relationship("Alumno")
 
+class ReporteConductaEliminado(Base):
+    """Copia de un reporte de conducta que se borró, con el motivo del borrado.
+
+    Es una FOTO, no una referencia: guarda el nombre del alumno, el de la falta
+    y los puntos tal como estaban ese día. Así el historial sigue leyéndose
+    aunque después se edite o se borre la falta del catálogo, que ahora el
+    administrador puede hacer.
+
+    Está en su propia tabla a propósito, en vez de marcar el reporte como
+    borrado: el reporte se elimina de verdad, así que la nota de conducta y
+    todo lo que cuenta reportes siguen funcionando exactamente igual, sin tener
+    que acordarse de excluir los borrados en cada consulta.
+    """
+    __tablename__ = "reporte_conducta_eliminado"
+    id_eliminado = Column(Integer, primary_key=True)
+    id_reporte = Column(Integer, nullable=False)          # el id que tenía, informativo
+    id_alumno = Column(Integer)                            # sin FK: la foto sobrevive al alumno
+    alumno = Column(String(200))
+    dni = Column(String(15))
+    falta = Column(String(120))
+    tipo_falta = Column(String(60))
+    puntos = Column(Integer, nullable=False, default=0)
+    medida = Column(String(60))
+    cambio_ie = Column(Boolean, nullable=False, default=False)
+    descripcion_suceso = Column(Text)
+    fecha_reporte = Column(DateTime)
+    motivo = Column(String(300), nullable=False)
+    id_usuario = Column(Integer)                           # quién lo borró
+    eliminado_por = Column(String(200))
+    rol_elimina = Column(String(20))
+    fecha_eliminacion = Column(DateTime, server_default=func.now())
+
+
 class CitaPsicologia(Base):
     __tablename__ = "cita_psicologia"
     id_cita = Column(Integer, primary_key=True)
