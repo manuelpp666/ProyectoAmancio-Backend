@@ -25,10 +25,15 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.util import media as media_util
+
 # Raíz del backend: mantenimiento -> modules -> app -> Backend
 _AQUI = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(_AQUI)))
-MEDIA_DIR = os.path.join(BASE_DIR, "media")
+# La carpeta de subidas la decide app/core/util/media.py, y puede estar fuera
+# del backend (MEDIA_DIR en el .env). Todas las rutas de este módulo son
+# relativas a ella.
+MEDIA_DIR = media_util.MEDIA_DIR
 
 MB = 1024 * 1024
 GB = 1024 * MB
@@ -94,7 +99,9 @@ def estado_disco() -> dict:
     """
     try:
         import shutil
-        uso = shutil.disk_usage(BASE_DIR)
+        # El disco que importa es el de los archivos subidos, que puede no ser
+        # el del código.
+        uso = shutil.disk_usage(MEDIA_DIR if os.path.isdir(MEDIA_DIR) else BASE_DIR)
         proporcion = uso.used / uso.total if uso.total else 0.0
         return {
             "total_bytes": uso.total,
@@ -181,7 +188,10 @@ def medir_base_datos(db: Session) -> dict:
 # ===========================================================================
 
 def _normalizar(ruta) -> str | None:
-    """Ruta de la base convertida a ruta relativa al backend, con barras /.
+    """Ruta de la base convertida a ruta relativa a MEDIA_DIR, con barras /.
+
+    Delega en `app.core.util.media.clave`, que es la regla única. Lo que
+    sigue es la historia de por qué esa regla es como es.
 
     Hay dos formatos guardados: la mayoría de módulos guardan algo como
     `/media/recursos_tareas/carga_10/ref_ab12cd.pdf`, y el chatbot guarda la
@@ -195,27 +205,13 @@ def _normalizar(ruta) -> str | None:
     habría borrado media/ entera en su primera pasada.
 
     El discriminador correcto es si la ruta empieza por `media/`, que es la
-    carpeta de subidas del backend.
+    ruta pública de las subidas. `media.clave` lo mira antes que nada.
+
+    Desde que las imágenes dejaron Cloudinary hay un formato más: la URL
+    completa con el dominio del backend delante. Cuenta si su ruta es
+    `/media/...`.
     """
-    if not ruta:
-        return None
-    texto = str(ruta).strip().replace("\\", "/")
-    if not texto:
-        return None
-
-    sin_barra = texto.lstrip("/")
-    if sin_barra.startswith("media/"):
-        return sin_barra
-
-    # Ruta absoluta de verdad (el chatbot guarda así): se pasa a relativa.
-    try:
-        relativa = os.path.relpath(texto, BASE_DIR).replace("\\", "/")
-    except ValueError:
-        # Otra unidad de disco en Windows: no cuelga del backend.
-        return None
-    if relativa.startswith(".."):
-        return None  # fuera del backend: no es un archivo de media/
-    return relativa
+    return media_util.clave(ruta)
 
 
 def referencias(db: Session) -> set:
@@ -224,24 +220,47 @@ def referencias(db: Session) -> set:
     Si CUALQUIERA de las consultas falla, lanza. Devolver un conjunto
     incompleto haría que la limpieza tomara por basura archivos que sí se
     usan. Es preferible no limpiar nada esta semana.
+
+    SI SE AÑADE UNA COLUMNA QUE GUARDA ARCHIVOS, TIENE QUE IR AQUÍ. Si no, la
+    limpieza borra sus archivos a las 24 horas de subirlos. Estuvo a punto de
+    pasar con las imágenes de la web al dejar Cloudinary: se empezaron a
+    guardar en media/ y esta lista no las conocía.
+
+    De cada valor se sacan TODAS las rutas de media que contenga, no solo si
+    el valor entero es una: la configuración del inicio guarda JSON con varias
+    imágenes dentro, y una noticia guarda la lista de su galería.
     """
     from app.modules.virtual import models as virtual
     from app.modules.finance import models as finance
     from app.modules.chatbot import models as chatbot
+    from app.modules.web import models as web
+    from app.modules.pagina_principal import models as pagina
+    from app.modules.users.docente import models as docente
+    from app.modules.users.alumno import models as alumno
+    from app.modules.personal import models as personal
+
+    columnas = (
+        virtual.Tarea.archivo_adjunto_url,
+        virtual.MaterialClase.archivo_url,
+        virtual.EntregaTarea.archivo_url,
+        finance.SolicitudTramite.archivo_adjunto,
+        chatbot.Chatbot.file_path,
+        # Imágenes, videos y documentos que antes se subían a Cloudinary
+        pagina.PaginaConfiguracion.valor,
+        web.Noticia.imagen_portada_url,
+        web.Noticia.imagenes,
+        docente.Docente.url_perfil,
+        personal.Administrador.url_perfil,
+        alumno.Alumno.doc_dni_menor,
+        alumno.Alumno.doc_dni_apoderado,
+        alumno.Alumno.doc_fum,
+        alumno.Alumno.doc_certificado_estudios,
+    )
 
     usadas = set()
-    consultas = (
-        (virtual.Tarea, virtual.Tarea.archivo_adjunto_url),
-        (virtual.MaterialClase, virtual.MaterialClase.archivo_url),
-        (virtual.EntregaTarea, virtual.EntregaTarea.archivo_url),
-        (finance.SolicitudTramite, finance.SolicitudTramite.archivo_adjunto),
-        (chatbot.Chatbot, chatbot.Chatbot.file_path),
-    )
-    for _, columna in consultas:
+    for columna in columnas:
         for (valor,) in db.query(columna).filter(columna.isnot(None)).all():
-            norma = _normalizar(valor)
-            if norma:
-                usadas.add(norma)
+            usadas.update(media_util.claves_en(valor))
     return usadas
 
 
@@ -256,7 +275,7 @@ def buscar_huerfanos(db: Session) -> list:
     for raiz, _, ficheros in os.walk(MEDIA_DIR):
         for f in ficheros:
             absoluta = os.path.join(raiz, f)
-            relativa = os.path.relpath(absoluta, BASE_DIR).replace("\\", "/")
+            relativa = os.path.relpath(absoluta, MEDIA_DIR).replace("\\", "/")
             if relativa in usadas:
                 continue
             try:
@@ -323,7 +342,7 @@ def limpiar(db: Session, simular: bool = True) -> dict:
         borrados = 0
         if not simular:
             for archivo in sueltos:
-                absoluta = os.path.join(BASE_DIR, archivo["ruta"])
+                absoluta = os.path.join(MEDIA_DIR, archivo["ruta"])
                 try:
                     os.remove(absoluta)
                     liberado += archivo["bytes"]

@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional
+from urllib.parse import urlparse
 from datetime import date
 from app.core.util.utils import DniStr # Importante
 from app.modules.users.familiar.schemas import FamiliarAlumnoCreate
@@ -18,6 +19,35 @@ def _validar_edad_escolar(v: Optional[date]) -> Optional[date]:
         if edad > 20:  # Límite razonable para educación escolar
             raise ValueError("La edad del alumno excede el límite escolar permitido.")
     return v
+
+# Hosts de donde pueden venir los documentos de admisión además del propio
+# backend. Cloudinary queda mientras haya navegadores con la versión anterior
+# del formulario en caché, que todavía sube allí.
+_HOSTS_LEGADO_DOCUMENTOS = ("res.cloudinary.com",)
+
+
+def _validar_url_documento(v: Optional[str]) -> Optional[str]:
+    """Solo se aceptan documentos subidos por el propio formulario.
+
+    El formulario de admisión es público. Sin esta comprobación cualquiera
+    podía mandar en estos campos el enlace que quisiera, y quien revisa la
+    postulación lo abriría creyendo que es el DNI del menor.
+
+    Vacío se deja pasar tal cual: en verano los documentos no se piden.
+    """
+    if v is None or not v.strip():
+        return v
+    v = v.strip()
+    if len(v) > 500:
+        raise ValueError("La dirección del documento es demasiado larga.")
+    partes = urlparse(v)
+    if partes.scheme in ("http", "https") and partes.netloc:
+        if partes.path.startswith("/media/admision/"):
+            return v
+        if (partes.hostname or "").lower() in _HOSTS_LEGADO_DOCUMENTOS:
+            return v
+    raise ValueError("El documento adjunto no es válido. Vuelve a subirlo.")
+
 
 # 1. BASE: Tolerante para leer datos de la Base de Datos sin explotar
 class AlumnoBase(BaseModel):
@@ -42,6 +72,14 @@ class AlumnoBase(BaseModel):
 class AlumnoCreate(AlumnoBase):
     dni: DniStr  # Validación automática aquí
     id_usuario: Optional[int] = None
+
+    # Va aquí y no en AlumnoBase: la base también sirve para LEER alumnos, y
+    # un documento antiguo con otro formato no puede tumbar un listado.
+    @field_validator("doc_dni_menor", "doc_dni_apoderado", "doc_fum",
+                     "doc_certificado_estudios")
+    @classmethod
+    def validar_documentos(cls, v):
+        return _validar_url_documento(v)
 
     @field_validator('fecha_nacimiento')
     @classmethod

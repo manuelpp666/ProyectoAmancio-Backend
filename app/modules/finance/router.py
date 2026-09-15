@@ -18,6 +18,7 @@ from .crep import normalizar_operacion
 from app.core.util.security import get_current_user, require_roles, require_service_key
 from app.core.util import busqueda as busqueda_util
 from app.core.util import archivos
+from app.core.util import media as media_util
 
 
 router = APIRouter(prefix="/finance", tags=["Finanzas"])
@@ -231,7 +232,7 @@ async def solicitar_tramite(
     # `file` a secas era verdadero aunque el navegador mandara el campo vacío,
     # y entonces `file.filename` valía "" y se guardaba un archivo sin nombre.
     if file and file.filename:
-        absolute_folder = os.path.join(BASE_DIR, UPLOAD_DIR)
+        absolute_folder = media_util.carpeta_de(UPLOAD_DIR)
 
         # Nombre único
         file_ext = os.path.splitext(file.filename)[1].lower()

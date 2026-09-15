@@ -149,9 +149,11 @@ def _preparar_ocr() -> bool:
 
 load_dotenv()
 
+from app.core.util import media as media_util
+
 FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(FILE_DIR)))
-UPLOAD_DIR = os.path.join(BASE_DIR, "media", "chatbot_files")
+UPLOAD_DIR = media_util.carpeta("chatbot_files")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 MAX_FILE_SIZE_MB = 10
@@ -535,8 +537,11 @@ def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: di
         print(f"[PINECONE WARNING] No se pudo borrar de Pinecone o ya no existe: {str(e)}")
 
     try:
-        if doc.file_path and os.path.exists(doc.file_path):
-            os.remove(doc.file_path)
+        # La fila guarda la ruta absoluta del servidor. Si MEDIA_DIR se movió
+        # después, esa ruta ya no existe: se busca el archivo en su sitio actual.
+        ruta_doc = media_util.ruta_fisica(doc.file_path) or doc.file_path
+        if doc.file_path and os.path.exists(ruta_doc):
+            os.remove(ruta_doc)
         db.delete(doc)
         db.commit()
         return {"message": f"'{doc.filename}' Eliminado correctamente del sistema."}

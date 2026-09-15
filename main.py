@@ -82,6 +82,8 @@ from app.modules.pagina_principal import router as pagina_web_router
 from app.modules.personal import router as personal_router
 from app.modules.verano import router as verano_router
 from app.modules.mantenimiento import router as mantenimiento_router
+from app.modules.multimedia import router as multimedia_router
+from app.core.util import media as media_util
 from app.core.socket_manager import socket_manager
 from app.core import socket_manager as socket_manager_mod
 from app.core import config
@@ -180,8 +182,10 @@ async def limitar_tamano_peticion(request: Request, call_next):
 # 1. Esto detecta la carpeta 'Backend' (donde está main.py)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 2. Apuntamos directamente a media dentro de Backend
-MEDIA_PATH = os.path.join(BASE_DIR, "media")
+# 2. La carpeta de archivos subidos. Por defecto es `media` dentro del backend,
+#    pero en el servidor conviene sacarla fuera con MEDIA_DIR en el .env: así
+#    actualizar el código no se lleva los archivos (app/core/util/media.py).
+MEDIA_PATH = media_util.MEDIA_DIR
 
 # --- DEBUG ---
 print(f"🚀 Servidor de archivos configurado en: {MEDIA_PATH}")
@@ -217,6 +221,7 @@ app.include_router(personal_router.router)
 app.include_router(seguridad_router.router)
 app.include_router(mantenimiento_router.router)
 app.include_router(verano_router.router)
+app.include_router(multimedia_router.router)
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: int):

@@ -19,6 +19,7 @@ from app.modules.users.docente import models as models_doc
 from app.modules.personal import models as models_psi
 from app.core.util.security import get_current_user, ensure_owner_or_roles
 from app.core.util import archivos
+from app.core.util import media as media_util
 from . import models, schemas
 
 
@@ -29,9 +30,10 @@ FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Esto garantiza que BASE_DIR sea la carpeta raíz del proyecto Backend
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(FILE_DIR)))
 
-# 3. Configuramos UPLOAD_DIR (esto ahora apuntará a Backend/media/entregas_tareas)
-UPLOAD_DIR = os.path.join(BASE_DIR, "media", "entregas_tareas")
-DOCS_TAREAS_DIR = os.path.join(BASE_DIR, "media", "recursos_tareas")
+# 3. Carpetas de subidas, dentro de MEDIA_DIR (app/core/util/media.py). Las
+#    rutas que se guardan en la base siguen siendo /media/<carpeta>/<archivo>.
+UPLOAD_DIR = media_util.carpeta("entregas_tareas")
+DOCS_TAREAS_DIR = media_util.carpeta("recursos_tareas")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(DOCS_TAREAS_DIR, exist_ok=True)
@@ -468,7 +470,7 @@ async def crear_tarea(
     if archivo and archivo.filename:
         # Definir ruta: media/recursos_tareas/carga_X/
         rel_folder = os.path.join("media", "recursos_tareas", f"carga_{id_carga_academica}")
-        abs_folder = os.path.join(BASE_DIR, rel_folder)
+        abs_folder = media_util.carpeta_de(rel_folder)
 
         # Nombre único para evitar colisiones
         ext = os.path.splitext(archivo.filename)[1].lower()
@@ -613,7 +615,7 @@ async def crear_material(
     url_adjunto = None
     if archivo and archivo.filename:
         rel_folder = os.path.join("media", "materiales_clase", f"carga_{id_carga_academica}")
-        abs_folder = os.path.join(BASE_DIR, rel_folder)
+        abs_folder = media_util.carpeta_de(rel_folder)
 
         ext = os.path.splitext(archivo.filename)[1].lower()
         filename = f"mat_{uuid.uuid4().hex[:6]}{ext}"
@@ -656,8 +658,8 @@ def eliminar_material(id_material: int, db: Session = Depends(get_db), current_u
         raise HTTPException(status_code=404, detail="Material no encontrado")
 
     if material.archivo_url:
-        full_path = os.path.join(BASE_DIR, material.archivo_url.lstrip("/"))
-        if os.path.exists(full_path):
+        full_path = media_util.ruta_fisica(material.archivo_url)
+        if full_path and os.path.exists(full_path):
             try:
                 os.remove(full_path)
             except Exception as e:
@@ -985,7 +987,7 @@ async def editar_tarea(
         # extensión o porque la carpeta del curso está llena, el docente se
         # queda con el adjunto que ya tenía en vez de perder los dos.
         rel_folder = os.path.join("media", "recursos_tareas", f"carga_{tarea.id_carga_academica}")
-        abs_folder = os.path.join(BASE_DIR, rel_folder)
+        abs_folder = media_util.carpeta_de(rel_folder)
 
         ext = os.path.splitext(archivo.filename)[1].lower()
         filename = f"ref_{uuid.uuid4().hex[:6]}{ext}"
@@ -999,8 +1001,8 @@ async def editar_tarea(
         # Ya hay archivo nuevo: ahora sí se borra el viejo. Si fallara, lo
         # recoge la limpieza de huérfanos del mantenimiento semanal.
         if anterior:
-            old_path = os.path.join(BASE_DIR, anterior.lstrip("/"))
-            if os.path.exists(old_path):
+            old_path = media_util.ruta_fisica(anterior)
+            if old_path and os.path.exists(old_path):
                 try:
                     os.remove(old_path)
                 except OSError as e:
@@ -1036,8 +1038,8 @@ def eliminar_tarea(id_tarea: int, db: Session = Depends(get_db),
 
     # 2. Borrar archivo físico del DOCENTE (el recurso adjunto)
     if tarea.archivo_adjunto_url:
-        full_path = os.path.join(BASE_DIR, tarea.archivo_adjunto_url.lstrip("/"))
-        if os.path.exists(full_path):
+        full_path = media_util.ruta_fisica(tarea.archivo_adjunto_url)
+        if full_path and os.path.exists(full_path):
             try:
                 os.remove(full_path)
             except Exception as e:
@@ -1101,7 +1103,7 @@ async def entregar_tarea(
 
     # 2. GESTIÓN DE DIRECTORIOS
     relative_folder = os.path.join("media", "entregas_tareas", f"tarea_{id_tarea}")
-    absolute_folder = os.path.join(BASE_DIR, relative_folder)
+    absolute_folder = media_util.carpeta_de(relative_folder)
 
     # Nombre único para evitar colisiones
     file_ext = os.path.splitext(file.filename or "")[1].lower()
@@ -1129,8 +1131,8 @@ async def entregar_tarea(
     if entrega:
         # Borrar archivo físico anterior si existe para no llenar el disco de basura
         if entrega.archivo_url:
-            old_file_path = os.path.join(BASE_DIR, entrega.archivo_url.lstrip("/"))
-            if os.path.exists(old_file_path):
+            old_file_path = media_util.ruta_fisica(entrega.archivo_url)
+            if old_file_path and os.path.exists(old_file_path):
                 try:
                     os.remove(old_file_path)
                 except:
