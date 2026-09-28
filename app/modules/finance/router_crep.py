@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 from decimal import Decimal, InvalidOperation
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
                      UploadFile, status)
@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.util.security import get_current_user
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from app.modules.finance import ajustes as aju
 from app.modules.finance import conciliacion as con
 from app.modules.finance import models as fin
@@ -191,7 +192,7 @@ def movimientos_del_lote(id_lote: int,
 # Procesar reportes de cobros
 # ---------------------------------------------------------------------------
 
-@router.post("/reportes")
+@router.post("/reportes", dependencies=[Depends(requiere_permiso("tramites_finanzas", "conciliacion", "agregar"))])
 async def cargar_reportes(archivos: List[UploadFile] = File(...),
                           simular: bool = Form(True),
                           db: Session = Depends(get_db),
@@ -221,7 +222,7 @@ async def cargar_reportes(archivos: List[UploadFile] = File(...),
         raise HTTPException(500, f"No se pudo procesar la carga: {e}")
 
 
-@router.post("/importacion-inicial")
+@router.post("/importacion-inicial", dependencies=[Depends(requiere_permiso("tramites_finanzas", "conciliacion", "agregar"))])
 async def importacion_inicial(archivo: UploadFile = File(...),
                               simular: bool = Form(True),
                               sincronizar_pagadas: bool = Form(True),
@@ -253,7 +254,7 @@ async def importacion_inicial(archivo: UploadFile = File(...),
         raise HTTPException(500, f"No se pudo importar el archivo: {e}")
 
 
-@router.post("/ajustar-importe")
+@router.post("/ajustar-importe", dependencies=[Depends(requiere_permiso("tramites_finanzas", "conciliacion", "editar"))])
 def ajustar_importe(tipo: str = Form(...),
                     id_cuota: int = Form(...),
                     monto: str = Form(...),
@@ -312,7 +313,7 @@ def candidatos(id_movimiento: int, db: Session = Depends(get_db),
         raise HTTPException(404, str(e))
 
 
-@router.post("/pendientes/{id_movimiento}/resolver")
+@router.post("/pendientes/{id_movimiento}/resolver", dependencies=[Depends(requiere_permiso("tramites_finanzas", "conciliacion", "editar"))])
 def resolver(id_movimiento: int,
              accion: str = Form(...),
              id_pago: Optional[int] = Form(None),
@@ -344,7 +345,7 @@ def resolver(id_movimiento: int,
 # Mora
 # ---------------------------------------------------------------------------
 
-@router.post("/mora")
+@router.post("/mora", dependencies=[Depends(requiere_permiso("tramites_finanzas", "conciliacion", "agregar"))])
 def cargar_mora(fecha_vencimiento: str = Form(...),
                 importe: Optional[str] = Form(None),
                 simular: bool = Form(True),
@@ -392,7 +393,7 @@ def estado_sincronizacion(db: Session = Depends(get_db),
         raise _sin_tablas(Exception())
 
 
-@router.post("/incorporar-cambios")
+@router.post("/incorporar-cambios", dependencies=[Depends(requiere_permiso("tramites_finanzas", "conciliacion", "editar"))])
 def incorporar_cambios(db: Session = Depends(get_db),
                        current_user: dict = Depends(get_current_user)):
     """Incorpora formalmente las bajas/altas al padrón de cobranza oficial del CREP."""

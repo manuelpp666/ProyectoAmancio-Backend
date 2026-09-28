@@ -9,7 +9,7 @@ from app.core.util.security import require_roles, get_current_user
 from app.modules.personal.models import Administrador
 from app.modules.pagina_principal.models import PaginaConfiguracion
 from app.core.util.correo_usuario import tiene_correo
-from app.core.util.permisos import normalizar as normalizar_permisos
+from app.core.util.permisos import normalizar as normalizar_permisos, requiere_permiso
 from app.core import config
 from app.modules.seguridad import service as seguridad
 
@@ -38,7 +38,7 @@ def _exigir_cambio_password(db: Session) -> bool:
 def _exigir_correo(db: Session) -> bool:
     return _interruptor(db, CLAVE_EXIGIR_CORREO)
 
-@router.post("/", response_model=schemas.UsuarioResponse)
+@router.post("/", response_model=schemas.UsuarioResponse, dependencies=[Depends(requiere_permiso("gestion_personal", "admin", "agregar"))])
 def crear_usuario(
     usuario: schemas.UsuarioCreate,
     db: Session = Depends(get_db),

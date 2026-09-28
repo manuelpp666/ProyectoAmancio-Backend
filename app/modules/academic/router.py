@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, Back
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from . import models, schemas, consultas
 from typing import List, Optional
 from datetime import date, timedelta
@@ -185,7 +186,7 @@ def _generar_estructura_para_anio(db: Session, anio_id: str) -> int:
     return count
 
 
-@router.post("/anios/", response_model=schemas.AnioEscolarResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/anios/", response_model=schemas.AnioEscolarResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(requiere_permiso("academico", "estructura", "agregar"))])
 def crear_anio(anio: schemas.AnioEscolarCreate, background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) ):
@@ -237,7 +238,7 @@ def crear_anio(anio: schemas.AnioEscolarCreate, background_tasks: BackgroundTask
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # --- NUEVO ENDPOINT: Editar fechas de un año existente ---
-@router.patch("/anios/{anio_id}")
+@router.patch("/anios/{anio_id}", dependencies=[Depends(requiere_permiso("academico", "estructura", "editar"))])
 def editar_anio(anio_id: str, datos: EditarAnioRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
@@ -274,7 +275,7 @@ def editar_anio(anio_id: str, datos: EditarAnioRequest, background_tasks: Backgr
 
     return {"message": "Año académico actualizado correctamente", "pensiones_fuera_de_rango_eliminadas": eliminadas}
 
-@router.patch("/anios/{anio_id}/inscripciones")
+@router.patch("/anios/{anio_id}/inscripciones", dependencies=[Depends(requiere_permiso("academico", "estructura", "editar"))])
 def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     
@@ -369,7 +370,7 @@ def obtener_bimestres(anio_id: str, db: Session = Depends(get_db),
     )
 
 
-@router.put("/bimestres/{anio_id}", response_model=schemas.BimestresResponse)
+@router.put("/bimestres/{anio_id}", response_model=schemas.BimestresResponse, dependencies=[Depends(requiere_permiso("academico", "estructura", "editar"))])
 def guardar_bimestres(anio_id: str, datos: schemas.BimestresUpdate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     """Guarda (upsert por número) las fechas reales de los cuatro bimestres.
@@ -471,7 +472,7 @@ def guardar_bimestres(anio_id: str, datos: schemas.BimestresUpdate, db: Session 
 # fecha de fin del año (ver `actualizar_estado_anios` -> `_procesar_cierre_automatico`),
 # que inhabilita a los docentes y ejecuta la evaluación de fin de año + correos.
 
-@router.post("/anios/copiar-estructura")
+@router.post("/anios/copiar-estructura", dependencies=[Depends(requiere_permiso("academico", "estructura", "agregar"))])
 def copiar_estructura(data: schemas.CopiarEstructuraRequest, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     # 1. Validar destino
@@ -521,7 +522,7 @@ def listar_anios(background_tasks: BackgroundTasks, db: Session = Depends(get_db
 
 
 # --- NIVELES ---
-@router.post("/niveles/", response_model=schemas.NivelResponse)
+@router.post("/niveles/", response_model=schemas.NivelResponse, dependencies=[Depends(requiere_permiso("academico", "estructura", "agregar"))])
 def crear_nivel(nivel: schemas.NivelCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     
@@ -558,7 +559,7 @@ def listar_niveles_con_cursos(db: Session = Depends(get_db),
 
 
 # --- GRADOS ---
-@router.post("/grados/", response_model=schemas.GradoResponse)
+@router.post("/grados/", response_model=schemas.GradoResponse, dependencies=[Depends(requiere_permiso("academico", "estructura", "agregar"))])
 def crear_grado(grado: schemas.GradoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -578,7 +579,7 @@ def listar_grados(nivel_id: int = None, db: Session = Depends(get_db)):
         query = query.filter(models.Grado.id_nivel == nivel_id)
     return query.all()
 
-@router.put("/grados/{grado_id}", response_model=schemas.GradoResponse)
+@router.put("/grados/{grado_id}", response_model=schemas.GradoResponse, dependencies=[Depends(requiere_permiso("academico", "estructura", "editar"))])
 def actualizar_grado(grado_id: int, grado: schemas.GradoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -595,7 +596,7 @@ def actualizar_grado(grado_id: int, grado: schemas.GradoCreate, db: Session = De
     db.refresh(db_grado)
     return db_grado
 
-@router.delete("/grados/{grado_id}")
+@router.delete("/grados/{grado_id}", dependencies=[Depends(requiere_permiso("academico", "estructura", "eliminar"))])
 def eliminar_grado(grado_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -620,7 +621,7 @@ def eliminar_grado(grado_id: int, db: Session = Depends(get_db),
 
 
 # --- SECCIONES (¡MODIFICADO!) ---
-@router.post("/secciones/", response_model=schemas.SeccionResponse)
+@router.post("/secciones/", response_model=schemas.SeccionResponse, dependencies=[Depends(requiere_permiso("academico", "estructura", "agregar"))])
 def crear_seccion(seccion: schemas.SeccionCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -778,7 +779,7 @@ def obtener_cursos_de_seccion(seccion_id: int, db: Session = Depends(get_db),
     return cursos
 
 
-@router.put("/secciones/{seccion_id}", response_model=schemas.SeccionResponse)
+@router.put("/secciones/{seccion_id}", response_model=schemas.SeccionResponse, dependencies=[Depends(requiere_permiso("academico", "estructura", "editar"))])
 def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     
@@ -797,7 +798,7 @@ def actualizar_seccion(seccion_id: int, seccion: schemas.SeccionCreate, db: Sess
     db.refresh(db_seccion)
     return db_seccion
 
-@router.delete("/secciones/{seccion_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/secciones/{seccion_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(requiere_permiso("academico", "estructura", "eliminar"))])
 def eliminar_seccion(seccion_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -832,7 +833,7 @@ def _asegurar_columnas_area(db: Session):
         except Exception:
             db.rollback()
 
-@router.post("/areas/", response_model=schemas.AreaResponse)
+@router.post("/areas/", response_model=schemas.AreaResponse, dependencies=[Depends(requiere_permiso("academico", "cursos", "agregar"))])
 def crear_area(area: schemas.AreaCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -865,7 +866,7 @@ def listar_areas(db: Session = Depends(get_db),
 
 
 # --- CURSOS ---
-@router.post("/cursos/", response_model=schemas.CursoResponse)
+@router.post("/cursos/", response_model=schemas.CursoResponse, dependencies=[Depends(requiere_permiso("academico", "cursos", "agregar"))])
 def crear_curso(curso: schemas.CursoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -923,7 +924,7 @@ def listar_cursos_verano(db: Session = Depends(get_db),
         ],
     }
 
-@router.put("/cursos/{curso_id}", response_model=schemas.CursoResponse)
+@router.put("/cursos/{curso_id}", response_model=schemas.CursoResponse, dependencies=[Depends(requiere_permiso("academico", "cursos", "editar"))])
 def actualizar_curso(curso_id: int, curso_data: schemas.CursoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -940,7 +941,7 @@ def actualizar_curso(curso_id: int, curso_data: schemas.CursoCreate, db: Session
     db.refresh(db_curso)
     return db_curso
 
-@router.delete("/cursos/{curso_id}")
+@router.delete("/cursos/{curso_id}", dependencies=[Depends(requiere_permiso("academico", "cursos", "eliminar"))])
 def eliminar_curso(
     curso_id: int, 
     grados_ids: Optional[List[int]] = Query(None), 
@@ -972,7 +973,7 @@ def eliminar_curso(
 
 
 # --- PLAN ESTUDIO (Asignación Masiva) ---
-@router.put("/plan-estudio/batch/{curso_id}")
+@router.put("/plan-estudio/batch/{curso_id}", dependencies=[Depends(requiere_permiso("academico", "cursos", "editar"))])
 def actualizar_plan_estudio_batch(
     curso_id: int, 
     grados: List[int] = Body(...), # Usamos Body explícito para recibir la lista [1, 2, 3]
@@ -996,7 +997,7 @@ def actualizar_plan_estudio_batch(
     db.commit()
     return {"message": "Plan de estudio actualizado correctamente"}
 
-@router.post("/plan-estudio/", response_model=schemas.PlanEstudioResponse)
+@router.post("/plan-estudio/", response_model=schemas.PlanEstudioResponse, dependencies=[Depends(requiere_permiso("academico", "cursos", "editar"))])
 def asignar_curso_a_grado(plan: schemas.PlanEstudioCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":

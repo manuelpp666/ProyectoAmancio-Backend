@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from . import models, schemas
 from sqlalchemy import or_
 from datetime import datetime,date
@@ -80,7 +81,7 @@ def estado_admision_publico(db: Session = Depends(get_db)):
     # 3. Nada que mostrar
     return {"abierto": False}
 
-@router.post("/noticias/", response_model=schemas.NoticiaResponse)
+@router.post("/noticias/", response_model=schemas.NoticiaResponse, dependencies=[Depends(requiere_permiso("contenido_web", "noticias", "agregar"))])
 def crear_noticia(noticia: schemas.NoticiaCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -137,7 +138,7 @@ def obtener_noticia(noticia_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
     return noticia
 
-@router.delete("/noticias/{noticia_id}")
+@router.delete("/noticias/{noticia_id}", dependencies=[Depends(requiere_permiso("contenido_web", "noticias", "eliminar"))])
 def eliminar_noticia(noticia_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     
@@ -154,7 +155,7 @@ def eliminar_noticia(noticia_id: int, db: Session = Depends(get_db),
     db.commit()
     return {"message": "Noticia actualizada correctamente"}
 
-@router.put("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse)
+@router.put("/noticias/{noticia_id}", response_model=schemas.NoticiaResponse, dependencies=[Depends(requiere_permiso("contenido_web", "noticias", "editar"))])
 def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     
@@ -172,7 +173,7 @@ def actualizar_noticia(noticia_id: int, noticia_update: schemas.NoticiaCreate, d
     db.refresh(db_noticia)
     return db_noticia
 
-@router.post("/eventos/", response_model=schemas.EventoResponse)
+@router.post("/eventos/", response_model=schemas.EventoResponse, dependencies=[Depends(requiere_permiso("contenido_web", "calendario", "agregar"))])
 def crear_evento(evento: schemas.EventoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -201,7 +202,7 @@ def listar_todos_eventos(db: Session = Depends(get_db)):
              .all()
 
 
-@router.put("/eventos/{evento_id}", response_model=schemas.EventoResponse)
+@router.put("/eventos/{evento_id}", response_model=schemas.EventoResponse, dependencies=[Depends(requiere_permiso("contenido_web", "calendario", "editar"))])
 def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
@@ -217,7 +218,7 @@ def actualizar_evento(evento_id: int, evento_update: schemas.EventoCreate, db: S
     db.refresh(db_evento)
     return db_evento
 
-@router.delete("/eventos/{evento_id}")
+@router.delete("/eventos/{evento_id}", dependencies=[Depends(requiere_permiso("contenido_web", "calendario", "eliminar"))])
 def eliminar_evento(evento_id: int, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)):
     

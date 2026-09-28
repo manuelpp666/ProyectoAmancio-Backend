@@ -5,6 +5,8 @@ from typing import List, Optional
 from datetime import date
 from decimal import Decimal
 from app.db.database import get_db
+from app.core.util.security import require_roles
+from app.core.util.permisos import requiere_permiso
 from . import models, schemas
 from app.core.util.security import get_current_user
 
@@ -19,7 +21,7 @@ from app.modules.finance import models as finance_models
 router = APIRouter(prefix="/enrollment", tags=["Matrícula"])
 
 # --- CREAR MATRÍCULA ---
-@router.post("/matriculas/", response_model=schemas.MatriculaResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/matriculas/", response_model=schemas.MatriculaResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("ADMIN")), Depends(requiere_permiso("academico", "estudiantes", "editar"))])
 def crear_matricula(matricula: schemas.MatriculaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     # 1. Verificar si ya existe matrícula para ese alumno en ese año
     existe = db.query(models.Matricula).filter(
@@ -68,7 +70,7 @@ def listar_matriculas(
     return query.all()
 
 # --- ACTUALIZAR MATRÍCULA (Para asignar sección) ---
-@router.put("/matriculas/{matricula_id}", response_model=schemas.MatriculaResponse)
+@router.put("/matriculas/{matricula_id}", response_model=schemas.MatriculaResponse, dependencies=[Depends(require_roles("ADMIN")), Depends(requiere_permiso("academico", "estudiantes", "editar"))])
 def actualizar_matricula(
     matricula_id: int, 
     datos: schemas.MatriculaCreate, 
@@ -523,7 +525,7 @@ def listar_solicitudes_renovacion(
     return resultado
 
 
-@router.patch("/renovacion-solicitudes/{id_solicitud}/decidir")
+@router.patch("/renovacion-solicitudes/{id_solicitud}/decidir", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "renovaciones", "editar"))])
 def decidir_solicitud_renovacion(
     id_solicitud: int,
     decision: schemas.DecisionRenovacion,
@@ -636,7 +638,7 @@ def decidir_solicitud_renovacion(
 
 
 # --- EXONERACIONES ---
-@router.post("/exoneracion/", response_model=schemas.ExoneracionResponse)
+@router.post("/exoneracion/", response_model=schemas.ExoneracionResponse, dependencies=[Depends(require_roles("ADMIN")), Depends(requiere_permiso("academico", "estudiantes", "editar"))])
 def crear_exoneracion(exoneracion: schemas.ExoneracionCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     nueva = models.Exoneracion(**exoneracion.model_dump())
     db.add(nueva)
@@ -798,7 +800,7 @@ def listar_no_renovados(
     }
 
 
-@router.post("/procesar-no-renovados/")
+@router.post("/procesar-no-renovados/", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "renovaciones", "editar"))])
 def procesar_retiro_no_renovados(
     payload: Optional[dict] = None,
     db: Session = Depends(get_db),

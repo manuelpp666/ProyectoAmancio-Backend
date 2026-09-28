@@ -5,6 +5,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from typing import List, Optional
 from datetime import datetime, date, timedelta
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from app.modules.academic import models as models_ac
 from app.modules.academic import consultas as consultas_ac
 from app.modules.users.alumno import models as models_al
@@ -25,7 +26,7 @@ from . import models, schemas
 router = APIRouter(prefix="/gestion", tags=["Gestión Académica"])
 
 # --- Carga Académica ---
-@router.post("/carga/", response_model=schemas.CargaResponse)
+@router.post("/carga/", response_model=schemas.CargaResponse, dependencies=[Depends(requiere_permiso("academico", "docentes", "agregar"))])
 def asignar_carga(carga: schemas.CargaCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     # VALIDACIÓN DE ROL
@@ -892,7 +893,7 @@ def listar_docentes_busqueda(db: Session = Depends(get_db), current_user: dict =
 
 
 #--- Delete y update de la carga academica
-@router.delete("/carga/{carga_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/carga/{carga_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(requiere_permiso("academico", "docentes", "eliminar"))])
 def eliminar_carga(carga_id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN" :
         raise HTTPException(status_code=403, detail="No puedes modificar esta información.")
@@ -937,7 +938,7 @@ def eliminar_carga(carga_id: int, db: Session = Depends(get_db), current_user: d
         )
     return None
 
-@router.patch("/carga/{carga_id}", response_model=schemas.CargaResponse)
+@router.patch("/carga/{carga_id}", response_model=schemas.CargaResponse, dependencies=[Depends(requiere_permiso("academico", "docentes", "editar"))])
 def actualizar_carga(carga_id: int, data: schemas.CargaUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     if current_user.get("rol") != "ADMIN" :
@@ -1566,7 +1567,7 @@ def listar_tutores(anio_id: str, db: Session = Depends(get_db), current_user: di
         })
     return resultado
 
-@router.post("/tutores/", response_model=schemas.TutorResponse)
+@router.post("/tutores/", response_model=schemas.TutorResponse, dependencies=[Depends(requiere_permiso("academico", "docentes", "agregar"))])
 def asignar_tutor(data: schemas.TutorSeccionCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     if current_user.get("rol") != "ADMIN" :
@@ -1599,7 +1600,7 @@ def asignar_tutor(data: schemas.TutorSeccionCreate, db: Session = Depends(get_db
         "docente": tutor_obj.docente
     }
 
-@router.put("/tutores/{id_tutor_seccion}", response_model=schemas.TutorResponse)
+@router.put("/tutores/{id_tutor_seccion}", response_model=schemas.TutorResponse, dependencies=[Depends(requiere_permiso("academico", "docentes", "editar"))])
 def actualizar_tutor(
     id_tutor_seccion: int,
     data: schemas.TutorSeccionCreate,
@@ -1634,7 +1635,7 @@ def actualizar_tutor(
         "docente": tutor.docente
     }
 
-@router.delete("/tutores/{id_tutor_seccion}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/tutores/{id_tutor_seccion}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(requiere_permiso("academico", "docentes", "eliminar"))])
 def eliminar_tutor(id_tutor_seccion: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
        
     if current_user.get("rol") != "ADMIN" :

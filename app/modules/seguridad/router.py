@@ -27,6 +27,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.db.database import SessionLocal, get_db
+from app.core.util.permisos import requiere_permiso
 from app.core.util.security import require_roles
 from app.core.util import email as correo
 
@@ -324,7 +325,7 @@ def listar_solicitudes(estado: Optional[str] = Query(None),
             "solicitudes": [_fila_solicitud(f) for f in filas]}
 
 
-@router.patch("/solicitudes-acceso/{id_solicitud}")
+@router.patch("/solicitudes-acceso/{id_solicitud}", dependencies=[Depends(requiere_permiso("seguridad", "editar"))])
 def atender_solicitud(id_solicitud: int,
                       datos: SolicitudAccesoAtender,
                       db: Session = Depends(get_db),

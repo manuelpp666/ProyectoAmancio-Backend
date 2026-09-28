@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso, exigir_permiso
 from .schemas import (DocenteCreate, DocenteResponse, DocenteUpdate,
                       DocentePublicoResponse)
 from .models import Docente
@@ -18,7 +19,7 @@ router = APIRouter(
     tags=["Docentes"] # Esto los agrupa en la documentación /docs
 )
 
-@router.post("/", response_model=DocenteResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=DocenteResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(requiere_permiso("gestion_personal", "docente", "agregar"))])
 def crear_docente(docente_in: DocenteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     if current_user.get("rol") != "ADMIN":
@@ -112,6 +113,14 @@ def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Dep
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes modificar esta información")
 
+    # Esta ruta la usan dos pantallas. El Editor Web solo muestra u oculta al
+    # docente en la web pública, y para eso basta su permiso; cambiar
+    # cualquier otro dato es editar su ficha y exige el de Gestión de Personal.
+    campos = set(docente_update.model_dump(exclude_unset=True))
+    if campos <= {"visible_web"}:
+        exigir_permiso(db, current_user, "contenido_web", "info_general", "docentes")
+    else:
+        exigir_permiso(db, current_user, "gestion_personal", "docente", "editar")
 
     db_docente = db.query(Docente).filter(Docente.id_docente == id).first()
     
@@ -127,7 +136,7 @@ def actualizar_docente(id: int, docente_update: DocenteUpdate, db: Session = Dep
     db.refresh(db_docente)
     return db_docente
 
-@router.put("/{id}/modificarestado", response_model=DocenteResponse)
+@router.put("/{id}/modificarestado", response_model=DocenteResponse, dependencies=[Depends(requiere_permiso("gestion_personal", "docente", "eliminar"))])
 def desactivar_docente(id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     if current_user.get("rol") != "ADMIN":

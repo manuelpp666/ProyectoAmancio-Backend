@@ -4,6 +4,7 @@ from sqlalchemy.exc import ProgrammingError
 from typing import List, Optional
 from datetime import time, datetime, date, timedelta
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from app.modules.horario.models import (
     HorarioEscolar, HoraLectiva, ConfiguracionHorario, RecesoHorario,
     AMBITOS_REGULAR, AMBITOS_VERANO,
@@ -375,7 +376,7 @@ def listar_configuraciones(db: Session = Depends(get_db),
     return salida
 
 
-@router.put("/configuracion/{ambito}/{modalidad}", response_model=ConfiguracionResponse)
+@router.put("/configuracion/{ambito}/{modalidad}", response_model=ConfiguracionResponse, dependencies=[Depends(requiere_permiso("academico", "horarios", "editar"))])
 def actualizar_configuracion(ambito: str, modalidad: str, datos: ConfiguracionUpdate,
                              db: Session = Depends(get_db),
                              current_user: dict = Depends(get_current_user)):
@@ -415,7 +416,7 @@ def actualizar_configuracion(ambito: str, modalidad: str, datos: ConfiguracionUp
 
 
 @router.post("/configuracion/{ambito}/{modalidad}/recesos",
-             response_model=ConfiguracionResponse, status_code=status.HTTP_201_CREATED)
+             response_model=ConfiguracionResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(requiere_permiso("academico", "horarios", "agregar"))])
 def agregar_receso(ambito: str, modalidad: str, datos: RecesoBase,
                    db: Session = Depends(get_db),
                    current_user: dict = Depends(get_current_user)):
@@ -472,7 +473,7 @@ def agregar_receso(ambito: str, modalidad: str, datos: RecesoBase,
     return _config_a_dict(config)
 
 
-@router.delete("/recesos/{id_receso}", response_model=ConfiguracionResponse)
+@router.delete("/recesos/{id_receso}", response_model=ConfiguracionResponse, dependencies=[Depends(requiere_permiso("academico", "horarios", "eliminar"))])
 def eliminar_receso(id_receso: int, confirmar: bool = False,
                     db: Session = Depends(get_db),
                     current_user: dict = Depends(get_current_user)):
@@ -632,7 +633,7 @@ def obtener_horario_seccion(id_seccion: int, db: Session = Depends(get_db), curr
     return resultado
 
 # --- GUARDAR / ACTUALIZAR BLOQUE ---
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED, dependencies=[Depends(requiere_permiso("academico", "horarios", "agregar"))])
 def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN" :
         raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
@@ -721,7 +722,7 @@ def asignar_bloque_horario(horario_in: HorarioCreate, db: Session = Depends(get_
     return {"message": "Horario asignado correctamente"}
 
 
-@router.delete("/{id_horario}")
+@router.delete("/{id_horario}", dependencies=[Depends(requiere_permiso("academico", "horarios", "eliminar"))])
 def eliminar_bloque_horario(id_horario: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")

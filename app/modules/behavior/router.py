@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import bindparam, extract, func, or_, text
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from app.modules.users.alumno import models as alumno_models
 from app.modules.academic import models as academic_models
 from app.modules.enrollment import models as matricula_models
@@ -256,6 +257,50 @@ def _nombre_de_usuario(db: Session, id_usuario: Optional[int], rol: Optional[str
     return f"{fila[0]} {fila[1]}".strip() if fila else None
 
 
+# Las columnas de quién registró el reporte se crean con un SQL aparte
+# (scripts/agregar_registrado_por_reporte_conducta.sql). No están en el modelo
+# a propósito: si lo estuvieran, cualquier consulta de reportes fallaría en una
+# base donde el SQL aún no se ejecutó. Se leen y escriben a mano, y solo cuando
+# existen. El "sí" se recuerda; el "no" se vuelve a mirar, para que empiece a
+# funcionar en cuanto se ejecute el SQL sin reiniciar el backend.
+_REGISTRO_DISPONIBLE = False
+
+
+def _registro_disponible(db: Session) -> bool:
+    global _REGISTRO_DISPONIBLE
+    if _REGISTRO_DISPONIBLE:
+        return True
+    try:
+        n = db.execute(text(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = 'reporte_conducta' "
+            "AND column_name IN ('id_usuario_registra', 'registrado_por', 'rol_registra')"
+        )).scalar()
+    except (ProgrammingError, OperationalError):
+        return False
+    _REGISTRO_DISPONIBLE = n == 3
+    return _REGISTRO_DISPONIBLE
+
+
+def _autores_de_reportes(db: Session, ids: list) -> dict:
+    """{id_reporte: (nombre, rol)} de quien registró cada reporte.
+
+    Vacío si las columnas aún no existen o si la lectura falla: el nombre es
+    un dato de ayuda, y no puede tumbar la pantalla de conducta del alumno.
+    """
+    if not ids or not _registro_disponible(db):
+        return {}
+    try:
+        filas = db.execute(
+            text("SELECT id_reporte, registrado_por, rol_registra FROM reporte_conducta "
+                 "WHERE id_reporte IN :ids").bindparams(bindparam("ids", expanding=True)),
+            {"ids": list(ids)},
+        ).all()
+    except (ProgrammingError, OperationalError):
+        return {}
+    return {f[0]: (f[1], f[2]) for f in filas}
+
+
 def _tiene_cambio_ie(db: Session, id_alumno: int, anio: int) -> bool:
     """True si el alumno tiene registrada en el año una falta que amerita cambio de I.E."""
     return db.query(models.ReporteConducta.id_reporte).join(models.NivelConducta).filter(
@@ -287,6 +332,25 @@ def crear_reporte_auxiliar(reporte: schemas.ReporteCreate, db: Session = Depends
         descripcion_suceso=reporte.descripcion_suceso,
     )
     db.add(nuevo_reporte)
+    db.flush()
+
+    # Quién lo registró, para que el alumno sepa a quién acudir si cree que
+    # está mal. Va en la misma transacción que el reporte. Si falla, el reporte
+    # se guarda igual: perderlo por no poder anotar el nombre sería peor.
+    if _registro_disponible(db):
+        rol = (current_user.get("rol") or "").strip().upper() or None
+        try:
+            db.execute(
+                text("UPDATE reporte_conducta SET id_usuario_registra = :u, "
+                     "registrado_por = :n, rol_registra = :r WHERE id_reporte = :id"),
+                {"u": current_user.get("id"),
+                 "n": _nombre_de_usuario(db, current_user.get("id"), rol),
+                 "r": rol,
+                 "id": nuevo_reporte.id_reporte},
+            )
+        except (ProgrammingError, OperationalError):
+            pass
+
     db.commit()
     db.refresh(nuevo_reporte)
 
@@ -579,6 +643,8 @@ def obtener_estado_por_usuario(
     if migrada is not None:
         puntaje_actual = migrada
 
+    autores = _autores_de_reportes(db, [r.id_reporte for r in reportes])
+
     return {
         "id_usuario": id_usuario,
         "id_alumno": alumno.id_alumno,
@@ -603,7 +669,10 @@ def obtener_estado_por_usuario(
                 "puntos_restados": r.nivel.puntos if r.nivel else 0,
                 "medida": r.nivel.medida if r.nivel else None,
                 "cambio_ie": bool(r.nivel.cambio_ie) if r.nivel else False,
-                "nota_reglamento": r.descripcion_suceso or (r.nivel.descripcion if r.nivel else "")
+                "nota_reglamento": r.descripcion_suceso or (r.nivel.descripcion if r.nivel else ""),
+                # None en los reportes anteriores a que se guardara el autor.
+                "registrado_por": autores.get(r.id_reporte, (None, None))[0],
+                "rol_registra": autores.get(r.id_reporte, (None, None))[1],
             } for r in reportes
         ]
     }
@@ -753,7 +822,7 @@ def catalogo_de_faltas(db: Session = Depends(get_db),
 
 # --- tipos de falta ---
 
-@router.post("/tipos-falta")
+@router.post("/tipos-falta", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "faltas", "agregar"))])
 def crear_tipo_falta(datos: schemas.TipoFaltaGuardar, db: Session = Depends(get_db),
                      current_user: dict = Depends(require_roles("ADMIN"))):
     existe = (db.query(models.TipoFalta)
@@ -776,7 +845,7 @@ def crear_tipo_falta(datos: schemas.TipoFaltaGuardar, db: Session = Depends(get_
             "faltas": [], "total_faltas": 0, "usos": 0}
 
 
-@router.put("/tipos-falta/{id_tipo_falta}")
+@router.put("/tipos-falta/{id_tipo_falta}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "faltas", "editar"))])
 def editar_tipo_falta(id_tipo_falta: int, datos: schemas.TipoFaltaGuardar,
                       db: Session = Depends(get_db),
                       current_user: dict = Depends(require_roles("ADMIN"))):
@@ -802,7 +871,7 @@ def editar_tipo_falta(id_tipo_falta: int, datos: schemas.TipoFaltaGuardar,
     return {"id_tipo_falta": tipo.id_tipo_falta, "nombre": tipo.nombre}
 
 
-@router.delete("/tipos-falta/{id_tipo_falta}")
+@router.delete("/tipos-falta/{id_tipo_falta}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "faltas", "eliminar"))])
 def eliminar_tipo_falta(id_tipo_falta: int, db: Session = Depends(get_db),
                         current_user: dict = Depends(require_roles("ADMIN"))):
     """Solo se borra un tipo vacío.
@@ -855,7 +924,7 @@ def _falta_repetida(db: Session, id_tipo_falta: int, nombre: str,
     return q.first()
 
 
-@router.post("/faltas")
+@router.post("/faltas", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "faltas", "agregar"))])
 def crear_falta(datos: schemas.FaltaGuardar, db: Session = Depends(get_db),
                 current_user: dict = Depends(require_roles("ADMIN"))):
     _tipo_o_404(db, datos.id_tipo_falta)
@@ -871,7 +940,7 @@ def crear_falta(datos: schemas.FaltaGuardar, db: Session = Depends(get_db),
     return _falta_a_dict(falta, 0)
 
 
-@router.put("/faltas/{id_nivel_conducta}")
+@router.put("/faltas/{id_nivel_conducta}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "faltas", "editar"))])
 def editar_falta(id_nivel_conducta: int, datos: schemas.FaltaGuardar,
                  db: Session = Depends(get_db),
                  current_user: dict = Depends(require_roles("ADMIN"))):
@@ -903,7 +972,7 @@ def editar_falta(id_nivel_conducta: int, datos: schemas.FaltaGuardar,
     return _falta_a_dict(falta, usos)
 
 
-@router.delete("/faltas/{id_nivel_conducta}")
+@router.delete("/faltas/{id_nivel_conducta}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "faltas", "eliminar"))])
 def eliminar_falta(id_nivel_conducta: int, db: Session = Depends(get_db),
                    current_user: dict = Depends(require_roles("ADMIN"))):
     """No se borra una falta que ya se le puso a alguien.

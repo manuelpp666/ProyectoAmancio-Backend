@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import List
 from datetime import date, datetime
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from app.modules.users.models import Usuario 
 from app.modules.users.relacion_familiar.models import RelacionFamiliar
 from app.modules.users import models as al_models
@@ -104,7 +105,7 @@ def obtener_alumno_por_usuario(id_usuario: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="Alumno no encontrado")
     return {"id_alumno": alumno.id_alumno}
 
-@router.post("/", response_model=schemas.AlumnoResponse)
+@router.post("/", response_model=schemas.AlumnoResponse, dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "agregar"))])
 def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user) ):
     if current_user.get("rol") != "ADMIN":
@@ -118,7 +119,7 @@ def crear_alumno(alumno: schemas.AlumnoCreate, db: Session = Depends(get_db),
     db.refresh(db_alumno)
     return db_alumno
 
-@router.post("/con-familiar", status_code=status.HTTP_201_CREATED)
+@router.post("/con-familiar", status_code=status.HTTP_201_CREATED, dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "agregar"))])
 def crear_alumno_con_familiar(
     datos: schemas.AlumnoConFamiliarCreate,
     db: Session = Depends(get_db),
@@ -226,7 +227,7 @@ def listar_postulantes(
         query = _filtrar_por_busqueda(query, busqueda.strip())
     return query.all()
 
-@router.post("/decidir-admision/{id_alumno}")
+@router.post("/decidir-admision/{id_alumno}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "postulantes", "editar"))])
 def decidir_admision(
     id_alumno: int, 
     aprobado: bool, 
@@ -373,7 +374,7 @@ def obtener_detalle_postulante(id_alumno: int, db: Session = Depends(get_db), cu
 
 # ---------- EDICIÓN DEL ALUMNO Y SU USUARIO (PANEL DEL ADMINISTRADOR) ----------
 
-@router.put("/{id_alumno}")
+@router.put("/{id_alumno}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "editar"))])
 def editar_alumno(
     id_alumno: int,
     data: schemas.AlumnoUpdate,
@@ -454,7 +455,7 @@ def listar_familiares_alumno(
     return familiar_services.listar_familiares_de_alumno(db, id_alumno)
 
 
-@router.post("/{id_alumno}/familiares")
+@router.post("/{id_alumno}/familiares", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "editar"))])
 def agregar_familiar_alumno(
     id_alumno: int,
     data: familiar_schemas.FamiliarAlumnoCreate,
@@ -473,7 +474,7 @@ def agregar_familiar_alumno(
     }
 
 
-@router.put("/{id_alumno}/familiares/{id_familiar}")
+@router.put("/{id_alumno}/familiares/{id_familiar}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "editar"))])
 def editar_familiar_alumno(
     id_alumno: int,
     id_familiar: int,
@@ -510,7 +511,7 @@ def editar_familiar_alumno(
     }
 
 
-@router.delete("/{id_alumno}/familiares/{id_familiar}")
+@router.delete("/{id_alumno}/familiares/{id_familiar}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "editar"))])
 def eliminar_familiar_alumno(
     id_alumno: int,
     id_familiar: int,
@@ -523,7 +524,7 @@ def eliminar_familiar_alumno(
     return {"message": mensaje}
 
 
-@router.post("/retirar/{id_alumno}")
+@router.post("/retirar/{id_alumno}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "eliminar"))])
 def retirar_estudiante(
     id_alumno: int,
     db: Session = Depends(get_db),
@@ -575,7 +576,7 @@ def retirar_estudiante(
     }
 
 
-@router.post("/reincorporar/{id_alumno}")
+@router.post("/reincorporar/{id_alumno}", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "estudiantes", "agregar"))])
 def reincorporar_estudiante(
     id_alumno: int,
     datos: schemas.ReincorporarAlumnoRequest,

@@ -4,6 +4,7 @@ from typing import List, Optional
 from datetime import date
 
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from app.core.util.security import get_current_user
 from app.core.util.email import enviar_correos
 
@@ -380,7 +381,7 @@ def listar_solicitudes(estado: Optional[str] = None, db: Session = Depends(get_d
     return resultado
 
 
-@router.post("/solicitudes/{id_solicitud}/admitir")
+@router.post("/solicitudes/{id_solicitud}/admitir", dependencies=[Depends(requiere_permiso("gestion_estudiantes", "verano", "editar"))])
 def admitir_solicitud(id_solicitud: int, db: Session = Depends(get_db),
                       current_user: dict = Depends(get_current_user)):
     """Admisión manual: confirma el pago de verano y matricula al alumno."""
@@ -405,7 +406,7 @@ def admitir_solicitud(id_solicitud: int, db: Session = Depends(get_db),
     return {"message": "Alumno admitido y matrícula de verano creada"}
 
 
-@router.post("/evaluar-cierre/{id_anio}")
+@router.post("/evaluar-cierre/{id_anio}", dependencies=[Depends(requiere_permiso("academico", "estructura", "editar"))])
 def evaluar_cierre(id_anio: str, background: BackgroundTasks, db: Session = Depends(get_db),
                    current_user: dict = Depends(get_current_user)):
     """Ejecuta la evaluación de fin de año (desaprobados / clasificación / correos)."""

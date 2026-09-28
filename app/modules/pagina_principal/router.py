@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from app.core.util.security import get_current_user
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso_configuracion
 from . import models, schemas
 
 
@@ -20,7 +21,7 @@ def get_config_by_section(seccion: str, db: Session = Depends(get_db)):
     return config
 
 # Actualizar un valor específico por su clave (ej: /configuracion/hero_titulo)
-@router.put("/{clave}", response_model=schemas.ConfigRead)
+@router.put("/{clave}", response_model=schemas.ConfigRead, dependencies=[Depends(requiere_permiso_configuracion())])
 def update_or_create_config(
     clave: str, 
     config_update: schemas.ConfigUpdate, 

@@ -8,6 +8,7 @@ from typing import List,Optional
 from decimal import Decimal
 from sqlalchemy import func, extract, or_, and_
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from . import models, schemas
 from . import ajustes
 from app.modules.academic import models as academic_models
@@ -72,7 +73,7 @@ def listar_tipos_tramite_alumnos(db: Session = Depends(get_db), current_user: di
 
     return query.all()
 
-@router.post("/tramites-tipos/", response_model=schemas.TipoTramiteResponse)
+@router.post("/tramites-tipos/", response_model=schemas.TipoTramiteResponse, dependencies=[Depends(requiere_permiso("tramites_finanzas", "config", "agregar"))])
 def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
@@ -102,7 +103,7 @@ def crear_tipo_tramite(tramite: schemas.TipoTramiteCreate, db: Session = Depends
     db.refresh(nuevo)
     return nuevo
 
-@router.put("/tramites-tipos/{id}", response_model=schemas.TipoTramiteResponse)
+@router.put("/tramites-tipos/{id}", response_model=schemas.TipoTramiteResponse, dependencies=[Depends(requiere_permiso("tramites_finanzas", "config", "editar"))])
 def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     if current_user.get("rol") != "ADMIN":
@@ -140,7 +141,7 @@ def editar_tipo_tramite(id: int, tramite: schemas.TipoTramiteCreate, db: Session
     db.refresh(db_tramite)
     return db_tramite
 
-@router.patch("/tramites-tipos/{id}/estado")
+@router.patch("/tramites-tipos/{id}/estado", dependencies=[Depends(requiere_permiso("tramites_finanzas", "config", "editar"))])
 def cambiar_estado_tramite(id: int, activo: bool, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
@@ -305,7 +306,7 @@ def listar_mis_solicitudes(id_alumno: int, db: Session = Depends(get_db), curren
 # 3. PAGOS
 # ==========================================
 
-@router.post("/pagos/", response_model=schemas.PagoResponse)
+@router.post("/pagos/", response_model=schemas.PagoResponse, dependencies=[Depends(requiere_permiso("tramites_finanzas", "recaudacion", "agregar"))])
 def crear_pago(pago: schemas.PagoCreate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     nuevo = models.Pago(**pago.model_dump())
     db.add(nuevo)
@@ -385,7 +386,7 @@ def notificar_pago_bcp(payload: schemas.BCPWebhookPayload, db: Session = Depends
     return {"status": "SUCCESS", "message": "Sistema actualizado"}
 
 
-@router.patch("/admin/actualizar-precios-masivo")
+@router.patch("/admin/actualizar-precios-masivo", dependencies=[Depends(requiere_permiso("tramites_finanzas", "tipos_pagos", "editar"))])
 def actualizar_precios_pension(payload: schemas.ActualizacionCostosMasiva, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     """
     Actualiza el costo de las pensiones restantes del año escolar activo.
@@ -581,7 +582,7 @@ def listar_pagos_filtrados(
 
     return query.order_by(orden).all()
 
-@router.patch("/solicitudes/{id}/dictamen")
+@router.patch("/solicitudes/{id}/dictamen", dependencies=[Depends(requiere_permiso("tramites_finanzas", "solicitudes", "editar"))])
 def dar_dictamen_solicitud(id: int, payload: schemas.DictamenSolicitud, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     solicitud = db.query(models.SolicitudTramite).filter(models.SolicitudTramite.id_solicitud_tramite == id).first()
     if not solicitud:
@@ -606,7 +607,7 @@ def calcular_fecha_real(mm_dd_str: str) -> date:
 NOMBRES_MES = ["", "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
                "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"]
 
-@router.patch("/pagos/{id_pago}/confirmar-manual")
+@router.patch("/pagos/{id_pago}/confirmar-manual", dependencies=[Depends(requiere_permiso("tramites_finanzas", "recaudacion", "editar"))])
 def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
 
@@ -733,7 +734,7 @@ def confirmar_pago_manual(id_pago: int, db: Session = Depends(get_db), current_u
 
     return {"message": "Pago confirmado y pagos del año generados."}
 
-@router.put("/pagos/{id_pago}", response_model=schemas.PagoResponse)
+@router.put("/pagos/{id_pago}", response_model=schemas.PagoResponse, dependencies=[Depends(requiere_permiso("tramites_finanzas", "recaudacion", "editar"))])
 def editar_pago(id_pago: int, pago_data: schemas.PagoUpdate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     if not pago:
@@ -754,7 +755,7 @@ def editar_pago(id_pago: int, pago_data: schemas.PagoUpdate, db: Session = Depen
             detalle="Cuota editada desde el panel"))
     return pago
 
-@router.delete("/pagos/{id_pago}")
+@router.delete("/pagos/{id_pago}", dependencies=[Depends(requiere_permiso("tramites_finanzas", "recaudacion", "eliminar"))])
 def eliminar_pago(id_pago: int, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago).first()
     if not pago:
@@ -886,7 +887,7 @@ def ejecutar_generacion_mensual(db: Session = Depends(get_db), _svc: bool = Depe
 
     return {"message": f"Proceso completado. Se revisaron {total_generados} alumnos."}
 
-@router.post("/tareas/actualizar-moras")
+@router.post("/tareas/actualizar-moras", dependencies=[Depends(requiere_permiso("tramites_finanzas", "recaudacion", "editar"))])
 def actualizar_moras_diarias(db: Session = Depends(get_db), _svc: bool = Depends(require_service_key("CRON_SECRET"))):
     """
     Endpoint para ser llamado por un Cron Job diariamente a medianoche.
@@ -901,7 +902,7 @@ def actualizar_moras_diarias(db: Session = Depends(get_db), _svc: bool = Depends
 def listar_tipos_pago(db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     return db.query(models.TipoPago).all()
 
-@router.post("/tipos-pago", response_model=schemas.TipoPagoResponse)
+@router.post("/tipos-pago", response_model=schemas.TipoPagoResponse, dependencies=[Depends(requiere_permiso("tramites_finanzas", "tipos_pagos", "agregar"))])
 def crear_tipo_pago(tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     nuevo_tipo = models.TipoPago(**tipo.model_dump())
     db.add(nuevo_tipo)
@@ -909,7 +910,7 @@ def crear_tipo_pago(tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db),
     db.refresh(nuevo_tipo)
     return nuevo_tipo
 
-@router.put("/tipos-pago/{id}", response_model=schemas.TipoPagoResponse)
+@router.put("/tipos-pago/{id}", response_model=schemas.TipoPagoResponse, dependencies=[Depends(requiere_permiso("tramites_finanzas", "tipos_pagos", "editar"))])
 def editar_tipo_pago(id: int, tipo: schemas.TipoPagoCreate, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     db_tipo = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == id).first()
     if not db_tipo:
@@ -922,7 +923,7 @@ def editar_tipo_pago(id: int, tipo: schemas.TipoPagoCreate, db: Session = Depend
     db.refresh(db_tipo)
     return db_tipo
 
-@router.delete("/tipos-pago/{id}")
+@router.delete("/tipos-pago/{id}", dependencies=[Depends(requiere_permiso("tramites_finanzas", "tipos_pagos", "eliminar"))])
 def eliminar_tipo_pago(id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_roles("ADMIN"))):
     db_tipo = db.query(models.TipoPago).filter(models.TipoPago.id_tipo_pago == id).first()
     if not db_tipo:

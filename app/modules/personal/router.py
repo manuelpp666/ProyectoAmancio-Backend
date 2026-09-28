@@ -8,7 +8,7 @@ from app.modules.users.docente.models import Docente
 from app.core.util.password import get_password_hash
 from app.core.util.security import get_current_user
 from app.core.util.usuarios import generar_username
-from app.core.util.permisos import permisos_completos, normalizar
+from app.core.util.permisos import permisos_completos, normalizar, requiere_permiso, requiere_permiso_personal, requiere_permiso_sobre_usuario
 
 router = APIRouter(prefix="/personal", tags=["Gestión de Personal"])
 
@@ -50,7 +50,7 @@ def listar_personal(tipo: str, db: Session = Depends(get_db), current_user: dict
     
     return [to_response(r, tipo) for r in registros]
 
-@router.post("/{tipo}", response_model=schemas.PersonalResponse)
+@router.post("/{tipo}", response_model=schemas.PersonalResponse, dependencies=[Depends(requiere_permiso_personal("agregar"))])
 def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     
     if current_user.get("rol") != "ADMIN":
@@ -125,7 +125,7 @@ def crear_personal(tipo: str, personal: schemas.PersonalCreate, db: Session = De
     
     return to_response(nuevo_perfil, tipo)
 
-@router.put("/{tipo}/{id}", response_model=schemas.PersonalResponse)
+@router.put("/{tipo}/{id}", response_model=schemas.PersonalResponse, dependencies=[Depends(requiere_permiso_personal("editar"))])
 def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
@@ -171,7 +171,7 @@ def editar_personal(tipo: str, id: int, data: schemas.PersonalUpdate, db: Sessio
     db.refresh(perfil)
     return to_response(perfil, tipo)
 
-@router.patch("/{tipo}/{id}/estado")
+@router.patch("/{tipo}/{id}/estado", dependencies=[Depends(requiere_permiso_personal("eliminar"))])
 def cambiar_estado(tipo: str, id: int, activo: bool, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver modificar esta información")
@@ -191,7 +191,7 @@ def cambiar_estado(tipo: str, id: int, activo: bool, db: Session = Depends(get_d
     return {"message": "Estado actualizado"}
 
 
-@router.patch("/admin/{id_admin}/permisos", response_model=schemas.AdminPermisosResponse)
+@router.patch("/admin/{id_admin}/permisos", response_model=schemas.AdminPermisosResponse, dependencies=[Depends(requiere_permiso("gestion_personal", "admin", "editar"))])
 def actualizar_permisos_admin(
     id_admin: int, 
     data: schemas.AdminPermisosUpdate, 
@@ -208,6 +208,14 @@ def actualizar_permisos_admin(
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No tienes permiso para alterar privilegios")
 
+    # Nadie cambia sus propios permisos. Si no, a quien le dieran «Editar» en
+    # Administradores le bastaría con marcarse todo a sí mismo.
+    if admin.id_usuario == current_user.get("id"):
+        raise HTTPException(
+            status_code=403,
+            detail="No puedes cambiar tus propios permisos. Pídeselo a otro administrador.",
+        )
+
     # 3. Se guarda el árbol completo, no solo lo que mandó la pantalla: así una
     #    clave ausente no queda a merced del valor por defecto y lo marcado es
     #    exactamente lo único a lo que tendrá acceso.
@@ -219,7 +227,7 @@ def actualizar_permisos_admin(
     return admin
 
 
-@router.patch("/usuario/{id_usuario}/forzar-cambio-password")
+@router.patch("/usuario/{id_usuario}/forzar-cambio-password", dependencies=[Depends(requiere_permiso_sobre_usuario("editar"))])
 def toggle_forzar_cambio_password(
     id_usuario: int,
     debe_cambiar: bool,

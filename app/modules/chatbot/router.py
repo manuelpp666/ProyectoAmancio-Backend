@@ -20,6 +20,7 @@ import uuid
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from app.db.database import get_db
+from app.core.util.permisos import requiere_permiso
 from .models import Chatbot
 from .schemas import ChatbotResponse
 from app.core.util.security import get_current_user
@@ -518,7 +519,7 @@ def download_document(doc_id: int, db: Session = Depends(get_db), current_user: 
     return FileResponse(path=doc.file_path, filename=doc.filename)
 
 
-@router.delete("/delete/{doc_id}")
+@router.delete("/delete/{doc_id}", dependencies=[Depends(requiere_permiso("chatbot", "eliminar"))])
 def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
@@ -557,7 +558,7 @@ def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: di
 # ENDPOINT DE SUBIDA Y ENTRENAMIENTO
 # ==========================================================================
 
-@router.post("/upload")
+@router.post("/upload", dependencies=[Depends(requiere_permiso("chatbot", "agregar"))])
 async def upload(file: UploadFile = File(...), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     if current_user.get("rol") != "ADMIN":
         raise HTTPException(status_code=403, detail="No puedes ver esta información")
