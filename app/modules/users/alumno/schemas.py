@@ -8,6 +8,9 @@ from app.modules.users.familiar.schemas import FamiliarAlumnoCreate
 class UsuarioEnAlumno(BaseModel):
     activo: bool
     username: Optional[str] = None
+    # Para la columna "Cambio de contraseña" de Gestión de Estudiantes, la
+    # misma que tiene Gestión de Personal.
+    debe_cambiar_password: bool = False
     model_config = ConfigDict(from_attributes=True)
 
 def _validar_edad_escolar(v: Optional[date]) -> Optional[date]:

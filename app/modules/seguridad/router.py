@@ -18,7 +18,7 @@ Dos cosas que se miran juntas cuando algo va mal con una cuenta:
 from __future__ import annotations
 
 import html
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
@@ -36,6 +36,15 @@ from .models import IntentoAcceso, SolicitudAcceso
 from .schemas import SolicitudAccesoAtender, SolicitudAccesoCreate
 
 router = APIRouter(prefix="/seguridad", tags=["Seguridad"])
+
+
+def _desde(dias: int) -> datetime:
+    """Inicio del periodo del registro de accesos, en días de calendario.
+
+    «Hoy» es desde la medianoche, no las últimas 24 horas: a las 8 de la mañana
+    no debe traer lo de anoche. «7 días» es hoy y los seis anteriores enteros.
+    """
+    return datetime.combine(date.today() - timedelta(days=dias - 1), time.min)
 
 
 def _fila(i: IntentoAcceso) -> dict:
@@ -56,21 +65,55 @@ def listar_accesos(dias: int = Query(7, ge=1, le=90),
                    username: Optional[str] = None,
                    solo_fallos: bool = False,
                    solo_aciertos: bool = False,
-                   limite: int = Query(200, ge=1, le=1000),
+                   dni: Optional[str] = Query(None, max_length=15),
+                   pagina: int = Query(1, ge=1),
+                   por_pagina: int = Query(50, ge=10, le=200),
                    db: Session = Depends(get_db),
                    current_user: dict = Depends(require_roles("ADMIN"))):
-    desde = datetime.now() - timedelta(days=dias)
+    # Antes se devolvían los 200 más recientes y ya. Con cientos de alumnos
+    # entrando cada día, esos 200 caían todos en el mismo día, así que cambiar
+    # entre «Hoy», «7 días» o «90 días» movía los contadores pero la lista
+    # seguía idéntica. Ahora se pagina todo el periodo.
+    desde = _desde(dias)
     q = db.query(IntentoAcceso).filter(IntentoAcceso.fecha >= desde)
 
     if username:
         q = q.filter(IntentoAcceso.username.ilike(f"%{username}%"))
+
+    # Búsqueda por DNI. Todos los usuarios son PREFIJO-DNI (ALU-, DOC-, ADM-,
+    # AUX-, PSI-), así que basta buscarlo dentro del usuario. Se busca en lo que
+    # se ESCRIBIÓ al intentar entrar, no en la cuenta: así también salen los
+    # intentos con el prefijo equivocado o con un usuario que no existe, que
+    # son justo los que interesan cuando alguien prueba contraseñas.
+    dni = (dni or "").strip()
+    if dni:
+        if not dni.isdigit():
+            raise HTTPException(status_code=400, detail="El DNI solo puede contener números.")
+        q = q.filter(IntentoAcceso.username.like(f"%{dni}%"))
+
+    # Totales de lo buscado, antes de filtrar por resultado: con un DNI puesto,
+    # las tarjetas de entradas y fallos hablan de ese DNI y no del colegio entero.
+    totales = None
+    if dni:
+        aciertos = q.filter(IntentoAcceso.exito.is_(True)).count()
+        fallos = q.filter(IntentoAcceso.exito.is_(False)).count()
+        totales = {"aciertos": aciertos, "fallos": fallos}
+
     if solo_fallos:
         q = q.filter(IntentoAcceso.exito.is_(False))
     elif solo_aciertos:
         q = q.filter(IntentoAcceso.exito.is_(True))
 
-    filas = q.order_by(desc(IntentoAcceso.fecha)).limit(limite).all()
-    return {"dias": dias, "total": len(filas),
+    total = q.count()
+    paginas = max(1, -(-total // por_pagina))
+    # Si se pide una página que ya no existe (el filtro redujo los resultados),
+    # se devuelve la última en vez de una lista vacía engañosa.
+    pagina = min(pagina, paginas)
+    filas = (q.order_by(desc(IntentoAcceso.fecha), desc(IntentoAcceso.id_intento))
+             .offset((pagina - 1) * por_pagina).limit(por_pagina).all())
+    return {"dias": dias, "desde": desde.strftime("%d/%m/%Y"),
+            "total": total, "pagina": pagina, "paginas": paginas,
+            "por_pagina": por_pagina, "totales_busqueda": totales,
             "accesos": [_fila(f) for f in filas]}
 
 
@@ -79,7 +122,7 @@ def resumen(dias: int = Query(7, ge=1, le=90),
             db: Session = Depends(get_db),
             current_user: dict = Depends(require_roles("ADMIN"))):
     """Lo que conviene mirar de un vistazo."""
-    desde = datetime.now() - timedelta(days=dias)
+    desde = _desde(dias)
     base = db.query(IntentoAcceso).filter(IntentoAcceso.fecha >= desde)
 
     aciertos = base.filter(IntentoAcceso.exito.is_(True)).count()
