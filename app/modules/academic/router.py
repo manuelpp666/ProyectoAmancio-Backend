@@ -261,6 +261,10 @@ def editar_anio(anio_id: str, datos: EditarAnioRequest, background_tasks: Backgr
     consultas.olvidar_anio_activo()
     actualizar_estado_anios(db, background_tasks)
 
+    # Sin bimestres guardados, el año se reparte en cuatro tramos según sus
+    # fechas, y en verano es un tramo único: cambiarlas también mueve reportes.
+    conducta = _reacomodar_conducta(db, anio_id)
+
     # Al cambiar las fechas, las pensiones pendientes que quedaron fuera del nuevo
     # rango de meses ya no tienen sentido: se limpian automáticamente para los
     # alumnos matriculados en este año (respeta verano y no toca pensiones pagadas).
@@ -273,7 +277,8 @@ def editar_anio(anio_id: str, datos: EditarAnioRequest, background_tasks: Backgr
     if ids_alumnos:
         eliminadas = FinanceService.limpiar_pensiones_fuera_de_rango(db, ids_alumnos=ids_alumnos)
 
-    return {"message": "Año académico actualizado correctamente", "pensiones_fuera_de_rango_eliminadas": eliminadas}
+    return {"message": "Año académico actualizado correctamente", "pensiones_fuera_de_rango_eliminadas": eliminadas,
+            "conducta": conducta}
 
 @router.patch("/anios/{anio_id}/inscripciones", dependencies=[Depends(requiere_permiso("academico", "estructura", "editar"))])
 def configurar_inscripciones(anio_id: str, fechas: schemas.InscripcionUpdate, db: Session = Depends(get_db),
@@ -465,7 +470,28 @@ def guardar_bimestres(anio_id: str, datos: schemas.BimestresUpdate, db: Session 
 
     db.commit()
 
-    return schemas.BimestresResponse(id_anio_escolar=anio_id, guardado=True, bimestres=ordenados)
+    return schemas.BimestresResponse(id_anio_escolar=anio_id, guardado=True, bimestres=ordenados,
+                                     conducta=_reacomodar_conducta(db, anio_id))
+
+
+def _reacomodar_conducta(db: Session, anio_id: str) -> Optional[dict]:
+    """Pasa las notas de conducta al bimestre que les toca con las fechas nuevas.
+
+    Va aparte y después del commit de las fechas: si fallara, las fechas ya
+    quedaron guardadas y basta con volver a guardar para reintentarlo. Devuelve
+    None en ese caso, para que la pantalla avise.
+    """
+    from app.modules.behavior.reacomodo import reacomodar_notas_conducta
+    try:
+        resumen = reacomodar_notas_conducta(db, anio_id)
+        db.commit()
+        if any(resumen.values()):
+            print(f"[CONDUCTA] Año {anio_id}, notas reacomodadas a las fechas nuevas: {resumen}")
+        return resumen
+    except Exception as e:
+        db.rollback()
+        print(f"[CONDUCTA] No se pudieron reacomodar las notas del año {anio_id}: {e}")
+        return None
 
 
 # NOTA: el cierre de año ya NO es manual. Ocurre automáticamente cuando pasa la

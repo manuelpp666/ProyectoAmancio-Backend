@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List
+from typing import Dict, Optional, List
 from datetime import date
 
 # --- Año Escolar ---
@@ -50,6 +50,10 @@ class BimestresResponse(BaseModel):
     id_anio_escolar: str
     guardado: bool
     bimestres: List[BimestreItem]
+    # Solo al guardar: cuántas notas de conducta se movieron al bimestre que
+    # les toca con las fechas nuevas (creadas/corregidas/eliminadas/respetadas).
+    # None si no se pudo hacer; volver a guardar lo reintenta.
+    conducta: Optional[Dict[str, int]] = None
 
 # --- Nivel ---
 class NivelBase(BaseModel):

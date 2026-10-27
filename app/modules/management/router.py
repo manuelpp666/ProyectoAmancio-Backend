@@ -21,6 +21,7 @@ from app.modules.users.relacion_familiar import models as models_rel
 from app.core.util.security import get_current_user, ensure_owner_or_roles
 from .service import enviar_notificaciones_asistencia, ESTADOS_NOTIFICABLES
 from . import models, schemas
+from . import notas_automaticas
 
 
 router = APIRouter(prefix="/gestion", tags=["Gestión Académica"])
@@ -806,6 +807,20 @@ def cerrar_notas_bimestre(
         resumen.promedio_final = round((b1 + b2 + b3 + b4) / 4.0, 2)
 
     db.commit()
+
+    # Con la primera nota real del bimestre en esta sección, los cursos que no
+    # se dictan (Arte y Pintura, Tutoría...) reciben su 20. Va aparte y después
+    # del commit: si fallara, el cierre del docente ya está guardado.
+    try:
+        creadas = notas_automaticas.rellenar(db, carga.id_anio_escolar,
+                                             id_seccion=carga.id_seccion, bimestre=bimestre)
+        db.commit()
+        if creadas:
+            print(f"[NOTAS AUTOMÁTICAS] Sección {carga.id_seccion}, bimestre {bimestre}: {creadas} notas de 20.")
+    except Exception as e:
+        db.rollback()
+        print(f"[NOTAS AUTOMÁTICAS] Error al rellenar tras cerrar la carga {id_carga}: {e}")
+
     return {"message": f"Bimestre {bimestre} cerrado exitosamente para la carga {id_carga}"}
 # --- Asignación de Docentes ---
 

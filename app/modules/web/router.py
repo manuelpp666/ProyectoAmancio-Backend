@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+import re
+from typing import List, Optional
 from app.db.database import get_db
 from app.core.util.permisos import requiere_permiso
 from . import models, schemas
@@ -24,6 +25,19 @@ def obtener_anio_activo_publico(db: Session = Depends(get_db)):
         academic_models.AnioEscolar.fecha_fin >= hoy
     ).first()
     return {"tipo": anio.tipo if anio else "REGULAR", "activo": anio is not None}
+
+
+def _anio_visible(anio_escolar) -> Optional[int]:
+    """El año que se le enseña a las familias en el botón de admisión.
+
+    El id del año lo elige el administrador y puede ser «2027-1», que no es un
+    texto para el público. Se toma el año de la fecha de inicio de clases; si
+    faltara, los cuatro primeros dígitos del id.
+    """
+    if getattr(anio_escolar, "fecha_inicio", None):
+        return anio_escolar.fecha_inicio.year
+    digitos = re.search(r"\d{4}", str(anio_escolar.id_anio_escolar or ""))
+    return int(digitos.group()) if digitos else None
 
 
 @router.get("/estado-admision")
@@ -50,6 +64,7 @@ def estado_admision_publico(db: Session = Depends(get_db)):
         inscripciones = [
             {
                 "id_anio_escolar": a.id_anio_escolar,
+                "anio": _anio_visible(a),
                 "tipo": a.tipo,
                 "fin_inscripcion": a.fin_inscripcion,
             }
@@ -75,6 +90,7 @@ def estado_admision_publico(db: Session = Depends(get_db)):
         return {
             "abierto": False,
             "tipo": proxima.tipo,
+            "anio": _anio_visible(proxima),
             "proxima_inscripcion": proxima.inicio_inscripcion,
         }
 

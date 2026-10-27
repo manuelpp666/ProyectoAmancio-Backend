@@ -95,6 +95,7 @@ load_dotenv()
 config.verificar()
 print(f"⚙️  {config.resumen()}")
 
+import asyncio
 import anyio
 from contextlib import asynccontextmanager
 
@@ -114,7 +115,27 @@ async def ciclo_de_vida(app: FastAPI):
     """
     anyio.to_thread.current_default_thread_limiter().total_tokens = config.HILOS_PETICIONES
     socket_manager_mod.avisar_si_hay_varios_workers()
+    # Repaso de los 20 de los cursos que no se dictan, por si algún bimestre se
+    # quedó sin ellos. En segundo plano: el backend atiende desde el primer
+    # segundo y, si esto falla, solo se anota en el log.
+    repaso = asyncio.create_task(anyio.to_thread.run_sync(_rellenar_notas_automaticas))
     yield
+    repaso.cancel()
+
+
+def _rellenar_notas_automaticas() -> None:
+    from app.db.database import SessionLocal
+    from app.modules.management import notas_automaticas
+    db = SessionLocal()
+    try:
+        creadas = notas_automaticas.rellenar_anios_activos(db)
+        db.commit()
+        print(f"[NOTAS AUTOMÁTICAS] Repaso al arrancar: {creadas} notas de 20 creadas.")
+    except Exception as e:
+        db.rollback()
+        print(f"[NOTAS AUTOMÁTICAS] Repaso al arrancar falló: {e}")
+    finally:
+        db.close()
 
 # En producción la documentación interactiva queda desactivada: publica el
 # esquema completo de la API sin pedir credenciales.
