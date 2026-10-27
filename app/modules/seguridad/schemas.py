@@ -36,6 +36,27 @@ def _solo_digitos(texto: str) -> str:
     return _NO_DIGITOS.sub("", texto or "")
 
 
+def limpiar_dni(v: str) -> str:
+    """El DNI con solo sus cifras, o ValueError con un motivo para la persona.
+
+    La usan también la recuperación de contraseña: las dos pantallas piden el
+    DNI a alguien que no puede entrar y tienen que aceptar y rechazar lo mismo.
+    """
+    limpio = _solo_digitos(v)
+    if not limpio:
+        raise ValueError("Escribe tu DNI.")
+    if len(limpio) != DNI_LARGO:
+        # Se dice cuántas cifras puso: casi siempre es una de más o una de
+        # menos, y así lo ve sin tener que contarlas.
+        raise ValueError(
+            f"El DNI tiene {DNI_LARGO} cifras y escribiste {len(limpio)}.")
+    if limpio == limpio[0] * DNI_LARGO:
+        raise ValueError("Ese DNI no es válido: son ocho cifras iguales.")
+    if limpio == "12345678":
+        raise ValueError("Escribe tu DNI real, no un ejemplo.")
+    return limpio
+
+
 class SolicitudAccesoCreate(BaseModel):
     dni: str = Field(..., description="Los 8 dígitos del DNI")
     telefono: str = Field(..., description="Teléfono de contacto")
@@ -44,19 +65,7 @@ class SolicitudAccesoCreate(BaseModel):
     @field_validator("dni")
     @classmethod
     def validar_dni(cls, v: str) -> str:
-        limpio = _solo_digitos(v)
-        if not limpio:
-            raise ValueError("Escribe tu DNI.")
-        if len(limpio) != DNI_LARGO:
-            # Se dice cuántas cifras puso: casi siempre es una de más o una de
-            # menos, y así lo ve sin tener que contarlas.
-            raise ValueError(
-                f"El DNI tiene {DNI_LARGO} cifras y escribiste {len(limpio)}.")
-        if limpio == limpio[0] * DNI_LARGO:
-            raise ValueError("Ese DNI no es válido: son ocho cifras iguales.")
-        if limpio == "12345678":
-            raise ValueError("Escribe tu DNI real, no un ejemplo.")
-        return limpio
+        return limpiar_dni(v)
 
     @field_validator("telefono")
     @classmethod

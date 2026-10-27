@@ -83,6 +83,7 @@ from app.modules.personal import router as personal_router
 from app.modules.verano import router as verano_router
 from app.modules.mantenimiento import router as mantenimiento_router
 from app.modules.multimedia import router as multimedia_router
+from app.modules.recuperacion import router as recuperacion_router
 from app.core.util import media as media_util
 from app.core.socket_manager import socket_manager
 from app.core import socket_manager as socket_manager_mod
@@ -243,6 +244,7 @@ app.include_router(seguridad_router.router)
 app.include_router(mantenimiento_router.router)
 app.include_router(verano_router.router)
 app.include_router(multimedia_router.router)
+app.include_router(recuperacion_router.router)
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: int):
