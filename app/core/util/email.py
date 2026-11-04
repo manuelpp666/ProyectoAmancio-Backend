@@ -29,8 +29,14 @@ load_dotenv()
 
 logger = logging.getLogger("email")
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_HOST = (os.getenv("SMTP_HOST") or "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+
+# En el hosting compartido, la aplicación no puede conectarse al servidor de
+# correo por su nombre público (mail.amanciovarona.com:465 da "Connection
+# refused": cPanel restringe el SMTP saliente de las aplicaciones), pero sí al
+# de la propia máquina. Para eso se pone SMTP_HOST=localhost en el .env.
+_ES_LOCAL = SMTP_HOST.lower() in ("localhost", "127.0.0.1", "::1")
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Colegio Amancio Varona")
@@ -99,15 +105,94 @@ def _crear_mensaje(destinatario: str, asunto: str, html: str, texto_plano: str |
     return mensaje
 
 
-def _conectar():
+def _contexto_tls(local: bool) -> ssl.SSLContext:
+    """Contexto TLS. Con un servidor remoto se verifica el certificado, siempre.
+
+    Con localhost no se puede: el certificado es del nombre público
+    (mail.amanciovarona.com) y nunca coincidirá con "localhost". Ahí se cifra
+    igual pero sin comprobar el nombre; es seguro porque la conexión no sale de
+    la máquina y nadie puede ponerse en medio.
+    """
+    contexto = ssl.create_default_context()
+    if local:
+        contexto.check_hostname = False
+        contexto.verify_mode = ssl.CERT_NONE
+    return contexto
+
+
+def _abrir(host: str, puerto: int, local: bool):
     """Abre una conexión SMTP autenticada (SSL o STARTTLS según el puerto)."""
-    if SMTP_PORT == 465:
-        servidor = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context(), timeout=20)
+    # El servidor de la propia máquina contesta al instante o no contesta: con
+    # 20 s por intento, probar los tres puertos podía dejar a la persona más de
+    # un minuto mirando "Enviando código..." y que el hosting cortara antes.
+    espera = 5 if local else 20
+    if puerto == 465:
+        servidor = smtplib.SMTP_SSL(host, puerto, context=_contexto_tls(local), timeout=espera)
     else:
-        servidor = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
-        servidor.starttls(context=ssl.create_default_context())
+        servidor = smtplib.SMTP(host, puerto, timeout=espera)
+        servidor.ehlo()
+        if servidor.has_extn("starttls"):
+            servidor.starttls(context=_contexto_tls(local))
+            servidor.ehlo()
+        elif not local:
+            # A un servidor remoto no se le manda la contraseña sin cifrar.
+            servidor.close()
+            raise smtplib.SMTPNotSupportedError(
+                f"{host}:{puerto} no ofrece STARTTLS; no se envía la contraseña sin cifrar")
     servidor.login(SMTP_USER, SMTP_PASSWORD)
     return servidor
+
+
+# Si el servidor configurado no acepta la conexión, se prueba el servidor de
+# correo de la propia máquina, en este orden. Solo puertos por debajo de 1024:
+# en Linux únicamente el sistema (root) puede escuchar en ellos, así que lo que
+# responda ahí es el servidor de correo del hosting y no un programa de otro
+# usuario al que se le estaría entregando la contraseña.
+_PUERTOS_LOCALES = (587, 465, 25)
+
+# La vía que funcionó, para no repetir los intentos fallidos en cada correo.
+_via_buena: tuple | None = None
+
+
+def _conectar():
+    """Conecta por la vía del .env y, si el hosting la rechaza, por localhost.
+
+    Solo se cambia de vía cuando la conexión ni siquiera se abre (rechazada,
+    sin respuesta o nombre desconocido). Una contraseña incorrecta o un
+    certificado inválido no son problemas de camino y se informan tal cual.
+    """
+    global _via_buena
+    if _via_buena:
+        try:
+            return _abrir(*_via_buena)
+        except (ConnectionError, TimeoutError, OSError) as e:
+            if isinstance(e, smtplib.SMTPException):
+                raise
+            _via_buena = None   # dejó de funcionar: se vuelve a buscar
+
+    try:
+        servidor = _abrir(SMTP_HOST, SMTP_PORT, _ES_LOCAL)
+        _via_buena = (SMTP_HOST, SMTP_PORT, _ES_LOCAL)
+        return servidor
+    except (ConnectionError, TimeoutError, OSError) as e:
+        # SMTPException hereda de OSError: un rechazo del propio servidor
+        # (usuario, contraseña) no se arregla cambiando de camino.
+        if isinstance(e, (smtplib.SMTPException, ssl.SSLError)) or _ES_LOCAL:
+            raise
+        error_original = e
+
+    for puerto in _PUERTOS_LOCALES:
+        try:
+            servidor = _abrir("localhost", puerto, True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[CORREO] localhost:{puerto} tampoco sirve: {type(e).__name__}: {e}")
+            continue
+        _via_buena = ("localhost", puerto, True)
+        print(f"[CORREO] {SMTP_HOST}:{SMTP_PORT} no acepta la conexión desde este servidor "
+              f"({type(error_original).__name__}); se envía por localhost:{puerto}. "
+              f"Para ir directo, pon SMTP_HOST=localhost y SMTP_PORT={puerto} en el .env.")
+        return servidor
+    raise error_original
 
 
 def _conectar_con_reintentos():
@@ -141,9 +226,12 @@ def enviar_correo(destinatario: str, asunto: str, html: str, texto_plano: str | 
     """
     if not smtp_configurado():
         logger.warning("SMTP no configurado: se omite el envío de correo a %s", destinatario)
+        print(f"[CORREO][ERROR] SMTP_USER o SMTP_PASSWORD vacíos en el .env: "
+              f"no se envía nada (destinatario {destinatario}).")
         return False
     if not destinatario or "@" not in destinatario:
         logger.warning("Destinatario de correo inválido: %r", destinatario)
+        print(f"[CORREO][ERROR] Destinatario inválido: {destinatario!r}")
         return False
 
     try:
@@ -152,6 +240,11 @@ def enviar_correo(destinatario: str, asunto: str, html: str, texto_plano: str | 
         return True
     except Exception as e:  # noqa: BLE001
         logger.error("Error enviando correo a %s: %s", destinatario, e)
+        # El logging no tiene salida configurada en el servidor, así que el
+        # motivo se perdía y solo quedaba "no se pudo enviar". Con print llega
+        # al log de la aplicación, como el resto de avisos del backend.
+        print(f"[CORREO][ERROR] No se pudo enviar a {destinatario} vía "
+              f"{SMTP_HOST}:{SMTP_PORT}: {type(e).__name__}: {e}")
         return False
 
 

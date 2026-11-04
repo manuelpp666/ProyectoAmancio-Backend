@@ -283,14 +283,19 @@ def _anular_pendientes(db: Session, id_usuario: int) -> None:
 
 def crear_codigo(db: Session, usuario: Usuario, dni: str, ip: Optional[str],
                  user_agent: Optional[str]) -> tuple:
-    """(fila, código). Anula los anteriores: solo vale el último que llegó."""
+    """(fila, código).
+
+    Los códigos anteriores NO se anulan: el correo tarda a veces un minuto o
+    dos, la persona pide otro mientras tanto, y el primero llega antes. Si solo
+    valiera el último, escribiría el que tiene delante y le saldría "código
+    incorrecto". Ver `codigos_vigentes`.
+    """
     ahora = datetime.now()
     # Limpieza de paso: lo de hace más de un mes ya no sirve ni para revisar.
     limite = ahora - timedelta(days=RETENCION_DIAS)
     db.query(RecuperacionCodigo).filter(RecuperacionCodigo.fecha < limite).delete(synchronize_session=False)
     db.query(RecuperacionConsulta).filter(RecuperacionConsulta.fecha < limite).delete(synchronize_session=False)
 
-    _anular_pendientes(db, usuario.id_usuario)
     codigo = f"{secrets.randbelow(10 ** 6):06d}"
     fila = RecuperacionCodigo(
         id_usuario=usuario.id_usuario, dni=dni,
@@ -303,8 +308,13 @@ def crear_codigo(db: Session, usuario: Usuario, dni: str, ip: Optional[str],
     return fila, codigo
 
 
-def codigo_vigente(db: Session, id_usuario: int) -> Optional[RecuperacionCodigo]:
-    """El último código enviado y sin usar, bloqueado para esta petición.
+def codigos_vigentes(db: Session, id_usuario: int) -> list:
+    """Los códigos enviados, sin usar y sin vencer, del más nuevo al más viejo.
+
+    Vale cualquiera de ellos (como mucho 3, por el límite de la hora). Los
+    intentos, en cambio, se cuentan una sola vez para todos, en el más nuevo:
+    así pedir otro código no multiplica los intentos de adivinar. En el peor
+    caso son 5 intentos contra 3 códigos: 1 entre ~66 000 por cada código pedido.
 
     El bloqueo (FOR UPDATE) evita que dos peticiones a la vez cuenten el mismo
     intento o canjeen dos veces el mismo código.
@@ -314,9 +324,10 @@ def codigo_vigente(db: Session, id_usuario: int) -> Optional[RecuperacionCodigo]
                     RecuperacionCodigo.enviado.is_(True),
                     RecuperacionCodigo.anulado.is_(False),
                     RecuperacionCodigo.verificado_en.is_(None),
-                    RecuperacionCodigo.usado_en.is_(None))
-            .order_by(RecuperacionCodigo.fecha.desc())
-            .with_for_update().first())
+                    RecuperacionCodigo.usado_en.is_(None),
+                    RecuperacionCodigo.expira > datetime.now())
+            .order_by(RecuperacionCodigo.fecha.desc(), RecuperacionCodigo.id_codigo.desc())
+            .with_for_update().all())
 
 
 def permiso_vigente(db: Session, id_usuario: int, permiso: str) -> Optional[RecuperacionCodigo]:

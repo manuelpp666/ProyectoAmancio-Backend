@@ -143,20 +143,28 @@ def verificar_codigo(datos: VerificarCodigo, request: Request, db: Session = Dep
     ip = _preparar(db, request)
     try:
         usuario = _cuenta_o_404(db, datos.dni, datos.rol, ip)
-        fila = service.codigo_vigente(db, usuario.id_usuario)
+        vigentes = service.codigos_vigentes(db, usuario.id_usuario)
         ahora = datetime.now()
         # 410: no hay nada que reintentar con este código, hace falta otro.
-        if fila is None or fila.expira <= ahora:
+        if not vigentes:
             db.rollback()
             raise HTTPException(status_code=410,
                                 detail="Tu código venció o ya no es válido. Pide uno nuevo.")
 
-        if not secrets.compare_digest(fila.codigo_hash,
-                                      service.huella_codigo(usuario.id_usuario, datos.codigo)):
-            fila.intentos = (fila.intentos or 0) + 1
-            quedan = service.MAX_INTENTOS - fila.intentos
+        huella = service.huella_codigo(usuario.id_usuario, datos.codigo)
+        # Se comparan todos, sin cortar al primero que coincide: así el tiempo
+        # de respuesta no delata cuál de los códigos era.
+        aciertos = [f for f in vigentes if secrets.compare_digest(f.codigo_hash, huella)]
+        fila = aciertos[0] if aciertos else None
+
+        if fila is None:
+            # Los intentos se llevan en el código más nuevo y valen para todos.
+            contador = vigentes[0]
+            contador.intentos = (contador.intentos or 0) + 1
+            quedan = service.MAX_INTENTOS - contador.intentos
             if quedan <= 0:
-                fila.anulado = True
+                for f in vigentes:
+                    f.anulado = True
             db.commit()
             if quedan <= 0:
                 raise HTTPException(status_code=410,
@@ -170,6 +178,11 @@ def verificar_codigo(datos: VerificarCodigo, request: Request, db: Session = Dep
         fila.verificado_en = ahora
         fila.token_hash = service.huella_permiso(permiso)
         fila.token_expira = ahora + timedelta(minutes=service.PERMISO_MINUTOS)
+        # Acertado uno, los demás ya no sirven: no quedan códigos sueltos
+        # válidos en el correo de nadie.
+        for f in vigentes:
+            if f is not fila:
+                f.anulado = True
         db.commit()
     except SQLAlchemyError as e:
         db.rollback()

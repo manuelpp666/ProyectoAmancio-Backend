@@ -51,7 +51,8 @@ class RecuperacionCodigo(Base):
     # Si el correo no llegó a salir, el código no cuenta para el límite del
     # DNI: con el correo caído, la persona no debe quedarse sin intentos.
     enviado = Column(Boolean, nullable=False, default=False)
-    # Pedir otro código, agotar los intentos o cambiar la contraseña lo anula.
+    # Agotar los intentos, acertar otro código o cambiar la contraseña lo
+    # anula. Pedir otro código NO: el correo puede llegar tarde.
     anulado = Column(Boolean, nullable=False, default=False)
     verificado_en = Column(DateTime, nullable=True)
     token_hash = Column(String(64), nullable=True)
